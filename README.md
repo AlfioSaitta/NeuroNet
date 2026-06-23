@@ -1,10 +1,10 @@
 ---
 
-# 🚀 Ecosistema AI Omnisciente — Chameleon Cognitive Stack
+# NeuroNet — AI Cognitive Proxy
 
-Questo repository ospita l'architettura di un ecosistema di Intelligenza Artificiale locale di livello Enterprise sviluppato per **Collateral Studios**. Il cuore del sistema è **Jarvis** (Collateral Studios Agent), un **Cognitive Proxy** asincrono che unisce la memoria episodica a lungo termine, il RAG (Retrieval-Augmented Generation) documentale AST-aware sul codice sorgente locale, un bot Telegram integrato, un loop agentico autonomo con tool-calling e capacità di esplorazione web automatizzata in tempo reale.
+Questo repository ospita l'architettura di un ecosistema di Intelligenza Artificiale locale di livello Enterprise. Il cuore del sistema è **Jarvis**, un **Cognitive Proxy** asincrono che unisce memoria episodica a lungo termine, RAG (Retrieval-Augmented Generation) AST-aware sul codice sorgente locale, un bot Telegram integrato, un loop agentico autonomo con tool-calling e capacità di esplorazione web automatizzata in tempo reale.
 
-L'inferenza gira **in-process** tramite `llama-cpp-python` su modelli GGUF locali (**nessun container Ollama** — mai): il proxy carica i pesi direttamente in VRAM all'avvio e li mantiene caldi per tutta la durata del processo. L'intera infrastruttura garantisce la totale privacy dei dati (Zero-Data-Leak), latenze minime e portabilità assoluta.
+L'inferenza gira **in-process** tramite `llama-cpp-python` su modelli GGUF locali (**nessun container Ollama**): il proxy carica i pesi direttamente in VRAM all'avvio e li mantiene caldi per tutta la durata del processo. L'intera infrastruttura garantisce la totale privacy dei dati (Zero-Data-Leak), latenze minime e portabilità assoluta.
 
 L'architettura supporta una topologia **Master/Worker Edge-Cloud** connessa tramite **VPN Mesh Tailscale (WireGuard)**: un nodo *Master* sulla VPS ospita memoria, RAG, database vettoriale e il Bot Telegram (sempre disponibile), mentre un nodo *Worker* locale (dotato di GPU) riceve in offloading le inferenze pesanti.
 
@@ -13,15 +13,32 @@ L'architettura supporta una topologia **Master/Worker Edge-Cloud** connessa tram
 
 ---
 
-## 🚦 Stato del Sistema (al 2026-06-22)
+## 🚦 Stato del Sistema (al 2026-06-23)
 
 | Componente | Stato | Note |
 |---|---|---|
-| **Istanza Locale (Worker)** | ✅ **ONLINE** | Qwen3.5-4B su GPU (19/32 layer, ~3.5GB VRAM), Qdrant+Mem0+RAG attivi |
+| **Worker GPU (Locale)** | ✅ **ONLINE** | Qwen3.5-4B-UD Q4_K_XL, n_gpu_layers=15, flash_attn=true, CUDA 13.0 overlay |
 | **VPS Master** | ⏳ Da deployare | Deployment in preparazione — piano completo pronto |
-| Modello Worker (Qwen3.5-4B) | ✅ **Definitivo** | Unico modello che entra in 4GB VRAM; Gemma 4 E2B incompatibile (418 tensori Q4_0) |
-| Modello Master (Gemma 4 26B A4B) | ⏳ Da scaricare | `gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf` (~14.2GB) |
-| Watchdog filesystem | ✅ **FIXATO** | PollingObserver + inode tracking os.walk + cleanup nested symlink |
+| **Container CUDA** | ✅ **FUNZIONANTE** | Overlay CUDA 13.0 su base 12.2 per compatibilità driver NVIDIA 580.159.03 |
+| **GPU** | ✅ **Inferenza OK** | Chat: 47% VRAM (1924MiB), Embed: 57% VRAM (2320MiB), 86°C peak |
+
+---
+
+## ⚠️ Compatibilità CUDA — Nota Critica
+
+Il container usa `nvidia/cuda:12.2.2-devel-ubuntu22.04` come base con overlay dei pacchetti **CUDA 13.0** da repository NVIDIA:
+
+```dockerfile
+RUN apt-get install -y cuda-compiler-13-0 cuda-cudart-dev-13-0 libcublas-dev-13-0
+```
+
+**Perché?** Il driver host (NVIDIA 580.159.03) supporta CUDA 13.0. Il runtime CUDA 12.2 del container base è incompatibile e causa crash GPU `ggml_cuda_can_mul_mat`. L'overlay CUDA 13.0 risolve il problema permettendo a `llama-cpp-python` di linkare correttamente le librerie CUDA 13.0 durante la compilazione con `-DGGML_CUDA=on`.
+
+**Se il container non si avvia o crasha all'inferenza**, verificare:
+```bash
+nvidia-smi           # CUDA Version deve corrispondere ai pacchetti overlay
+docker logs jarvis_worker | grep -i cuda
+```
 
 ---
 
@@ -31,7 +48,7 @@ L'architettura supporta una topologia **Master/Worker Edge-Cloud** connessa tram
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  VPS Debian (OVH) — 51.38.135.179                           │
+│  VPS Debian (OVH)                                            │
 │  8 vCore, 24GB RAM, NO GPU                                  │
 │                                                             │
 │  Nodo MASTER (sempre online):                               │
@@ -53,7 +70,7 @@ L'architettura supporta una topologia **Master/Worker Edge-Cloud** connessa tram
 │                          TELEGRAM_ENABLED=false             │
 │                                                             │
 │  Nodo WORKER GPU (Offline — standalone):                    │
-│  └── jarvis_worker:8000  QDRANT_HOST=qdrant_local           │
+│  └── jarvis_worker:8000  QDRANT_HOST=localhost              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -63,7 +80,6 @@ Il bot Telegram è centralizzato sul nodo **Master (VPS)** per garantire disponi
 
 - **Master (VPS):** `TELEGRAM_ENABLED=true` — gestisce Bot ufficiale e tutti gli Userbot.
 - **Worker (Laptop):** `TELEGRAM_ENABLED=false` — mai abilitare qui; causa conflitti di sessione.
-- **Migrazione Userbot:** per spostare sessioni esistenti: copiare `data/jarvis_mem0/userbots/` dal laptop alla VPS.
 
 ### Flusso Inferenza e Failover
 
@@ -90,13 +106,13 @@ Master jarvis:8000
 
 ```text
 jarvis/
-├── Dockerfile                    # nvidia/cuda + Python 3.11 + llama-cpp-python (CUBLAS) + Granian
+├── Dockerfile                    # nvidia/cuda:12.2.2 + CUDA 13.0 overlay + llama-cpp-python (GGML_CUDA=on)
 ├── requirements.txt              # Dipendenze Python
-├── config.py                     # ⚙️ Configurazione centralizzata — UNICA fonte di verità per costanti
+├── config.py                     # ⚙️ Configurazione centralizzata
 ├── state.py                      # Stato mutabile globale (singleton, popolato nel lifespan)
 ├── llm_engine.py                 # LlamaEngine (GGUF in-process), PriorityLock, offloading GPU
-├── main.py                       # Entry point FastAPI, lifespan, endpoint HTTP (API Ollama-compat)
-├── rag.py                        # Pipeline RAG: AST chunking, ingestion, ricerca, watchdog
+├── main.py                       # Entry point FastAPI/Granian, endpoint HTTP (API Ollama + OpenAI /v1/)
+├── rag.py                        # Pipeline RAG: AST chunking (Tree-sitter), ingestion, ricerca, watchdog
 ├── memory.py                     # Mem0: inizializzazione e helper ricordi
 ├── memory_backup.py              # Export/import memoria episodica in JSON
 ├── reflection_agent.py           # Job notturno di self-reflection e consolidamento memoria
@@ -112,18 +128,6 @@ jarvis/
 └── infrastructure.py             # Registro infrastruttura
 ```
 
-### Grafo delle Dipendenze
-
-```
-config.py / state.py ← (moduli foglia; state popolato nel lifespan di main.py)
-llm_engine.py        ← main.py, telegram_bot.py
-rag.py / memory.py   ← prompt_builder.py, main.py
-web_search.py        ← prompt_builder.py
-prompt_builder.py    ← telegram_bot.py, main.py
-agent_tools.py       ← main.py, telegram_bot.py (skills_manager ← agent_tools)
-dashboard / cron / *userbot* ← main.py
-```
-
 ---
 
 ## ⚙️ Struttura Dati & Portabilità
@@ -131,6 +135,7 @@ dashboard / cron / *userbot* ← main.py
 ```text
 ~/ai-ecosystem/
 ├── .env                         # 🔒 Segreti (gitignored — NON committare MAI)
+├── .dockerignore                # Esclude models/ e data/ dal build context
 ├── docker-compose.yml           # Stack completo (reference)
 ├── docker-compose.vps.yml       # Stack Master VPS (no GPU)
 ├── docker-compose.worker.yml    # Stack Worker GPU locale
@@ -143,7 +148,9 @@ dashboard / cron / *userbot* ← main.py
 │   └── plans/
 │       └── master_worker_implementation.md
 ├── jarvis/
-│   └── models/                  # File GGUF (Qwen3.5-4B, Gemma 4, Nomic Embed)
+│   ├── Dockerfile               # Build immagine CUDA 13.0 + llama-cpp-python
+│   ├── models/                  # File GGUF (gitignored — scaricare manualmente)
+│   └── ... sorgenti Python
 └── data/                        # 📂 STATO PERSISTENTE (gitignored)
     ├── qdrant/                  # Collezioni vettoriali
     ├── jarvis_mem0/             # Mem0 SQLite, cache HF, sessioni Userbot Telegram
@@ -151,7 +158,7 @@ dashboard / cron / *userbot* ← main.py
     └── searxng/                 # Config SearXNG
 ```
 
-> 💡 `jarvis/` è montato come volume (`./jarvis:/app`): le modifiche al codice sono immediatamente visibili nel container senza ribuilddare.
+> 💡 `jarvis/` è montato come volume (`./jarvis:/app`): le modifiche al codice sono immediatamente visibili nel container senza rebuild.
 
 ---
 
@@ -163,9 +170,9 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Non è presente 
 
 | Modello | Stato | VRAM | Note |
 |---|---|---|---|
-| `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ✅ **IN USO** | ~2.5GB | Temporaneo — ottimo per coding Go/TS/React |
-| `gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf` | ⏳ In attesa fix | ~2.5GB | Target — bloccato da bug llama-cpp-python ≤0.3.30 |
-| `nomic-embed-text-v1.5.gguf` | ✅ IN USO | CPU | Embedding 768d |
+| `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ✅ **IN USO** | 1924MiB (47%) | n_gpu_layers=15, flash_attn=true |
+| `Qwen3-Embedding-0.6B-Q8_0.gguf` | ✅ IN USO | +396MiB (57% tot) | Embedding locale |
+| `nomic-embed-text-v1.5.gguf` | ⏳ Sostituito | CPU | Sostituito da Qwen3-Embedding |
 
 ### Master VPS (CPU-only — 24GB RAM)
 
@@ -181,7 +188,6 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Non è presente 
 
 - **LlamaEngine** (singleton): carica i pesi GGUF all'avvio nel `lifespan` FastAPI. Mantiene il modello caldo in VRAM.
 - **PriorityLock**: serializza le chiamate GPU. Chat utente (priorità `0`) > batch embedding RAG (priorità `10`).
-- **Thinking Mode** (Gemma 4): se `LLM_THINKING_MODE=true`, inietta `<|think|>` nel system prompt per il reasoning esplicito.
 - **Offloading GPU**: se `EXTERNAL_GPU_URL` è valorizzato, pinga il Worker (timeout 1.5s) e delega l'inferenza; failover automatico su CPU locale se offline.
 
 ### 2. Memoria Intelligente (`rag.py` + `memory.py` + `qdrant`)
@@ -190,7 +196,6 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Non è presente 
 - **RAG AST-Aware (Tree-sitter):** chunking semantico del codice (funzioni, classi, type declarations) per Go, Python, TypeScript/JavaScript, C, C++, Java, Rust, SQL, YAML.
 - **Watchdog filesystem:** re-embedding automatico al salvataggio dei file sorgente.
 - **Semantic Cache:** cache delle risposte per query simili (soglia cosine configurabile).
-- **Collezioni Qdrant versionate:** `collateral_docs_*_vX`, `collateral_memories_vX`, `semantic_cache_vX`.
 
 ### 3. Web Intelligence (`web_search.py`)
 
@@ -215,22 +220,26 @@ Tool disponibili:
 
 | Endpoint | Metodo | Funzione |
 |---|---|---|
-| `/api/chat` | POST | Chat Ollama-nativa + memoria + RAG + tool-calling |
+| `/api/chat` | POST | Chat con memoria + RAG + tool-calling |
 | `/api/generate` | POST | Generate + cache semantica |
-| `/api/embed` / `/api/embeddings` | POST | Embeddings (Nomic v1.5, 768d) |
+| `/v1/chat/completions` | POST | API compatibile OpenAI |
+| `/api/embed` / `/api/embeddings` | POST | Embeddings |
 | `/api/tags`, `/api/ps`, `/api/show`, `/api/version` | GET/POST | Stub compatibilità Ollama |
+| `/v1/models` | GET | Lista modelli (API OpenAI) |
 | `/api/project-tree` | GET | Albero del progetto indicizzato |
-| `/api/reset-all` | GET/POST | Reset RAG + cache + re-ingestion |
 | `/api/webhook/git` | POST | Git webhook → pull → re-ingestion |
-| `/`, `/dashboard` | GET | Pannello di controllo web |
-
-> ⚠️ L'API è nel **formato Ollama** (non OpenAI `/v1/*`). Nei client IDE usare il provider Ollama puntando a `http://localhost:8000`.
+| `/docs` | GET | Swagger UI |
 
 ---
 
 ## 🚀 Avvio Rapido
 
 ### Worker Locale (Sviluppo — Modalità Offline)
+
+**Prerequisiti:**
+- Docker + NVIDIA Container Toolkit
+- GPU NVIDIA con driver ≥ 580.x (CUDA 13.0)
+- Modelli GGUF in `jarvis/models/`
 
 ```bash
 cd ~/ai-ecosystem
@@ -242,64 +251,53 @@ docker run -d --name qdrant_local \
   -v "$(pwd)/data/qdrant:/qdrant/storage" \
   qdrant/qdrant:latest
 
-# 2. Avviare Jarvis Worker
+# 2. Build immagine (CUDA 13.0 overlay + llama-cpp-python)
+docker compose -f docker-compose.worker.yml build jarvis_worker
+
+# 3. Avviare Jarvis Worker
 ./start_worker.sh
-
-# 3. Verificare che sia online
-curl http://localhost:8000/
-# → risposta HTML della dashboard
-```
-
-### Primo Avvio (Build Immagine)
-
-```bash
-docker compose -f docker-compose.worker.yml build --no-cache
-docker compose -f docker-compose.worker.yml up -d
 ```
 
 > ⚠️ Il build è lento (~5-10 minuti) perché compila `llama-cpp-python` da sorgente con supporto CUDA.
 
+### Verifica GPU
+
+```bash
+# Controllare che la GPU sia attiva
+docker logs jarvis_worker | grep -i "vram\|n_gpu_layers"
+# Output atteso: 🎯 [VRAM] Dopo caricamento ... MiB / 4096MiB
+# Output atteso: ⚙️ n_gpu_layers=15
+```
+
 ### Test Rapido
 
 ```bash
-curl -s -X POST http://localhost:8000/api/chat \
+curl -s -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"local","messages":[{"role":"user","content":"Ciao, presentati"}],"stream":false}' \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['message']['content'][:400])"
+  -d '{"model":"qwen","messages":[{"role":"user","content":"Ciao, presentati"}],"max_tokens":100}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])"
 ```
 
 ---
 
 ## 🔧 Configurazione
 
-Tutti i parametri sono controllati dal file `.env` nella root del progetto.
+Tutti i parametri sono controllati dal file `.env` nella root del progetto. Copiare da `.env.example` se presente.
 
 ### Variabili Essenziali
 
 ```env
-# === TELEGRAM (solo Master/VPS) ===
-TELEGRAM_ENABLED=true          # false sul Worker!
-TELEGRAM_TOKEN=...             # Token bot @BotFather
-TELEGRAM_API_ID=...            # my.telegram.org
-TELEGRAM_API_HASH=...
-
 # === ARCHITETTURA ===
-QDRANT_HOST=qdrant             # Nome container Master. Offline: qdrant_local
-EXTERNAL_GPU_URL=              # Master: http://100.64.0.2:8000 | Worker: vuoto
+QDRANT_HOST=localhost            # Nome container. Offline: localhost
+EXTERNAL_GPU_URL=                # Master: http://100.64.0.2:8000 | Worker: vuoto
 
 # === MODELLO LLM ===
 LLAMA_MODEL_PATH=./models/Qwen3.5-4B-UD-Q4_K_XL.gguf
-N_GPU_LAYERS=20                # 0 sulla VPS (CPU-only)
-LLM_NUM_CTX=16384              # 65536 sulla VPS
-LLM_TEMPERATURE=0.7            # 1.0 per Gemma 4
-LLM_REPEAT_PENALTY=1.1         # 1.0 per Gemma 4
-LLM_TOP_P=0.9                  # 0.95 per Gemma 4
-LLM_THINKING_MODE=false        # true per Gemma 4
+N_GPU_LAYERS=15                  # 0 sulla VPS (CPU-only). RTX 3050 Ti 4GB max 15
+LLM_FLASH_ATTN=true              # Flash attention per ridurre VRAM
 
 # === RAG ===
-MAIN_PROJECT_PATH=/percorso/al/tuo/progetto
-EXTERNAL_PROJECTS=             # Percorsi aggiuntivi (vuoto sulla VPS)
-VECTOR_DB_VERSION=v3
+MAIN_PROJECT_PATH=/host_fs/home/alfio/Projects
 EMBEDDING_DIMS=768
 ```
 
@@ -311,23 +309,19 @@ EMBEDDING_DIMS=768
 # Log in tempo reale
 docker logs jarvis_worker --tail=50 -f
 
-# Reset completo RAG (cancella vettori e riesegue ingestion)
+# Shell nel container
+docker exec -it jarvis_worker /bin/bash
+
+# Reset RAG
 curl -X POST http://localhost:8000/api/reset-all
 
-# Albero del progetto indicizzato
-curl http://localhost:8000/api/project-tree | python3 -c "import sys,json; print(json.load(sys.stdin).get('tree','')[:500])"
+# Stato GPU
+nvidia-smi
 
-# Lista collezioni Qdrant
-curl http://localhost:6333/collections | python3 -c "import sys,json; [print(c['name']) for c in json.load(sys.stdin)['result']['collections']]"
-
-# Backup completo
+# Backup dati
 tar -cvzf backup_ai_$(date +%Y%m%d).tar.gz ./data .env
 
-# Arresto completo
-docker compose -f docker-compose.worker.yml down --remove-orphans
-docker stop qdrant_local && docker rm qdrant_local
-
-# Sync dati Worker → VPS Master
+# Sync Worker → Master
 ./sync_to_master.sh
 ```
 
@@ -335,31 +329,20 @@ docker stop qdrant_local && docker rm qdrant_local
 
 ## 📝 Changelog
 
+### v9.1.0 (2026-06-23) — CUDA 13.0 Overlay + GPU Inference stabile
+- **CUDA 13.0 overlay:** Aggiunti `cuda-compiler-13-0`, `cuda-cudart-dev-13-0`, `libcublas-dev-13-0` su base CUDA 12.2 per compatibilità driver NVIDIA 580.159.03.
+- **llama-cpp-python:** Build da GitHub main con `GGML_CUDA=on`, `CMAKE_CUDA_ARCHITECTURES=86`.
+- **GPU:** Inferenza funzionante con `n_gpu_layers=15`, `flash_attn=true`.
+- **.dockerignore:** Esclusi modelli (8.7GB) dal build context — immagine finale 19.6GB.
+- **Modello Worker:** `Qwen3.5-4B-UD-Q4_K_XL.gguf` (UD = Unified Debug), embedding con `Qwen3-Embedding-0.6B-Q8_0`.
+
 ### v9.0.0 (2026-06-19) — Architettura Master/Worker
-- **Architettura:** Migrazione da topologia single-node a **Master/Worker** con VPN Tailscale.
-- **Networking:** Rimosso completamente Ngrok. Connettività tramite Tailscale WireGuard.
-- **Telegram:** Centralizzato sul Master (VPS) — `TELEGRAM_ENABLED=false` obbligatorio sul Worker.
-- **Modelli:** Aggiunto supporto `LLM_THINKING_MODE` (Gemma 4), parametri LLM configurabili via `.env`.
+- **Architettura:** Migrazione da single-node a **Master/Worker** con VPN Tailscale.
+- **Networking:** Rimosso Ngrok. Connettività tramite Tailscale WireGuard.
+- **Telegram:** Centralizzato sul Master (VPS) — `TELEGRAM_ENABLED=false` sul Worker.
 - **llm_engine.py:** `chat_format=None` (Gemma 4 GGUF Jinja2), `n_gpu_layers` e `n_ctx` da `.env`.
-- **docker-compose.worker.yml:** Rimosso `QDRANT_HOST` hardcoded; aggiunti volumi Mem0+documents.
 - **Dockerfile:** Build `llama-cpp-python` dalla master GitHub per supporto Gemma 4 (fix PR #22133).
-- **Modello attuale Worker:** `Qwen3.5-4B-UD-Q4_K_XL.gguf` (temporaneo — Gemma 4 in attesa fix).
-
-### v8.6.9
-- **RAG:** Numerazione righe nei chunk AST (`RIGHE X-Y:`), full-file bypass, skeleton auto-generation.
-- **RAG:** Project-specific guidelines (`.ai-rules.md`, `.cursorrules`, `AGENT.md`).
-- **Logging:** Filtri middleware per silenziare log rumorosi.
-- **DB:** Migrazione automatica Qdrant con `EMBEDDING_DIMS` dinamico e versionamento.
-- **Prompt:** Diffing formatter `SEARCH/REPLACE` forzato nel System Prompt.
-- **Scheduler:** `DateTrigger` APScheduler, tag `<NOTIFY_IN>` per timer relativi.
-
-### v8.6.8
-- **Sicurezza:** Fix file handle leak e race condition TOCTOU in `rag.py`.
-- **Performance:** I/O e hashing fuori dal lock globale, debouncing watchdog, batch embedding.
-- **RAG:** Esteso Tree-sitter a C, C++, Java, Rust, SQL, YAML; chunk "Preambolo".
-- **Telegram:** Buffer sessione (10 msg, TTL 10min), dashboard InlineKeyboard, file manager `/ls`.
-- **API:** Conformità OpenAI `/v1/chat/completions` con UUID, `finish_reason`, `usage`.
 
 ---
 
-🌐 **Collateral Studios** — *Infrastruttura di Intelligenza Artificiale Locale Riservata.*
+🌐 **NeuroNet** — *Infrastruttura di Intelligenza Artificiale Locale Riservata.*
