@@ -799,18 +799,18 @@ async def get_stats():
             cm = engine.chat_model
             mp = getattr(cm, 'model_path', '') or ''
             chat_model_name = mp.split('/')[-1] if mp else "Loaded"
-            ngl = getattr(cm, 'n_gpu_layers', None)
-            if ngl is None:
-                ngl = getattr(cm, '_n_gpu_layers', '?')
+            mp2 = getattr(cm, 'model_params', None)
+            cp2 = getattr(cm, 'context_params', None)
+            ngl = (getattr(mp2, 'n_gpu_layers', '?') if mp2 else
+                   getattr(cm, 'n_gpu_layers', '?'))
             details.append({"label": "n_gpu_layers", "value": str(ngl)})
             try:
                 ctx = cm.n_ctx()
                 details.append({"label": "n_ctx", "value": str(ctx)})
             except Exception:
                 details.append({"label": "n_ctx", "value": "?"})
-            fa = getattr(cm, 'flash_attn', None)
-            if fa is None:
-                fa = getattr(cm, '_flash_attn', '?')
+            fa = (getattr(cp2, 'flash_attn', '?') if cp2 else
+                  getattr(cm, 'flash_attn', '?'))
             details.append({"label": "flash_attn", "value": str(fa)})
         else:
             details.append({"label": "Status", "value": "Not loaded"})
