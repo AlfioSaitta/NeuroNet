@@ -9,7 +9,7 @@ import hashlib
 import uuid
 import re
 import asyncio
-from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct, VectorParams, Distance
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText, PointStruct, VectorParams, Distance
 from pathlib import Path
 
 from config import (
@@ -485,7 +485,7 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
 
             valid_chunks = [c for c in chunks if len(c.strip()) >= 50]
             if valid_chunks:
-                texts_to_embed = [f"FILE: {rel_path} | CONTENUTO: {chunk}" for chunk in valid_chunks]
+                texts_to_embed = valid_chunks
                 
                 # Dividiamo la chiamata get_embedding in mini-batch da 3 per rilasciare frequentemente 
                 # il PriorityLock e permettere ai messaggi chat di inserirsi rapidamente.
@@ -508,17 +508,24 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
                         ))
 
             if points:
-                # Targhettiamo i chunk con la famiglia del modello attivo
-                # per compatibilità futura se si cambia modello
                 from config import MODEL_PROFILE
                 for p in points:
                     p.payload["model_family"] = MODEL_PROFILE.family
                     p.payload["model_variant"] = MODEL_PROFILE.variant
-                await state.qdrant.delete(
+                # Salva vecchi ID prima dell'upsert per delete atomica
+                old_scroll = await state.qdrant.scroll(
                     collection_name=col_name,
-                    points_selector=Filter(must=[FieldCondition(key="filename", match=MatchValue(value=rel_path))])
+                    scroll_filter=Filter(must=[FieldCondition(key="filename", match=MatchValue(value=rel_path))]),
+                    with_payload=False,
+                    limit=1000
                 )
+                old_ids = [p.id for p in old_scroll[0]]
                 await state.qdrant.upsert(collection_name=col_name, points=points)
+                if old_ids:
+                    await state.qdrant.delete(
+                        collection_name=col_name,
+                        points_selector=old_ids
+                    )
             async with state.state_lock:
                 state.rag_state[rel_path] = {"hash": file_hash, "mtime": mtime, "size": size}
                 _save_file_state_unsafe(rel_path)
@@ -943,7 +950,7 @@ async def search_documents(query, is_project_query=False, project_name=None):
         secondary_docs = []
         if is_project_query and deps_to_search:
             should_conditions = [
-                FieldCondition(key="filename", match=MatchValue(value=dep))
+                FieldCondition(key="filename", match=MatchText(text=dep))
                 for dep in list(deps_to_search)[:10]
             ]
             if should_conditions:
