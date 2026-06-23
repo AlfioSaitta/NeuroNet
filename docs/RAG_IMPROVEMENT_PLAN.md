@@ -81,7 +81,7 @@ for col in stats['qdrant_collections'][:10]:
 ## Fase 1 — Bug fix e pulizia immediate
 
 ### 1.1 Fix dependency search (B1)
-**Stato:** 🔲 TODO
+**Stato:** ✅ COMPLETATO (7d95b4a)
 **File:** `rag.py` — funzione `search_documents()`, righe ~930–960
 
 **Problema:** `FieldCondition(key="filename", match=MatchValue(value=dep))` confronta nomi di modulo (es. `"lodash"`, `"net/http"`) con il campo `filename` di Qdrant. Non matcha mai perché i filename sono path relativi come `node_modules/lodash/index.js`.
@@ -100,7 +100,7 @@ for col in stats['qdrant_collections'][:10]:
 ---
 
 ### 1.2 Make delete-upsert atomic (B2)
-**Stato:** 🔲 TODO
+**Stato:** ✅ COMPLETATO (7d95b4a)
 **File:** `rag.py` — funzione `process_single_file()`, righe ~517–521
 
 **Problema:** Prima delete dei vecchi punti, poi upsert dei nuovi. Se l'upsert fallisce, i dati sono persi.
@@ -119,7 +119,7 @@ for col in stats['qdrant_collections'][:10]:
 ---
 
 ### 1.3 Fix embedding prefix noise (B5)
-**Stato:** 🔲 TODO
+**Stato:** ✅ COMPLETATO (7d95b4a)
 **File:** `rag.py` — funzione `process_single_file()`, riga ~488
 
 **Problema:** Il testo inviato all'embedding è `"FILE: {path} | CONTENUTO: {chunk}"`. Questo prefisso di ~20 token è rumore che degrada la qualità della similarità semantica.
@@ -133,7 +133,7 @@ for col in stats['qdrant_collections'][:10]:
 ---
 
 ### 1.4 Rimuovere overlap (arXiv 2026 benchmark)
-**Stato:** 🔲 TODO
+**Stato:** ✅ COMPLETATO (7d95b4a)
 **File:** `config.py` — `CHUNK_OVERLAP = 400`
 
 **Problema:** arXiv systematic analysis (Jan 2026) ha trovato che l'overlap nei chunk non dà beneficio misurabile, ma aumenta i costi di indicizzazione.
@@ -390,21 +390,21 @@ Script che esegue tutte le query di Test B e registra:
 
 | Fase | Priorità | Sforzo | Impatto | Dipendenze |
 |---|---|---|---|---|
-| 1.1 Fix dependency search | 🔴 Critico | 2-3h | Alto | Nessuna |
-| 1.2 Atomic upsert | 🔴 Critico | 30min | Alto | Nessuna |
-| 1.3 Fix embedding prefix | 🔴 Critico | 1h | Alto | Richiede re-indicizzazione |
-| 1.4 Rimuovi overlap | 🟡 Alto | 30min | Basso | Nessuna |
+| 1.1 Fix dependency search | ✅ Fatto | — | Alto | Nessuna |
+| 1.2 Atomic upsert | ✅ Fatto | — | Alto | Nessuna |
+| 1.3 Fix embedding prefix | ✅ Fatto | — | Alto | Richiede re-indicizzazione |
+| 1.4 Rimuovi overlap | ✅ Fatto | — | Basso | Nessuna |
 | 2.1 Chunk 512 token | 🟡 Alto | 2h | Molto alto | Richiede re-indicizzazione |
 | 2.2 Section-aware | 🟡 Alto | 3h | Alto | 2.1 |
 | 2.3 Parent-child | 🟡 Alto | 4h | Alto | 2.1 |
-| 3.1 Parallel query | 🟡 Alto | 30min | Medio | Nessuna |
+| 3.1 Parallel query | ✅ Fatto | — | Medio | Nessuna |
 | 3.2 Hybrid search | 🟢 Medio | 4h | Molto alto | Nessuna |
 | 4.1 Fix dipendenze reali | 🟢 Medio | 3h | Alto | Nessuna |
 | 4.2 Graph traversal | 🟢 Medio | 5h | Alto | 4.1 |
 | 4.3 File co-embedding | 🔵 Basso | 3h | Medio | 4.1 |
 | 5.1 ID deterministici | 🔵 Basso | 1h | Basso | Nessuna |
 | 5.2 Context budget | 🔵 Basso | 1h | Medio | Nessuna |
-| 5.3 Env var chunk | 🔵 Basso | 30min | Basso | 2.1 |
+| 5.3 Env var chunk | ✅ Fatto | — | Basso | Nessuna |
 
 **Legenda priorità:**
 - 🔴 Critico = bug che produce risultati errati o perdita dati
