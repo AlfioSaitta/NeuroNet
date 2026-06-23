@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, JSONResponse
 from config import OLLAMA_BASE, QDRANT_HOST, ALLOWED_USERS
@@ -19,6 +20,7 @@ HTML_CONTENT = r"""
     <script src="https://unpkg.com/force-graph"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/atom-one-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <style>
         :root {
             --bg-base: #05070a;
@@ -367,6 +369,36 @@ HTML_CONTENT = r"""
                 </div>
             </div>
         </div>
+
+        <div class="grid-container" style="grid-template-columns: repeat(3, 1fr);">
+            <div class="card fade-in" style="padding: 14px;">
+                <div class="card-header" style="font-size: 0.75rem; margin-bottom: 6px;">
+                    <span class="dot dot-secondary pulsing"></span> Temperature
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;" id="chart-current-temp">--°C</span>
+                </div>
+                <div style="position: relative; height: 100px;">
+                    <canvas id="chart-temp"></canvas>
+                </div>
+            </div>
+            <div class="card fade-in" style="padding: 14px;">
+                <div class="card-header" style="font-size: 0.75rem; margin-bottom: 6px;">
+                    <span class="dot dot-primary pulsing"></span> VRAM
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;" id="chart-current-vram">-- MiB</span>
+                </div>
+                <div style="position: relative; height: 100px;">
+                    <canvas id="chart-vram"></canvas>
+                </div>
+            </div>
+            <div class="card fade-in" style="padding: 14px;">
+                <div class="card-header" style="font-size: 0.75rem; margin-bottom: 6px;">
+                    <span class="dot dot-accent pulsing"></span> Utilization
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;" id="chart-current-util">--%</span>
+                </div>
+                <div style="position: relative; height: 100px;">
+                    <canvas id="chart-util"></canvas>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div id="graph-modal" class="modal">
@@ -405,115 +437,6 @@ HTML_CONTENT = r"""
             if (pct < 70) return 'green';
             if (pct < 85) return 'yellow';
             return 'red';
-        }
-
-        async function fetchStats() {
-            if (isModalOpen) return; 
-            try {
-                const res = await fetch('/api/dashboard/stats');
-                const data = await res.json();
-                
-                if (data.rag_stats) {
-                    document.getElementById('indexed-files').innerText = data.rag_stats.indexed_files ?? 0;
-                    document.getElementById('pending-queue').innerText = data.rag_stats.pending_events ?? 0;
-                    document.getElementById('total-chunks').innerText = data.rag_stats.total_chunks ?? 0;
-                }
-                
-                if (data.models) {
-                    document.getElementById('model-chat').innerText = data.models.chat_model || 'N/A';
-                    document.getElementById('model-embed').innerText = data.models.embed_model || 'N/A';
-                    
-                    const detailList = document.getElementById('model-details');
-                    detailList.innerHTML = '';
-                    if (data.models.details) {
-                        data.models.details.forEach(d => {
-                            const li = document.createElement('li');
-                            li.innerHTML = `<span>${d.label}</span> <span class="badge badge-accent">${d.value}</span>`;
-                            detailList.appendChild(li);
-                        });
-                    } else {
-                        detailList.innerHTML = '<li style="color: var(--text-muted);">No model loaded</li>';
-                    }
-                }
-                
-                if (data.inference) {
-                    document.getElementById('inf-requests').innerText = data.inference.total_requests ?? 0;
-                    document.getElementById('inf-tokens').innerText = data.inference.total_completion_tokens ?? 0;
-                    document.getElementById('inf-prompt-tokens').innerText = data.inference.total_prompt_tokens ?? 0;
-                }
-                
-                if (data.gpu) {
-                    const g = data.gpu;
-                    document.getElementById('gpu-temp').innerText = g.temp ?? '--';
-                    const tempInfo = calcGpuTempColor(g.temp);
-                    const tempPct = Math.min(100, ((g.temp ?? 0) / 100) * 100);
-                    const tempBar = document.getElementById('gpu-temp-bar');
-                    tempBar.style.width = tempPct + '%';
-                    tempBar.className = 'progress-fill ' + tempInfo.class;
-
-                    const vramUsed = (g.vram_used ?? 0);
-                    const vramTotal = (g.vram_total ?? 1);
-                    const vramPct = (vramUsed / vramTotal) * 100;
-                    document.getElementById('gpu-vram-used').innerText = vramUsed + 'MiB';
-                    document.getElementById('gpu-vram-total').innerText = vramTotal + 'MiB';
-                    document.getElementById('gpu-util').innerText = (g.util ?? 0);
-                    const vramBar = document.getElementById('gpu-vram-bar');
-                    vramBar.style.width = Math.min(100, vramPct) + '%';
-                    vramBar.className = 'progress-fill ' + calcVramColor(vramPct);
-
-                    document.getElementById('health-cuda').innerText = g.cuda_version || 'N/A';
-                    document.getElementById('health-cuda').className = g.cuda_version ? 'badge badge-primary' : 'badge badge-danger';
-                    
-                    if (g.processes) {
-                        document.getElementById('gpu-proc-text').innerText = g.processes;
-                    }
-                }
-
-                const qList = document.getElementById('qdrant-list');
-                qList.innerHTML = '';
-                if(data.qdrant_collections && data.qdrant_collections.length > 0) {
-                    data.qdrant_collections.forEach(col => {
-                        const li = document.createElement('li');
-                        const name = typeof col === 'string' ? col : col.name;
-                        const points = typeof col === 'string' ? '' : (col.points ?? '');
-                        li.innerHTML = `
-                            <span>${name}${points ? ' <span style="color: var(--text-muted); font-size: 0.7rem;">('+points+' pts)</span>' : ''}</span> 
-                            <button class="btn" onclick="openGraphModal('${name}')">Graph</button>
-                        `;
-                        qList.appendChild(li);
-                    });
-                } else {
-                    qList.innerHTML = '<li style="color: var(--text-muted);">No collections</li>';
-                }
-                
-                if (data.agent_stats) {
-                    document.getElementById('active-cron').innerText = data.agent_stats.active_crons ?? 0;
-                    document.getElementById('active-todos').innerText = data.agent_stats.active_todos ?? 0;
-                    document.getElementById('allowed-users').innerText = data.agent_stats.allowed_users ?? 0;
-                    document.getElementById('async-tasks').innerText = data.agent_stats.async_tasks ?? 0;
-                }
-                
-                if (data.health) {
-                    const setHealth = (id, isUp) => {
-                        const el = document.getElementById(id);
-                        if(isUp) { el.innerText = "ONLINE"; el.className = "badge badge-primary"; }
-                        else { el.innerText = "OFFLINE"; el.className = "badge badge-danger"; }
-                    };
-                    setHealth('health-searxng', data.health.searxng);
-                    setHealth('health-crawl4ai', data.health.crawl4ai);
-                    setHealth('health-qdrant', data.health.qdrant);
-                }
-                
-                if (data.sys_stats) {
-                    document.getElementById('sys-ram').innerText = data.sys_stats.ram_mb + " MB";
-                    document.getElementById('sys-uptime').innerText = data.sys_stats.uptime || '--';
-                    document.getElementById('sys-load').innerText = data.sys_stats.load || '--';
-                    document.getElementById('sys-disk').innerText = data.sys_stats.disk || '--';
-                }
-                
-            } catch (err) {
-                console.error('Failed to fetch telemetry', err);
-            }
         }
 
         function applyGraphFilter() {
@@ -686,7 +609,179 @@ HTML_CONTENT = r"""
             isModalOpen = false;
         }
 
+        let tempChart, vramChart, utilChart;
+
+        function createLineChart(canvasId, color, fillColor, yMin, yMax) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            return new Chart(ctx, {
+                type: 'line',
+                data: { labels: [], datasets: [{ data: [], borderColor: color, backgroundColor: fillColor, fill: true }] },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    animation: false, spanGaps: true,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { display: false, grid: { display: false } },
+                        y: {
+                            min: yMin, max: yMax,
+                            grid: { color: 'rgba(255,255,255,0.06)' },
+                            ticks: { color: '#94a3b8', font: { size: 8, family: "'JetBrains Mono', monospace" }, maxTicksLimit: 4 }
+                        }
+                    },
+                    elements: {
+                        point: { radius: 0, hitRadius: 2 },
+                        line: { borderWidth: 1.5, tension: 0.3 }
+                    }
+                }
+            });
+        }
+
+        function initCharts() {
+            tempChart = createLineChart('chart-temp', '#00b8ff', 'rgba(0,184,255,0.08)', 30, 100);
+            vramChart = createLineChart('chart-vram', '#00ffcc', 'rgba(0,255,204,0.08)', 0, 100);
+            utilChart = createLineChart('chart-util', '#7b2cbf', 'rgba(123,44,191,0.08)', 0, 100);
+        }
+
+        function updateCharts(history) {
+            if (!history || history.length === 0) return;
+            const len = history.length;
+            const labels = history.map(() => '');
+            const temps = history.map(h => h.temp);
+            const vramPcts = history.map(h => h.vram_total ? Math.round(h.vram_used / h.vram_total * 100) : 0);
+            const utils = history.map(h => h.util ?? 0);
+
+            const last = history[len-1];
+            document.getElementById('chart-current-temp').innerText = last.temp + '°C';
+            document.getElementById('chart-current-vram').innerText = last.vram_used + ' MiB';
+            document.getElementById('chart-current-util').innerText = (last.util ?? 0) + '%';
+
+            tempChart.data.labels = labels;
+            tempChart.data.datasets[0].data = temps;
+            tempChart.update('none');
+
+            vramChart.data.labels = labels;
+            vramChart.data.datasets[0].data = vramPcts;
+            vramChart.update('none');
+
+            utilChart.data.labels = labels;
+            utilChart.data.datasets[0].data = utils;
+            utilChart.update('none');
+        }
+
+        fetchStats = async function() {
+            if (isModalOpen) return;
+            try {
+                const res = await fetch('/api/dashboard/stats');
+                const data = await res.json();
+
+                if (data.gpu) {
+                    const g = data.gpu;
+                    document.getElementById('gpu-temp').innerText = g.temp ?? '--';
+                    const tempInfo = calcGpuTempColor(g.temp);
+                    const tempPct = Math.min(100, ((g.temp ?? 0) / 100) * 100);
+                    const tempBar = document.getElementById('gpu-temp-bar');
+                    tempBar.style.width = tempPct + '%';
+                    tempBar.className = 'progress-fill ' + tempInfo.class;
+
+                    const vramUsed = (g.vram_used ?? 0);
+                    const vramTotal = (g.vram_total ?? 1);
+                    const vramPct = (vramUsed / vramTotal) * 100;
+                    document.getElementById('gpu-vram-used').innerText = vramUsed + 'MiB';
+                    document.getElementById('gpu-vram-total').innerText = vramTotal + 'MiB';
+                    document.getElementById('gpu-util').innerText = (g.util ?? 0);
+                    const vramBar = document.getElementById('gpu-vram-bar');
+                    vramBar.style.width = Math.min(100, vramPct) + '%';
+                    vramBar.className = 'progress-fill ' + calcVramColor(vramPct);
+
+                    document.getElementById('health-cuda').innerText = g.cuda_version || 'N/A';
+                    document.getElementById('health-cuda').className = g.cuda_version ? 'badge badge-primary' : 'badge badge-danger';
+
+                    if (g.processes) {
+                        document.getElementById('gpu-proc-text').innerText = g.processes;
+                    }
+                }
+
+                if (data.gpu_history) {
+                    updateCharts(data.gpu_history);
+                }
+
+                if (data.rag_stats) {
+                    document.getElementById('indexed-files').innerText = data.rag_stats.indexed_files ?? 0;
+                    document.getElementById('pending-queue').innerText = data.rag_stats.pending_events ?? 0;
+                    document.getElementById('total-chunks').innerText = data.rag_stats.total_chunks ?? 0;
+                }
+
+                if (data.models) {
+                    document.getElementById('model-chat').innerText = data.models.chat_model || 'N/A';
+                    document.getElementById('model-embed').innerText = data.models.embed_model || 'N/A';
+                    const detailList = document.getElementById('model-details');
+                    detailList.innerHTML = '';
+                    if (data.models.details) {
+                        data.models.details.forEach(d => {
+                            const li = document.createElement('li');
+                            li.innerHTML = `<span>${d.label}</span> <span class="badge badge-accent">${d.value}</span>`;
+                            detailList.appendChild(li);
+                        });
+                    } else {
+                        detailList.innerHTML = '<li style="color: var(--text-muted);">No model loaded</li>';
+                    }
+                }
+
+                if (data.inference) {
+                    document.getElementById('inf-requests').innerText = data.inference.total_requests ?? 0;
+                    document.getElementById('inf-tokens').innerText = data.inference.total_completion_tokens ?? 0;
+                    document.getElementById('inf-prompt-tokens').innerText = data.inference.total_prompt_tokens ?? 0;
+                }
+
+                const qList = document.getElementById('qdrant-list');
+                qList.innerHTML = '';
+                if(data.qdrant_collections && data.qdrant_collections.length > 0) {
+                    data.qdrant_collections.forEach(col => {
+                        const li = document.createElement('li');
+                        const name = typeof col === 'string' ? col : col.name;
+                        const points = typeof col === 'string' ? '' : (col.points ?? '');
+                        li.innerHTML = `
+                            <span>${name}${points ? ' <span style="color: var(--text-muted); font-size: 0.7rem;">('+points+' pts)</span>' : ''}</span>
+                            <button class="btn" onclick="openGraphModal('${name}')">Graph</button>
+                        `;
+                        qList.appendChild(li);
+                    });
+                } else {
+                    qList.innerHTML = '<li style="color: var(--text-muted);">No collections</li>';
+                }
+
+                if (data.agent_stats) {
+                    document.getElementById('active-cron').innerText = data.agent_stats.active_crons ?? 0;
+                    document.getElementById('active-todos').innerText = data.agent_stats.active_todos ?? 0;
+                    document.getElementById('allowed-users').innerText = data.agent_stats.allowed_users ?? 0;
+                    document.getElementById('async-tasks').innerText = data.agent_stats.async_tasks ?? 0;
+                }
+
+                if (data.health) {
+                    const setHealth = (id, isUp) => {
+                        const el = document.getElementById(id);
+                        if(isUp) { el.innerText = "ONLINE"; el.className = "badge badge-primary"; }
+                        else { el.innerText = "OFFLINE"; el.className = "badge badge-danger"; }
+                    };
+                    setHealth('health-searxng', data.health.searxng);
+                    setHealth('health-crawl4ai', data.health.crawl4ai);
+                    setHealth('health-qdrant', data.health.qdrant);
+                }
+
+                if (data.sys_stats) {
+                    document.getElementById('sys-ram').innerText = data.sys_stats.ram_mb + " MB";
+                    document.getElementById('sys-uptime').innerText = data.sys_stats.uptime || '--';
+                    document.getElementById('sys-load').innerText = data.sys_stats.load || '--';
+                    document.getElementById('sys-disk').innerText = data.sys_stats.disk || '--';
+                }
+
+            } catch (err) {
+                console.error('Failed to fetch telemetry', err);
+            }
+        };
+
         setInterval(fetchStats, 3000);
+        initCharts();
         fetchStats();
     </script>
 </body>
@@ -749,6 +844,17 @@ async def get_gpu_metrics():
                 result["processes"] = header + "\n" + "\n".join(rows)
     except Exception:
         pass
+
+    if result["temp"] is not None:
+        state.gpu_history.append({
+            "ts": time.time(),
+            "temp": result["temp"],
+            "vram_used": result["vram_used"],
+            "vram_total": result["vram_total"],
+            "util": result["util"] or 0
+        })
+        if len(state.gpu_history) > state.MAX_GPU_HISTORY:
+            state.gpu_history = state.gpu_history[-state.MAX_GPU_HISTORY:]
 
     return result
 
@@ -898,6 +1004,7 @@ async def get_stats():
             "total_completion_tokens": total_completion_tokens
         },
         "gpu": gpu,
+        "gpu_history": state.gpu_history[-120:] if state.gpu_history else [],
         "qdrant_collections": qdrant_collections,
         "agent_stats": {
             "active_todos": active_todos,

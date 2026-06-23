@@ -32,6 +32,10 @@ total_requests = 0
 total_prompt_tokens = 0
 total_completion_tokens = 0
 
+# GPU metrics history for time-series charts (max 300 entries ~15 min at 3s interval)
+gpu_history: list[dict] = []
+MAX_GPU_HISTORY = 300
+
 # Contesto progetto attivo per utente e conversazione (persiste tra turni)
 # Mappa: user_id -> conversation_id -> nome_progetto
 # Previene contaminazione tra conversazioni concorrenti dello stesso utente.

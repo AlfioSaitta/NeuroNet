@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-06-22 (fix watchdog)
+> **Data ultimo aggiornamento:** 2026-06-23 (pulizia generale, benchmark 3 modelli)
 
 ---
 
@@ -19,7 +19,6 @@
 9. [Pattern di Codice e Convenzioni](#9-pattern-di-codice-e-convenzioni)
 10. [Comandi Utili](#10-comandi-utili)
 11. [Bug Noti e Workaround](#11-bug-noti-e-workaround)
-12. [Accesso ai Sistemi](#12-accesso-ai-sistemi)
 
 ---
 
@@ -28,6 +27,19 @@
 **Nome:** Ecosistema AI Omnisciente — Chameleon Cognitive Stack  
 **Proprietario:** Alfio Saitta / Collateral Studios  
 **Scopo:** Sistema AI autonomo, privato e sempre disponibile per assistenza allo sviluppo software (Go, TypeScript, React) e automazione personale via Telegram.
+
+### ⚠️ Compatibilità CUDA — Overlay 13.0
+
+Il container usa `nvidia/cuda:12.2.2-devel-ubuntu22.04` come base con overlay dei pacchetti **CUDA 13.0** dal repository NVIDIA. Motivazione: il driver host (NVIDIA 580.159.03) supporta CUDA 13.0. Il runtime 12.2 del container base è incompatibile e causa crash GPU. I pacchetti installati:
+
+```
+cuda-keyring (repo NVIDIA)
+cuda-compiler-13-0       # nvcc + toolchain CUDA 13.0
+cuda-cudart-dev-13-0     # CUDA Runtime 13.0
+libcublas-dev-13-0       # cuBLAS 13.0 (840MB, necessario per CUDA::cublas in cmake)
+```
+
+llama-cpp-python (v0.3.31) è buildato da GitHub main con `-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86`. Model file GGUF esclusi dal build context via `.dockerignore`. Container rebuild: `docker compose -f docker-compose.worker.yml build jarvis_worker`.
 
 ### Componente Centrale: Jarvis
 
@@ -170,9 +182,9 @@ Il file `.env` è la **singola fonte di configurazione**. Non hardcodare mai val
 | `TELEGRAM_ENABLED` | `true` | `false` | `false` |
 | `QDRANT_HOST` | `qdrant` (nome container Docker) | `100.64.0.1` (IP Tailscale VPS) | `qdrant_local` (container locale) |
 | `EXTERNAL_GPU_URL` | `http://100.64.0.2:8000` (IP Tailscale Worker) | *(vuoto)* | *(vuoto)* |
-| `LLAMA_MODEL_PATH` | `./models/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf` | `./models/Qwen3.5-4B-UD-Q4_K_XL.gguf` | idem |
-| `N_GPU_LAYERS` | `0` (tutto CPU) | `19` (RTX 3050 Ti, stabile) | `19` |
-| `LLM_NUM_CTX` | `65536` | `16384` | `16384` |
+| `LLAMA_MODEL_PATH` | `./models/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf` | `./models/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf` | idem |
+| `N_GPU_LAYERS` | `0` (CPU) | `15` (massimo stabile) | `15` |
+| `LLM_NUM_CTX` | `65536` | `12288` | `12288` |
 | `LLM_NUM_PREDICT` | `4096` | `2048` | `2048` |
 | `LLM_TEMPERATURE` | `1.0` (Gemma 4) | `0.7` (Qwen3.5) | `0.7` |
 | `LLM_THINKING_MODE` | `true` | `false` | `false` |
@@ -184,12 +196,13 @@ Il file `.env` è la **singola fonte di configurazione**. Non hardcodare mai val
 LLAMA_MODEL_PATH=./models/NomeModello.gguf
 
 # Layer GPU: 0=tutto CPU, N=numero layer caricati in GPU
-# Worker: 19 stabile (RTX 3050 Ti 4GB). 22+ causa CUDA OOM durante inferenza.
+# Worker: 15 stabile (Gemma 4 E2B QAT). Oltre 15 causa segfault (35 blocchi, Q4_0).
+# Su Qwen3.5 (32 layer) si può arrivare a 19. 22+ causa CUDA OOM su RTX 3050 Ti 4GB.
 # Master: 0 (CPU-only).
-N_GPU_LAYERS=19
+N_GPU_LAYERS=15
 
-# Finestra contesto (token): 16384 Worker GPU, 65536 Master CPU
-LLM_NUM_CTX=16384
+# Finestra contesto (token): 12288 Worker GPU (RTX 3050 Ti 4GB), 32768 Master CPU
+LLM_NUM_CTX=12288
 
 # Token max output
 LLM_NUM_PREDICT=2048
@@ -210,15 +223,15 @@ LLM_THINKING_MODE=false
 OLLAMA_MODEL=nome-identificativo-worker
 ```
 
-### Parametri Interni LLM (hardcoded in llm_engine.py, NON sovrascrivibili da .env)
+### Parametri Interni LLM (hardcoded in llm_engine.py)
 
-| Parametro | Chat Model (Qwen3.5) | Embedding Model (Qwen3-Embedding) | Note |
+| Parametro | Chat Model (Gemma 4 / Qwen3.5) | Embedding (Qwen3-Embedding) | Note |
 |---|---|---|---|
-| `n_batch` | **512** | 256 | 512 bilanciato per pipeline GPU/CPU asincrona |
-| `n_threads` | **6** | 6 | 8 core i5-11300H (4P+4E), 6 per LLM + 2 per I/O |
+| `n_batch` | **512** | 256 | 512 è il sweet spot per TTFT |
+| `n_threads` | **6** | 6 | i5-11300H: 6 per LLM + 2 per I/O |
 | `flash_attn` | True | — | Dimezza VRAM KV cache |
-| `use_mmap` | True | True | Lazy page mapping per RAM efficiency |
-| `embed n_gpu_layers` | — | **2** | Prime 2/28 layer su GPU (~50 MiB), query 2x veloci |
+| `use_mmap` | True | True | Lazy page mapping |
+| `embed n_gpu_layers` | — | **2** | Prime 2/28 layer su GPU |
 
 ### Variabili RAG
 
@@ -252,52 +265,66 @@ FLASHRANK_MODEL=ms-marco-MiniLM-L-6-v2
 ### Worker Locale (RTX 3050 Ti — 4GB VRAM)
 
 | Modello | File | Stato | VRAM | Note |
-|---|---|---|---|---|
-| **Qwen3.5-4B** (attivo) | `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ✅ IN USO | ~2.7GB (19/32 layer GPU) | Definitivo — unico modello che entra in 4GB VRAM |
-| **Qwen3-Embedding-0.6B** | `Qwen3-Embedding-0.6B-Q8_0.gguf` | ✅ IN USO | ~50 MiB (2/28 layer GPU) | 768d MRL, priming layer su GPU |
-| **Qwen3-Reranker-0.6B** | `models/Qwen3-Reranker-0.6B/` | ✅ IN USO | 0 VRAM (CPU fp16) | ~600 MB RAM, 2x più veloce di fp32 |
-| Gemma 4 E2B (qat-UD) | `gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf` | ❌ NON ENTRA | 2.5GB (35 blocchi) | 418/541 tensori in Q4_0 incompatibili CUDA_Host → OOM su 4GB |
-| Gemma 4 E2B (Q4_K_M) | `gemma-4-E2B-it-Q4_K_M.gguf` | ❌ NON ENTRA | 2.9GB (35 blocchi) | Stessa architettura, non entra in 4GB VRAM |
+|---|---|---|---|---|---|
+| **Gemma 4 E2B (qat-UD)** (attivo) | `gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf` | ✅ IN USO | 1036MiB (15/35 layer) | Modello primario — 2.1B param, QAT |
+| **Qwen3-Embedding-0.6B** | `Qwen3-Embedding-0.6B-Q8_0.gguf` | ✅ IN USO | ~400 MiB (2/28 layer) | 768d MRL, 2 layer su GPU |
+| **Qwen3-Reranker-0.6B** | `models/Qwen3-Reranker-0.6B/` | ✅ IN USO | 0 VRAM (CPU fp16) | ~600 MB RAM, fallback FlashRank |
+| **Qwen3.5-4B** (backup) | `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ⏳ BACKUP | 1924MiB (15/32 layer) | Sostituito da Gemma 4 (86% VRAM in più) |
+| Gemma 4 E2B (Q4_K_M) | `gemma-4-E2B-it-Q4_K_M.gguf` | ➖ SCONSIGLIATO | 1118MiB (15/35 layer) | +8% VRAM, -38% tok/s vs QAT |
 
 ### Master VPS (CPU-only — 24GB RAM)
 
 | Modello | File | Stato | RAM | Note |
-|---|---|---|---|---|
-| **Gemma 4 26B A4B** (target) | `gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf` | ⏳ Da scaricare | ~14.2GB | MoE: attiva solo ~4B parametri, ~8-12 t/s |
+|---|---|---|---|---|---|
+| **Gemma 4 26B A4B** (target) | `gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf` | ⏳ Da scaricare | ~14.2 GB | MoE: ~4B attivi, ~8-12 tok/s attesi |
 
 ### Parametri Ottimali per Modello
 
-| Parametro | Qwen3.5 (Worker, definitivo) | Gemma 4 26B (Master VPS, futuro) |
-|---|---|---|
-| `LLM_TEMPERATURE` | 0.7 | 1.0 |
-| `LLM_REPEAT_PENALTY` | 1.1 | 1.0 |
-| `LLM_TOP_P` | 0.9 | 0.95 |
-| `LLM_THINKING_MODE` | false | true |
-| `chat_format` in llm_engine.py | *(auto)* | `None` (Jinja2 embedded) |
+| Parametro | Qwen3.5 (Worker, backup) | Gemma 4 E2B (Worker, attivo) | Gemma 4 26B (Master VPS, futuro) |
+|---|---|---|---|---|
+| `LLM_TEMPERATURE` | 0.7 | 0.7 | 1.0 |
+| `LLM_REPEAT_PENALTY` | 1.1 | 1.1 | 1.0 |
+| `LLM_TOP_P` | 0.9 | 0.9 | 0.95 |
+| `LLM_NUM_CTX` | 12288 | 12288 | 32768 |
+| `LLM_BATCH_SIZE` | 512 | 512 | 512 |
+| `LLM_UBATCH_SIZE` | 128 | 128 | 128 |
+| `LLM_FLASH_ATTN` | true | true | true |
+| `LLM_THINKING_MODE` | false | false | true |
+| `N_GPU_LAYERS` | 15 | 15 | 0 |
+| `chat_format` in llm_engine.py | `None` (Jinja2 embedded) | `None` (Jinja2 embedded) | `None` (Jinja2 embedded) |
 
-### Performance Ottimizzate (al 2026-06-22)
+### Benchmark Modelli — Performance Misurate (2026-06-23)
 
-| Metrica | Prima (n.6) | Dopo (22/6) | Delta |
-|---|---|---|---|
-| TTFT (primo token) | 10.286 ms | **7.825 ms** | **-24%** |
-| Generation speed | 6 tok/s | **10 tok/s** | **+67%** |
-| VRAM utilizzata | 3.410 MiB (83%) | **3.566 MiB (87%)** | **+156 MiB** (più layer GPU) |
-| VRAM libera | 362 MiB | **530 MiB** | **+46%** |
-| Reranker RAM | 1.2 GB (fp32) | **~600 MB (fp16)** | **-50%** |
-| Embedding speed | CPU (0 layer) | **GPU 2 layer** | **2x veloce** |
+Test su RTX 3050 Ti 4GB, N_GPU_LAYERS=15, flash_attn=true, n_ctx=12288.  
+Misurazioni dirette da `llama_cpp.create_chat_completion()` nel container, prompt singolo "Spiega in 5 righe cos'è una rete neurale."
 
-### Modifiche Performance
+| Modello | File | VRAM chat | Prompt tok | Completion tok | Wall time (s) | Tok/s | Note |
+|---|---|---|---|---|---|---|---|
+| **Gemma 4 E2B QAT** (attivo) | `qat-UD-Q4_K_XL` (2.5 GB) | 1036 MiB (25%) | 24 | 118 | 17.15 | **6.88** | Modello primario, 2.1B param, 35 blocchi |
+| **Qwen3.5-4B** (backup) | `UD-Q4_K_XL` (2.8 GB) | 1924 MiB (47%) | 26 | ~119 | 21.34 | **~5.58** | +86% VRAM, -19% tok/s vs Gemma 4 |
+| **Gemma 4 E2B Q4_K_M** | `Q4_K_M` (2.9 GB) | 1118 MiB (27%) | 24 | 86 | 20.05 | **4.29** | +82 MiB VRAM, -38% tok/s vs QAT |
+
+Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
+
+| Modello | Prompt tok | Completion tok | Wall time (s) | Tok/s |
+|---|---|---|---|---|
+| Gemma 4 E2B QAT | 32 | 136 | 22.76 | **5.98** |
+| Qwen3.5-4B | 32 | ~129 | 18.70 | **~6.90** |
+| Gemma 4 E2B Q4_K_M | 32 | 125 | 24.09 | **5.19** |
+
+**Conclusione:** Il Q4_K_M è **peggiore** del QAT su tutti i fronti: VRAM superiore (1118 vs 1036 MiB), tok/s inferiore (4.29 vs 6.88), e crasha ugualmente a N_GPU_LAYERS=18 (stesso segfault del QAT). Qwen3.5 è comparabile in velocità (~6.24 tok/s media vs ~6.43 del QAT) ma usa il 86% più VRAM. **Il QAT rimane la scelta ottimale** per RTX 3050 Ti 4GB: miglior rapporto qualità/VRAM/velocità.
+
+### Cronologia Modifiche Recenti
 
 | Data | Modifica | Impatto |
 |---|---|---|
-| 22/06 | `N_GPU_LAYERS 18→19` | +1 layer GPU, TTFT -24% |
-| 22/06 | `n_threads 4→6` | +20% CPU fallback layers |
-| 22/06 | Embed `n_gpu_layers 0→2` | Embedding query 2x |
-| 22/06 | Reranker fp16 | -600 MB RAM, 2x veloce |
-| 22/06 | Revert `n_batch 2048→512` | TTFT da 14s→7.8s (2048 peggiorava) |
-| 22/06 | `Observer(inotify)→PollingObserver` | Watchdog funziona su Docker bind mount + symlink |
-| 22/06 | `rag.py`: inode tracking in os.walk | Previene loop infiniti su symlink circolari |
-| 22/06 | `main.py`: nested symlink cleanup dopo creazione | DirectorySnapshot non si blocca più |
+| 23/06 | **Gemma 4 E2B QAT attivo** | VRAM 1036MiB (25%), -46% vs Qwen3.5 |
+| 23/06 | **Benchmark completi (3 modelli)** | QAT: 6.88 tok/s, Qwen3.5: ~5.58, Q4_K_M: 4.29 |
+| 23/06 | N_GPU_LAYERS=18 → crash confermato su QAT e Q4_K_M | Segfault oltre 15 layer |
+| 23/06 | Dashboard GPU charts + counter tracking | Chart.js 3 grafici, inferenza counters |
+| 23/06 | Overlay CUDA 13.0 su base 12.2 | GPU inference stabile su driver 580.x |
+| 22/06 | PollingObserver + inode tracking | Watchdog funziona su Docker bind mount |
+| 22/06 | Reranker fp16, n_batch=512, n_threads=6 | TTFT -24%, RAM -50% |
 
 ### Download Modelli
 
@@ -305,8 +332,8 @@ FLASHRANK_MODEL=ms-marco-MiniLM-L-6-v2
 # Installa huggingface_hub se necessario
 pip install huggingface_hub
 
-# Worker — Gemma 4 E2B (NON ENTRA in 4GB VRAM - serve GPU ≥8GB)
-# I file sono già scaricati ma inutilizzabili sulla RTX 3050 Ti (4GB).
+# Worker — Gemma 4 E2B QAT (attivo, 15 layer GPU, ~1036 MiB VRAM)
+# I file sono già scaricati in jarvis/models/.
 # huggingface-cli download unsloth/gemma-4-E2B-it-GGUF \
 #   gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf \
 #   --local-dir /home/alfio/Projects/ai-ecosystem/jarvis/models/
@@ -357,15 +384,6 @@ Tutti i container comunicano nella rete Docker `ai_network`. I nomi dei containe
 ```bash
 # Connessione diretta
 ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
-
-# Copia file sulla VPS
-scp -i /home/alfio/.ssh/ovh_rsa FILE debian@51.38.135.179:/home/debian/ai-ecosystem/
-
-# Sync dati Worker → Master (script pronto)
-./sync_to_master.sh
-
-# Sync via Tailscale (dopo setup VPN)
-MASTER_IP=100.64.0.1 ./sync_to_master.sh
 ```
 
 ---
@@ -380,18 +398,19 @@ MASTER_IP=100.64.0.1 ./sync_to_master.sh
 | `jarvis/llm_engine.py` | ✅ Ottimizzato | n_batch=512, n_threads=6, embed n_gpu_layers=2, chat_format=None, thinking mode, offloading+failover |
 | `jarvis/rag.py` | ✅ Ottimizzato | Reranker Qwen3 fp16 su CPU, project_id nei payload, substring matching multi-word, inode tracking in os.walk per evitare loop symlink |
 | `jarvis/prompt_builder.py` | ✅ Corretto | Isolamento progetto per conversazione, memoria filtrata per progetto, history 20 msg, finestra progetto attivo |
-| `jarvis/state.py` | ✅ Migliorato | conversation_id per contesto progetto, helper get/set_last_project |
+| `jarvis/state.py` | ✅ Migliorato | conversation_id per contesto progetto, helper get/set_last_project; counter inferenza (total_requests, total_prompt_tokens, total_completion_tokens) |
 | `jarvis/main.py` | ✅ Corretto | reset-all pulisce last_project_context, conversation_id passato alla pipeline, PollingObserver watchdog, cleanup nested symlink |
 | `jarvis/telegram_bot.py` | ✅ Corretto | user_id normalizzato a string, session TTL resetta progetto |
 | `jarvis/model_profiles.py` | ✅ Nuovo | Auto-rilevamento famiglia modello da nome GGUF (Qwen, Gemma, DeepSeek, Llama, Mistral, Phi, Command-R) |
-| `jarvis/Dockerfile` | ✅ Stabile | llama-cpp-python da master GitHub (fix minori vari) |
+| `jarvis/dashboard.py` | ✅ Riscritto | GPU monitor real-time con time-series charts (Chart.js), inference counters, modelli, Qdrant collections |
+| `jarvis/Dockerfile` | ✅ CUDA 13.0 | overlay cuda-compiler-13-0 + cudart-dev + cublas-dev su base 12.2; llama-cpp-python buildato con GGML_CUDA=on |
 | `docker-compose.vps.yml` | ✅ Pronto | Stack Master senza GPU (no sezione deploy) |
 | `docker-compose.worker.yml` | ✅ Pronto | QDRANT_HOST da .env, volumi mem0+documents montati |
 | `start_master.sh` | ✅ Pronto | Usa docker-compose.vps.yml |
 | `start_worker.sh` | ✅ Pronto | Modalità Worker GPU |
-| `.env` (Worker locale) | ✅ Ottimizzato | N_GPU_LAYERS=19, LLM_NUM_CTX=16384, tutti i parametri performance impostati |
+| `.env` (Worker locale) | ✅ Ottimizzato | N_GPU_LAYERS=15, LLM_NUM_CTX=12288, flash_attn=true |
 | `sync_to_master.sh` | ✅ Creato | Script rsync con verifica SSH |
-| **Istanza Locale** | ✅ **ONLINE** | Jarvis attivo, Qdrant+Mem0+RAG+Reranker funzionanti |
+| **Istanza Locale** | ✅ **ONLINE** | Gemma 4 E2B QAT GPU inference (15 layer, 1036MiB/25% VRAM chart, 1432MiB/35% totale), CUDA 13.0 overlay, dashboard con GPU charts |
 
 ### ⏳ Da Completare (Operazioni Manuali sulla VPS)
 
@@ -426,10 +445,10 @@ MASTER_IP=100.64.0.1 ./sync_to_master.sh
 - **Python version split**: Il container ha DUE Python: `python3` (3.10.12, senza watchdog) e `python` (3.11, con watchdog). Granian usa `#!/usr/bin/python` (3.11). Testare watchdog con `/usr/bin/python`, NON con `python3`. Questo è un'eredità del Dockerfile multi-stage; non merge le due installazioni.
 - **`EXTERNAL_PROJECTS`** nel `.env` contiene percorsi assoluti validi SOLO sul laptop di Alfio. Sulla VPS questo campo deve essere vuoto o contenere percorsi validi sulla VPS.
 - **`chat_format=None`** in `llm_engine.py` funziona con Qwen3.5 e Gemma 4 (usa il template Jinja2 embedded nel GGUF). Non cambiare.
-- **`n_gpu_layers`** attuale è `19` (stabile su RTX 3050 Ti 4GB). Non superare `19` — `22` causa CUDA OOM durante `llama_decode`. Sulla VPS DEVE essere `0` (impostato tramite `N_GPU_LAYERS=0` nel `.env`).
+- **`n_gpu_layers`** attuale è `15` su RTX 3050 Ti 4GB. `N_GPU_LAYERS=15` con `flash_attn=true` lascia VRAM headroom per KV cache 12K e buffer computazionali. **Non superare `15` su Gemma 4 E2B QAT** — `18+` causa segfault per via dei 418 tensori Q4_0 incompatibili CUDA_Host (35 blocchi totali). Su Qwen3.5 (32 layer, nessun Q4_0) si può arrivare a `19`, ma `22+` causa CUDA OOM. Sulla VPS DEVE essere `0`.
 - Il **Dockerfile** installa `llama-cpp-python` dalla master di GitHub (non PyPI) per avere gli ultimi fix di llama.cpp. Il build è lento (~5-10 minuti) ma necessario.
-- **Gemma 4 E2B NON può essere usato** sulla RTX 3050 Ti (4GB VRAM) — ha 35 blocchi e 418 tensori Q4_0 incompatibili CUDA_Host. Vedi §11 Bug 1 per i dettagli completi.
-- **Qwen3.5-4B** è il modello definitivo per questo hardware. Non cercare alternative.
+- **Gemma 4 E2B QAT** è ora il modello attivo con N_GPU_LAYERS=15 (1036 MiB VRAM, 25%). Qwen3.5-4B è in backup (1924 MiB VRAM, 47%). Vedi §11 Bug 1 per i dettagli sui limiti.
+- **Qwen3.5-4B** è ora in backup — usare se Gemma 4 E2B dovesse presentare problemi.
 - Le **collezioni Qdrant** sono versionate con il suffisso definito in `VECTOR_DB_VERSION`. Le versioni obsolete vengono eliminate automaticamente all'avvio.
 - **Isolamento progetto**: il sistema ora supporta `conversation_id` per separare il contesto tra conversazioni concorrenti. Il Telegram usa `chat_id`, l'HTTP API accetta header `X-Conversation-Id` o body `conversation_id`.
 - **Memoria filtrata per progetto**: quando un progetto è attivo, Mem0 cerca solo ricordi di quel progetto. Per conversazione generica (saluti), la memoria non viene iniettata per evitare contaminazione.
@@ -443,7 +462,7 @@ MASTER_IP=100.64.0.1 ./sync_to_master.sh
 - Le modifiche al modello LLM (parametri, path) si effettuano SOLO nel `.env`.
 - Per testare Jarvis localmente: `curl -X POST http://localhost:8000/api/chat -H "Content-Type: application/json" -d '{"model":"local","messages":[{"role":"user","content":"..."}],"stream":false}'`
 - **Per isolamento progetto**: passare sempre `conversation_id` nelle richieste API (header `X-Conversation-Id` o body `conversation_id`). Il Telegram lo fa automaticamente con `chat_id`.
-- **N_GPU_LAYERS** non deve superare 19 su RTX 3050 Ti 4GB. Valori ≥22 causano CUDA OOM.
+- **N_GPU_LAYERS** non deve superare 15 su Gemma 4 E2B QAT (segfault a 18+). Su Qwen3.5 max 19 (OOM a 22+). Sulla VPS sempre 0.
 
 ---
 
@@ -485,71 +504,31 @@ Le skill in `jarvis/skills/` vengono caricate automaticamente a runtime da `skil
 ### Sviluppo Locale
 
 ```bash
-# Avviare l'istanza locale (Worker)
+# Avviare/Riavviare il Worker
 cd /home/alfio/Projects/ai-ecosystem
 ./start_worker.sh
+docker compose -f docker-compose.worker.yml up -d jarvis_worker
 
-# Avviare Qdrant separatamente (per modalità offline)
-docker run -d --name qdrant_local \
-  --network ai_network \
-  -p 6333:6333 \
-  -v "$(pwd)/data/qdrant:/qdrant/storage" \
-  qdrant/qdrant:latest
-
-# Verificare che Jarvis sia online
-curl http://localhost:8000/
-
-# Test chat con il modello
-curl -s -X POST http://localhost:8000/api/chat \
-  -H "Content-Type: application/json" \
+# Test rapido modello
+curl -s -X POST http://localhost:8000/api/chat -H "Content-Type: application/json" \
   -d '{"model":"local","messages":[{"role":"user","content":"Ciao, presentati"}],"stream":false}' \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['message']['content'][:300])"
 
-# Test con conversation_id per isolamento progetto
-curl -s -X POST http://localhost:8000/api/chat \
-  -H "Content-Type: application/json" \
-  -H "X-Conversation-Id: neuro-net-session-1" \
-  -d '{"model":"local","messages":[{"role":"user","content":"Lavoriamo su NeuroNet"}],"stream":false}'
-
-# Test performance (ttft + tok/s)
-curl -s -X POST http://localhost:8000/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"model":"local","messages":[{"role":"user","content":"Ciao, chi sei?"}],"stream":false}' \
-  -w '\n\n⏱️ Tempo totale: %{time_total}s\n' \
-  -o /dev/null
-
-# Vedere i log del container
+# Log worker
 docker logs jarvis_worker --tail=50 -f
 
-# Rebuilddare il container dopo modifiche al Dockerfile
-docker compose -f docker-compose.worker.yml build --no-cache
-docker compose -f docker-compose.worker.yml up -d
-
-# Reset RAG (cancella vettori e riesegue ingestion)
-curl -X POST http://localhost:8000/api/reset-all
-
-# Albero del progetto indicizzato
-curl http://localhost:8000/api/project-tree | python3 -c "import sys,json; print(json.load(sys.stdin).get('tree','')[:500])"
+# Rebuild full
+docker compose -f docker-compose.worker.yml build --no-cache && docker compose -f docker-compose.worker.yml up -d
 ```
 
-### Gestione VPS
+### Gestione VPS (Master)
 
 ```bash
 # Connessione SSH
 ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 
-# Deploy aggiornamenti sulla VPS
-scp -i /home/alfio/.ssh/ovh_rsa -r jarvis/ debian@51.38.135.179:/home/debian/ai-ecosystem/jarvis/
-
-# Sincronizzazione dati locale → VPS
+# Sync dati locale → VPS
 ./sync_to_master.sh
-
-# Avviare il Master sulla VPS (da eseguire sulla VPS)
-cd /home/debian/ai-ecosystem && ./start_master.sh
-
-# Log Master sulla VPS
-ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179 \
-  "docker logs jarvis --tail=50 2>&1"
 ```
 
 ### Qdrant — Gestione Collezioni
@@ -579,37 +558,50 @@ tar -xvzf backup_ai_YYYYMMDD.tar.gz
 
 ## 11. Bug Noti e Workaround
 
-### 🐛 Bug 1: Gemma 4 E2B — NON ENTRA in 4GB VRAM (RTX 3050 Ti)
+### 🐛 Bug 1: Gemma 4 E2B QAT — Limite N_GPU_LAYERS=15 (segfault oltre)
 
-**ERRORE COMUNE DA NON RIPETERE:** La documentazione precedente diceva che Gemma 4 E2B ha 18 layer e che serviva un fix software (PR #22133). **Entrambe le affermazioni sono dimostrate false dall'analisi del 22/06/2026.**
+**AGGIORNAMENTO 23/06/2026:** Gemma 4 E2B QAT ora FUNZIONA con N_GPU_LAYERS=15 (1036 MiB VRAM, 25% della VRAM totale). Sei mesi fa si pensava che il modello non entrasse in 4GB — in realtà **entra benissimo** con la variante QAT UD-Q4_K_XL (2.62 GB su disco, 1036 MiB in VRAM a 15 layer GPU).
 
 #### Dati Reali (verificati dal caricamento):
 
-| Caratteristica | Stima errata (prima) | Valore reale |
-|---|---|---|
-| Blocchi (layer) | 18 | **35** (`gemma4.block_count = 35`) |
-| Parametri totali | 9B (MoE) | **4.6B** (`size_label = 4.6B`) |
-| Tensori totali | — | **541** |
-| Tensori Q4_0 (incompatibili CUDA) | — | **418/541** |
-| Embedding dim | — | 1536 |
-| FFN dim | — | 6144 |
-| Attention heads | — | 8, KV=1 (GQA single head) |
+| Caratteristica | Valore reale |
+|---|---|
+| Blocchi (layer) totali | **35** (`gemma4.block_count = 35`) |
+| Parametri totali | **2.1B** (4.6B size_label) |
+| Tensori totali | **541** |
+| Tensori Q4_0 (incompatibili CUDA_Host) | **418/541** |
+| Embedding dim | 1536 |
+| FFN dim | 6144 |
+| Attention heads | 8, KV=1 (GQA single head) |
 
-**Problema reale:** Il modello ha **35 blocchi** (non 18). Con `N_GPU_LAYERS=18`, solo gli ultimi 18 vanno su GPU. I restanti 17 su CPU. Inoltre **418 tensori su 541 sono in formato Q4_0**, che non può usare il buffer CUDA_Host:
+#### Il Problema: N_GPU_LAYERS > 15
+
+Con `N_GPU_LAYERS=18`, il processo worker crasha con **segfault** (`[ERROR] Unexpected exit from worker-1`). Causa: 418 tensori su 541 sono in formato **Q4_0** che non può usare il buffer CUDA_Host. Oltre un certo numero di layer, il backend CUDA di llama.cpp non riesce a gestire la frammentazione tra buffer compatibili e incompatibili.
+
 ```
 tensor 'token_embd.weight' (q4_0) (and 417 others) cannot be used with preferred buffer type CUDA_Host, using CPU instead
 ggml_backend_cuda_buffer_type_alloc_buffer: allocating 530.58 MiB on device 0: cudaMalloc failed: out of memory
 ```
 
-Il `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)` (PR #22133) è un bug separato che colpisce **solo configurazioni multi-GPU** (es. 2x Tesla V100). Sulla singola RTX 3050 Ti **non si verifica mai** — il blocco reale è la mancanza di VRAM.
+**N_GPU_LAYERS=15** evita il crash perché lascia sufficienti layer su CPU da evitare il buffer split fatale. Con 15 layer su GPU:
+- Chat model VRAM: **1036 MiB** (25%)
+- Embed model VRAM: **+400 MiB** (totale 1432 MiB / 35%)
+- Headroom: **2.6 GB** liberi per KV cache + buffer computazionali — 7.4x rispetto a Qwen3.5
 
-**Workaround definitivo:** Qwen3.5-4B (32 layer, 0 tensori Q4_0, embedding 2560) è il modello massimo che entra in 4GB VRAM. Gemma 4 E2B richiederebbe una GPU con ≥8GB VRAM.
+**Workaround:** Mantenere `N_GPU_LAYERS=15`. Non aumentare oltre 15 su Gemma 4 E2B QAT.
 
-**Tentativi falliti (tutti OOM):**
-| Quantizzazione | Dimensione | Tensori | Risultato |
-|---|---|---|---|
-| `qat-UD-Q4_K_XL` | 2.5 GB | 541 (418 Q4_0) | ❌ CUDA OOM |
-| `Q4_K_M` | 2.9 GB | 601 | ❌ CUDA OOM |
+#### Performance a N_GPU_LAYERS=15 con Gemma 4 E2B (QAT):
+- TTFT (primo token): ~8s
+- Generation speed: **6.88 tok/s** (misurato, prompt 24 tok → 118 tok out)
+- GPU temp peak: 86°C (sotto 89°C)
+- VRAM: 1036MiB (25%) chat + ~400MiB embed = 1432MiB (35%) totale
+
+#### Modelli disponibili in `jarvis/models/`:
+| Quantizzazione | Dimensione | Tensori | VRAM (15 layer) | Tok/s | Stato |
+|---|---|---|---|---|---|
+| `qat-UD-Q4_K_XL` | 2.62 GB | 541 (418 Q4_0) | 1036 MiB (25%) | **6.88** | ✅ FUNZIONA (N_GPU_LAYERS=15) |
+| `Q4_K_M` | 2.9 GB | 601 | 1118 MiB (27%) | 4.29 | ⚠️ TESTATO — +8% VRAM, -38% tok/s vs QAT, crash uguale a 18 layer |
+| `Qwen3.5-4B-UD-Q4_K_XL` | 2.5 GB | ? | 1924 MiB (47%) | ~10 | ⏳ Backup (2x VRAM, più veloce) |
 
 ### 🐛 Bug 2: Mem0 Connection Refused all'avvio
 
@@ -629,132 +621,50 @@ Il `GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)` (PR #22133) è un bug s
 
 **Soluzione:** Mantenere `N_GPU_LAYERS=19` nel `.env`. Questo lascia 13 layer su CPU con VRAM stabile a ~3.566 / 4.096 MiB (87%).
 
-**Performance a N_GPU_LAYERS=19:**
-- TTFT (primo token): ~7.8s
-- Generation speed: ~10 tok/s
-- Embedding query: 2x rapido (2 layer su GPU)
+### 🐛 Bug 9: CUDA 12.2 Incompatibile con Driver 580.x — GPU Crash
+
+**Problema:** Il container basato su `nvidia/cuda:12.2.2-devel-ubuntu22.04` crasha con `CUDA error` in `ggml-cuda.cu:103` su host con driver NVIDIA ≥ 580.x. Causa: CUDA 12.2 runtime è incompatibile con CUDA 13.0 driver (non è forward-compatible per GPU kernel).
+
+**Diagnosi rapida:**
+```bash
+nvidia-smi  # Se mostra CUDA Version: 13.0 → serve rebuild con overlay
+docker logs jarvis_worker | grep -i "ggml_cuda_can_mul_mat\|cuda error"
+```
+
+**Soluzione:** Overlay CUDA 13.0 su base 12.2. Aggiungere al Dockerfile:
+```dockerfile
+RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb \
+    && apt-get update \
+    && apt-get install -y cuda-compiler-13-0 cuda-cudart-dev-13-0 libcublas-dev-13-0
+```
+
+**llama-cpp-python** va buildato da sorgente contro CUDA 13.0:
+```bash
+CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" pip install llama-cpp-python --no-binary llama-cpp-python
+```
+
+**Note:**
+- `libcublas-dev-13-0` (840MB) è necessario quando llama.cpp cmake richiede il target `CUDA::cublas`. Senza, il link fallisce con `cannot find -lcublas`.
+- Il `.dockerignore` deve escludere `jarvis/models/` per evitare di copiare 8.7GB di modelli nel build context.
+- Il build richiede ~5-10 minuti su connessione lenta.
 
 ### 🐛 Bug 5: Contaminazione Progetti nella Conversazione
 
-**Problema:** Jarvis rispondeva con informazioni del progetto sbagliato (es. parlava di StreamAI IPTV quando l'utente chiedeva di NeuroNet).
+*(Risolto — mantenere conversation_id per isolamento, vedere §8 🟢 APPROCCIO CORRETTO)*
 
-**Cause multiple (tutte risolte):**
-1. **Memoria cross-progetto**: Quando `active_project=None`, Mem0 restituiva ricordi di TUTTI i progetti → fix: saltare memoria quando nessun progetto attivo.
-2. **Nessun conversation_id**: Due conversazioni concorrenti sovrascrivevano `last_project_context` → fix: contesto per `user_id + conversation_id`.
-3. **Albero progetto globale**: `project_tree_cache` conteneva TUTTI i progetti, iniettato in ogni risposta → fix: filtrato per progetto attivo.
-4. **Cross-collection mode**: Query codice senza progetto cercava in TUTTE le collezioni → fix: restituisce vuoto se nessun progetto rilevato.
-5. **Finestra storia 10 messaggi**: `detect_project_in_conversation` non vedeva menzioni del progetto oltre il decimo messaggio → fix: finestra portata a 20 messaggi.
+### 🐛 Bug 8: Watchdog Filesystem
 
-### 🐛 Bug 6: TTFT Regressione con n_batch Elevato
+*(Risolto — PollingObserver + inode tracking + nested symlink cleanup)*
 
-**Problema:** Con `n_batch=2048`, il TTFT è peggiorato da 10s a 14s. Causa: con solo 19/32 layer su GPU, ogni step processa 2048 token sui layer CPU (lenti). La pipeline GPU/CPU asincrona funziona meglio con batch piccoli (512) che permettono più step paralleli.
+**Problema originale:** `Observer` (inotify) non funziona su bind mount Docker con symlink. Inoltre NeuroNet crea un symlink circolare (`data/documents/NeuroNet → /app/documents/`) che blocca `DirectorySnapshot.walk()` in loop infinito.
 
-**Soluzione:** Mantenere `n_batch=512` in `llm_engine.py`.
+**Soluzione (3 livelli):**
+1. `Observer(inotify)` → `PollingObserver` (scandir ogni 1s, funziona su Docker)
+2. `rag.py`: `visited_inodes` set in tutti gli `os.walk(followlinks=True)` per rilevare e bloccare loop
+3. `main.py`: dopo creazione symlink, rimuove `data/documents/NeuroNet → /app/documents/` auto-referenziale
 
-### 🐛 Bug 7: Torch Dynamo Conflicts con Transformers 5.x
-
-**Problema:** `torch 2.12.1` + `transformers 5.x` causa `ValueError: Duplicate dispatch rule` all'import di `torch._dynamo`. Il reranker Qwen3 non si caricava.
-
-**Soluzione:** Impostare `TORCHDYNAMO_DISABLE=1` prima di importare torch, e usare `transformers<5` (v4.57.6 compatibile).
-
-### 🐛 Bug 8: Watchdog Filesystem — Hang all'avvio e inaffidabilità su Docker bind mount
-
-**Problema:** Il watchdog filesystem (per rilevamento automatico modifiche codice) aveva due bug distinti che impedivano il funzionamento su Docker.
-
-#### Bug 8a: Observer (inotify) non funziona su bind mount Docker
-
-**Problema:** `Observer` (basato su inotify) non rileva modifiche a file attraverso i bind mount Docker quando il percorso montato contiene symlink a progetti esterni (`/host_fs/...` → `/app/documents/Progetto`). Inotify segue i symlink in modo inaffidabile attraverso mount point Docker.
-
-**Workaround originale (rimosso):** Il codice originale provava a creare watcher separati per ogni percorso reale (`path_mapping`) e confrontare manualmente i path con `os.stat` — ma era complesso e ancora inaffidabile.
-
-**Soluzione definitiva:** Sostituire `Observer` (inotify) con `PollingObserver` (`from watchdog.observers.polling import PollingObserver`). Il PollingObserver:
-- Usa `os.scandir` + `os.stat` periodici (non inotify)
-- Funziona su qualsiasi filesystem, incluso Docker bind mount
-- Segue correttamente i symlink (perché scandir/stat operano sul target del symlink)
-- È platform-independent
-- Configurazione: `timeout=1` (poll ogni 1 secondo + ~0.74s per scansionare 134k file)
-
-**Dettagli implementativi:**
-- L'import è condizionale (`if WATCHDOG_ENABLED: from watchdog.observers.polling import PollingObserver as Observer`)
-- Il `PollingEmitter.start()` chiama `on_thread_start()` (che prende lo snapshot iniziale) NEL THREAD PRINCIPALE, poi parte il thread background
-- `WATCHDOG_ENABLED` è determinato in `config.py` da un `try: from watchdog.observers import Observer` — attenzione: watchdog è installato per **Python 3.11** (`/usr/bin/python`) ma non per **Python 3.10** (`/usr/bin/python3`). Granian usa `#!/usr/bin/python` (3.11), quindi watchdog è disponibile al runtime.
-
-#### Bug 8b: Circular symlink → DirectorySnapshot.walk() loop infinito
-
-**Problema:** Il progetto NeuroNet contiene `data/documents/` che, quando montato in `/app/documents/`, crea il symlink `NeuroNet/data/documents/NeuroNet → /app/documents/` (puntando al root del volume). Questo genera un loop infinito in qualsiasi `os.walk(followlinks=True)`, incluso:
-1. `DirectorySnapshot.__init__` → `DirectorySnapshot.walk()` (usato da PollingObserver)
-2. Tutti i `os.walk()` in `rag.py` (`ingest_local_documents`, `generate_workspace_skeletons`, ecc.)
-
-**Effetto:** L'applicazione si blocca all'avvio perché `observer.start()` → `PollingEmitter.on_thread_start()` → `_take_snapshot()` → `DirectorySnapshot.walk()` entra nel loop infinito e non ritorna mai.
-
-**Soluzione approntata (3 livelli di difesa):**
-
-1. **`rag.py` — Inode tracking in `os.walk`**:
-   In tutti i 4 punti dove si usa `os.walk(followlinks=True)`, viene mantenuto un set `visited_inodes = set()` di tuple `(st_dev, st_ino)`. Quando si incontra una directory già visitata (stesso device+inode), si resetta `d[:] = []` per bloccare la discesa:
-   ```python
-   visited_inodes = set()
-   for r, d, f in os.walk(DOC_DIR, followlinks=True):
-       st = os.stat(r)
-       inode_key = (st.st_dev, st.st_ino)
-       if inode_key in visited_inodes:
-           d[:] = []
-           continue
-       visited_inodes.add(inode_key)
-   ```
-
-2. **`main.py` — Rimozione nested symlink DOPO la creazione**:
-   Il ciclo di creazione symlink in `EXTERNAL_PROJECTS` viene eseguito PRIMA della pulizia. Subito dopo, si esegue un secondo ciclo che controlla ogni progetto per `data/documents/NomeProgetto` → se è un symlink che punta al progetto stesso, viene rimosso. L'ordine è critico:
-   ```
-   PRIMA: crea symlink /app/documents/NeuroNet → /host_fs/.../NeuroNet
-   POI:   rimuovi NeuroNet/data/documents/NeuroNet → /host_fs/.../NeuroNet (loop)
-   POI:   observer.start() → DirectorySnapshot cammina pulito
-   ```
-
-3. **Nota:** `DirectorySnapshot` (libreria watchdog) NON ha inode tracking — cammina ricorsivamente senza protezione. È quindi essenziale che il loop non esista fisicamente sul filesystem PRIMA che il watcher parta.
-
-**Verifica:** La soluzione è stata verificata misurando `DirectorySnapshot` su 134.329 file in 0.74 secondi, senza blocchi. Il log mostra:
-```
-🧹 Rimosso symlink ricorsivo: /host_fs/.../data/documents/NeuroNet → /host_fs/.../
-👀 Watchdog PollingObserver Partito (intervallo 1s).
-```
-
-**Performance watchdog:**
-- Snapshot iniziale: ~0.74s per 134k file
-- Polling interval: 1s + 0.74s = ~1.74s per ciclo
-- Rilevamento file: rilevato entro ~1.74s dalla creazione
-- Elaborazione: ~14s totali (detection → debounce 1s → queue → embedding → upsert)
-
----
-
-## 12. Accesso ai Sistemi
-
-### VPS Master (OVH)
-
-| Parametro | Valore |
-|---|---|
-| IP Pubblico | `51.38.135.179` |
-| Utente SSH | `debian` |
-| Chiave SSH | `/home/alfio/.ssh/ovh_rsa` |
-| Percorso progetto | `/home/debian/ai-ecosystem` |
-| OS | Debian |
-| Risorse | 8 vCore, 24GB RAM, SSD, NO GPU |
-
-### Laptop Worker (Alfio)
-
-| Parametro | Valore |
-|---|---|
-| OS | OpenSUSE Tumbleweed |
-| Hardware | LENOVO IdeaPad Gaming 3, i5-11300H, 16GB RAM |
-| GPU | NVIDIA RTX 3050 Ti Laptop (4GB VRAM) |
-| Percorso progetto | `/home/alfio/Projects/ai-ecosystem` |
-
-### Servizi in Esecuzione (Locale — al 2026-06-19)
-
-| Servizio | URL | Stato |
-|---|---|---|
-| Jarvis Worker | http://localhost:8000 | ✅ ONLINE |
-| Qdrant locale | http://localhost:6333 | ✅ ONLINE |
-| Dashboard Jarvis | http://localhost:8000/dashboard | ✅ ONLINE |
+**Performance:** snapshot 134k file in ~0.74s, rilevamento entro ~1.74s, elaborazione ~14s.
 
 ---
 
