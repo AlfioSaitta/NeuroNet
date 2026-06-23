@@ -34,7 +34,15 @@ total_completion_tokens = 0
 
 # GPU metrics history for time-series charts (max 300 entries ~15 min at 3s interval)
 gpu_history: list[dict] = []
+sys_history: list[dict] = []
+inference_history: list[dict] = []
 MAX_GPU_HISTORY = 300
+MAX_SYS_HISTORY = 300
+MAX_INF_HISTORY = 300
+
+# Previous CPU stats for delta calculation
+cpu_prev_idle: float = 0
+cpu_prev_total: float = 0
 
 # Contesto progetto attivo per utente e conversazione (persiste tra turni)
 # Mappa: user_id -> conversation_id -> nome_progetto

@@ -214,6 +214,25 @@ HTML_CONTENT = r"""
         </div>
 
         <div class="card" style="padding: 16px;">
+            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 8px;"><span class="dot dot-accent pulsing"></span> Neural Engine</div>
+            <div style="margin-bottom: 8px;">
+                <div style="display:flex; justify-content:space-between; font-size:0.8rem;">
+                    <span style="color:var(--text-muted);">Chat</span>
+                    <span id="model-chat-side" style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">--</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:0.8rem;">
+                    <span style="color:var(--text-muted);">Embed</span>
+                    <span id="model-embed-side" style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">--</span>
+                </div>
+            </div>
+            <ul class="data-list" id="model-details-side" style="margin-bottom:8px;"></ul>
+            <div style="border-top:1px solid rgba(255,255,255,0.05);padding-top:6px;">
+                <div style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Features</div>
+                <div id="features-list" style="display:grid;grid-template-columns:1fr 1fr;gap:3px;"></div>
+            </div>
+        </div>
+
+        <div class="card" style="padding: 16px;">
             <div class="card-header" style="font-size: 0.85rem; margin-bottom: 12px;"><span class="dot dot-accent pulsing"></span> GPU Monitor</div>
             <div class="gpu-temp" style="margin-bottom: 10px;">
                 <div class="temp-val" id="gpu-temp">--</div>
@@ -278,41 +297,28 @@ HTML_CONTENT = r"""
     </div>
 
     <div class="main-content">
-        <div class="grid-container">
-            
+        <!-- Top metric cards row -->
+        <div class="grid-container" style="grid-template-columns: repeat(2, 1fr);">
             <div class="card fade-in">
                 <div class="card-header"><span class="dot dot-primary pulsing"></span> Inference</div>
                 <div class="metric-row">
                     <div class="metric">
                         <div class="val" id="inf-requests" style="color: var(--warning);">0</div>
-                        <div class="label">Total Requests</div>
+                        <div class="label">Requests</div>
                     </div>
                     <div class="metric">
                         <div class="val" id="inf-tokens" style="color: #d8b4fe;">0</div>
-                        <div class="label">Completion Tokens</div>
+                        <div class="label">Compl. Tok</div>
                     </div>
                     <div class="metric">
                         <div class="val" id="inf-prompt-tokens" style="color: var(--secondary);">0</div>
-                        <div class="label">Prompt Tokens</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card fade-in">
-                <div class="card-header"><span class="dot dot-accent pulsing"></span> Neural Engine</div>
-                <div class="metric-row">
-                    <div class="metric">
-                        <div class="val" id="model-chat" style="color: #d8b4fe; font-size: 1.1rem;">--</div>
-                        <div class="label">Chat Model</div>
+                        <div class="label">Prompt Tok</div>
                     </div>
                     <div class="metric">
-                        <div class="val" id="model-embed" style="color: var(--secondary); font-size: 1.1rem;">--</div>
-                        <div class="label">Embed Model</div>
+                        <div class="val" id="inf-tok-per-sec" style="color: var(--primary);">0</div>
+                        <div class="label">Tok/s (3s)</div>
                     </div>
                 </div>
-                <ul class="data-list" id="model-details">
-                    <li style="color: var(--text-muted);">Loading...</li>
-                </ul>
             </div>
 
             <div class="card fade-in">
@@ -326,8 +332,6 @@ HTML_CONTENT = r"""
                         <div class="val" id="active-todos">0</div>
                         <div class="label">Pending To-Dos</div>
                     </div>
-                </div>
-                <div class="metric-row">
                     <div class="metric">
                         <div class="val" id="allowed-users">0</div>
                         <div class="label">ACL Users</div>
@@ -340,6 +344,71 @@ HTML_CONTENT = r"""
             </div>
         </div>
 
+        <!-- Monitoring section: 2 rows of charts -->
+        <div style="margin: 16px 0 6px; display:flex; align-items:center; gap:10px;">
+            <span class="dot dot-secondary pulsing"></span>
+            <span style="font-weight:600;font-size:0.8rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);">Monitoring</span>
+            <span style="flex:1;height:1px;background:rgba(255,255,255,0.06);"></span>
+        </div>
+        <div class="grid-container" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 6px;">
+            <div class="card" style="padding: 10px;">
+                <div class="card-header" style="font-size: 0.7rem; margin-bottom: 4px;">
+                    <span class="dot dot-secondary pulsing"></span> GPU Temperature
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;" id="chart-current-temp">--°C</span>
+                </div>
+                <div style="position: relative; height: 80px;"><canvas id="chart-temp"></canvas></div>
+            </div>
+            <div class="card" style="padding: 10px;">
+                <div class="card-header" style="font-size: 0.7rem; margin-bottom: 4px;">
+                    <span class="dot dot-primary pulsing"></span> VRAM
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;" id="chart-current-vram">-- MiB</span>
+                </div>
+                <div style="position: relative; height: 80px;"><canvas id="chart-vram"></canvas></div>
+            </div>
+            <div class="card" style="padding: 10px;">
+                <div class="card-header" style="font-size: 0.7rem; margin-bottom: 4px;">
+                    <span class="dot dot-accent pulsing"></span> GPU Utilization
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;" id="chart-current-util">--%</span>
+                </div>
+                <div style="position: relative; height: 80px;"><canvas id="chart-util"></canvas></div>
+            </div>
+        </div>
+        <div class="grid-container" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 12px;">
+            <div class="card" style="padding: 10px;">
+                <div class="card-header" style="font-size: 0.7rem; margin-bottom: 4px;">
+                    <span class="dot dot-warning pulsing"></span> System RAM
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;" id="chart-current-ram">--%</span>
+                </div>
+                <div style="position: relative; height: 80px;"><canvas id="chart-ram"></canvas></div>
+            </div>
+            <div class="card" style="padding: 10px;">
+                <div class="card-header" style="font-size: 0.7rem; margin-bottom: 4px;">
+                    <span class="dot dot-warning pulsing"></span> CPU Usage
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;" id="chart-current-cpu">--%</span>
+                </div>
+                <div style="position: relative; height: 80px;"><canvas id="chart-cpu"></canvas></div>
+            </div>
+            <div class="card" style="padding: 10px;">
+                <div class="card-header" style="font-size: 0.7rem; margin-bottom: 4px;">
+                    <span class="dot dot-danger pulsing"></span> CPU Temperature
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;" id="chart-current-cpu-temp">--°C</span>
+                </div>
+                <div style="position: relative; height: 80px;"><canvas id="chart-cpu-temp"></canvas></div>
+            </div>
+        </div>
+
+        <!-- Inference Trend -->
+        <div class="grid-container" style="grid-template-columns: 1fr; margin-bottom: 12px;">
+            <div class="card" style="padding: 10px;">
+                <div class="card-header" style="font-size: 0.7rem; margin-bottom: 4px;">
+                    <span class="dot dot-primary pulsing"></span> Inference Trend (tok/s)
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;" id="chart-current-tok-per-sec">-- tok/s</span>
+                </div>
+                <div style="position: relative; height: 80px;"><canvas id="chart-tok-per-sec"></canvas></div>
+            </div>
+        </div>
+
+        <!-- Bottom 2-col row -->
         <div class="grid-container">
             <div class="card fade-in" style="display: flex; flex-direction: column;">
                 <div class="card-header"><span class="dot dot-primary"></span> Vector Knowledge Base (RAG)</div>
@@ -362,40 +431,10 @@ HTML_CONTENT = r"""
                 </ul>
             </div>
 
-            <div class="card fade-in">
+            <div class="card fade-in" style="display: flex; flex-direction: column;">
                 <div class="card-header"><span class="dot dot-accent"></span> GPU Processes</div>
-                <div id="gpu-proc-list" style="max-height: 280px; overflow-y: auto;">
+                <div id="gpu-proc-list" style="flex:1; overflow-y: auto;">
                     <pre id="gpu-proc-text" style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-muted); margin: 0; white-space: pre-wrap;">Loading...</pre>
-                </div>
-            </div>
-        </div>
-
-        <div class="grid-container" style="grid-template-columns: repeat(3, 1fr);">
-            <div class="card fade-in" style="padding: 14px;">
-                <div class="card-header" style="font-size: 0.75rem; margin-bottom: 6px;">
-                    <span class="dot dot-secondary pulsing"></span> Temperature
-                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;" id="chart-current-temp">--°C</span>
-                </div>
-                <div style="position: relative; height: 100px;">
-                    <canvas id="chart-temp"></canvas>
-                </div>
-            </div>
-            <div class="card fade-in" style="padding: 14px;">
-                <div class="card-header" style="font-size: 0.75rem; margin-bottom: 6px;">
-                    <span class="dot dot-primary pulsing"></span> VRAM
-                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;" id="chart-current-vram">-- MiB</span>
-                </div>
-                <div style="position: relative; height: 100px;">
-                    <canvas id="chart-vram"></canvas>
-                </div>
-            </div>
-            <div class="card fade-in" style="padding: 14px;">
-                <div class="card-header" style="font-size: 0.75rem; margin-bottom: 6px;">
-                    <span class="dot dot-accent pulsing"></span> Utilization
-                    <span style="margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;" id="chart-current-util">--%</span>
-                </div>
-                <div style="position: relative; height: 100px;">
-                    <canvas id="chart-util"></canvas>
                 </div>
             </div>
         </div>
@@ -609,7 +648,7 @@ HTML_CONTENT = r"""
             isModalOpen = false;
         }
 
-        let tempChart, vramChart, utilChart;
+        let tempChart, vramChart, utilChart, ramChart, cpuChart, cpuTempChart, tokPerSecChart;
 
         function createLineChart(canvasId, color, fillColor, yMin, yMax) {
             const ctx = document.getElementById(canvasId).getContext('2d');
@@ -640,6 +679,10 @@ HTML_CONTENT = r"""
             tempChart = createLineChart('chart-temp', '#00b8ff', 'rgba(0,184,255,0.08)', 30, 100);
             vramChart = createLineChart('chart-vram', '#00ffcc', 'rgba(0,255,204,0.08)', 0, 100);
             utilChart = createLineChart('chart-util', '#7b2cbf', 'rgba(123,44,191,0.08)', 0, 100);
+            ramChart = createLineChart('chart-ram', '#ffcc00', 'rgba(255,204,0,0.08)', 0, 100);
+            cpuChart = createLineChart('chart-cpu', '#ff8833', 'rgba(255,136,51,0.08)', 0, 100);
+            cpuTempChart = createLineChart('chart-cpu-temp', '#ff3366', 'rgba(255,51,102,0.08)', 20, 110);
+            tokPerSecChart = createLineChart('chart-tok-per-sec', '#00ffcc', 'rgba(0,255,204,0.08)', 0, 20);
         }
 
         function updateCharts(history) {
@@ -666,6 +709,34 @@ HTML_CONTENT = r"""
             utilChart.data.labels = labels;
             utilChart.data.datasets[0].data = utils;
             utilChart.update('none');
+        }
+
+        function updateSysCharts(sysHistory) {
+            if (!sysHistory || sysHistory.length === 0) return;
+            const labels = sysHistory.map(() => '');
+            ramChart.data.labels = labels;
+            ramChart.data.datasets[0].data = sysHistory.map(h => h.ram_pct);
+            ramChart.update('none');
+            cpuChart.data.labels = labels;
+            cpuChart.data.datasets[0].data = sysHistory.map(h => h.cpu_pct);
+            cpuChart.update('none');
+            cpuTempChart.data.labels = labels;
+            cpuTempChart.data.datasets[0].data = sysHistory.map(h => h.cpu_temp);
+            cpuTempChart.update('none');
+            const last = sysHistory[sysHistory.length-1];
+            document.getElementById('chart-current-ram').innerText = last.ram_pct + '%';
+            document.getElementById('chart-current-cpu').innerText = last.cpu_pct + '%';
+            document.getElementById('chart-current-cpu-temp').innerText = (last.cpu_temp ?? '--') + '°C';
+        }
+
+        function updateInfCharts(infHistory) {
+            if (!infHistory || infHistory.length === 0) return;
+            const labels = infHistory.map(() => '');
+            tokPerSecChart.data.labels = labels;
+            tokPerSecChart.data.datasets[0].data = infHistory.map(h => h.tokens_per_sec);
+            tokPerSecChart.update('none');
+            const last = infHistory[infHistory.length-1];
+            document.getElementById('chart-current-tok-per-sec').innerText = (last.tokens_per_sec ?? 0) + ' tok/s';
         }
 
         fetchStats = async function() {
@@ -705,6 +776,26 @@ HTML_CONTENT = r"""
                     updateCharts(data.gpu_history);
                 }
 
+                if (data.features) {
+                    const f = data.features;
+                    const container = document.getElementById('features-list');
+                    container.innerHTML = '';
+                    const labels = {
+                        llm: 'LLM Engine', embeddings: 'Embeddings', rag: 'RAG (Qdrant)',
+                        memory: 'Memory (mem0)', ast_parser: 'AST Parser',
+                        file_watcher: 'File Watcher', telegram: 'Telegram Bot',
+                        cron: 'Cron Scheduler', searxng: 'SearXNG',
+                        crawl4ai: 'Crawl4AI', whisper: 'Voice I/O', userbots: 'Userbots'
+                    };
+                    for (const [key, label] of Object.entries(labels)) {
+                        const active = f[key];
+                        const div = document.createElement('div');
+                        div.style.cssText = 'font-size:0.7rem;display:flex;align-items:center;gap:4px;';
+                        div.innerHTML = `<span style="color:${active ? 'var(--primary)' : 'var(--text-muted)'};">${active ? '✓' : '○'}</span> ${label}`;
+                        container.appendChild(div);
+                    }
+                }
+
                 if (data.rag_stats) {
                     document.getElementById('indexed-files').innerText = data.rag_stats.indexed_files ?? 0;
                     document.getElementById('pending-queue').innerText = data.rag_stats.pending_events ?? 0;
@@ -712,18 +803,21 @@ HTML_CONTENT = r"""
                 }
 
                 if (data.models) {
-                    document.getElementById('model-chat').innerText = data.models.chat_model || 'N/A';
-                    document.getElementById('model-embed').innerText = data.models.embed_model || 'N/A';
-                    const detailList = document.getElementById('model-details');
-                    detailList.innerHTML = '';
+                    const chatName = data.models.chat_model || 'N/A';
+                    const embedName = data.models.embed_model || 'N/A';
+                    document.getElementById('model-chat-side').innerText = chatName.split('/').pop();
+                    document.getElementById('model-embed-side').innerText = embedName.split('/').pop();
+                    const sideList = document.getElementById('model-details-side');
+                    sideList.innerHTML = '';
                     if (data.models.details) {
                         data.models.details.forEach(d => {
                             const li = document.createElement('li');
+                            li.style.fontSize = '0.7rem';
                             li.innerHTML = `<span>${d.label}</span> <span class="badge badge-accent">${d.value}</span>`;
-                            detailList.appendChild(li);
+                            sideList.appendChild(li);
                         });
                     } else {
-                        detailList.innerHTML = '<li style="color: var(--text-muted);">No model loaded</li>';
+                        sideList.innerHTML = '<li style="color: var(--text-muted);font-size:0.7rem;">No model loaded</li>';
                     }
                 }
 
@@ -731,6 +825,17 @@ HTML_CONTENT = r"""
                     document.getElementById('inf-requests').innerText = data.inference.total_requests ?? 0;
                     document.getElementById('inf-tokens').innerText = data.inference.total_completion_tokens ?? 0;
                     document.getElementById('inf-prompt-tokens').innerText = data.inference.total_prompt_tokens ?? 0;
+                }
+                if (data.inference_history && data.inference_history.length > 0) {
+                    const lastInf = data.inference_history[data.inference_history.length-1];
+                    document.getElementById('inf-tok-per-sec').innerText = lastInf.tokens_per_sec ?? 0;
+                }
+
+                if (data.sys_history) {
+                    updateSysCharts(data.sys_history);
+                }
+                if (data.inference_history) {
+                    updateInfCharts(data.inference_history);
                 }
 
                 const qList = document.getElementById('qdrant-list');
@@ -793,6 +898,66 @@ HTML_CONTENT = r"""
 @dashboard_router.get("/dashboard")
 async def get_dashboard():
     return HTMLResponse(HTML_CONTENT)
+
+
+def collect_sys_metrics():
+    result = {"ram_pct": 0, "ram_used_mb": 0, "ram_total_mb": 0, "cpu_pct": 0, "cpu_temp": None}
+    try:
+        with open('/proc/meminfo') as f:
+            mem = {}
+            for line in f:
+                parts = line.split()
+                if parts[0] == 'MemTotal:': mem['total'] = int(parts[1]) // 1024
+                if parts[0] == 'MemAvailable:': mem['avail'] = int(parts[1]) // 1024
+                if 'total' in mem and 'avail' in mem: break
+        if 'total' in mem and mem['total'] > 0:
+            result['ram_total_mb'] = mem['total']
+            result['ram_used_mb'] = mem['total'] - mem.get('avail', 0)
+            result['ram_pct'] = round(result['ram_used_mb'] / mem['total'] * 100, 1)
+    except Exception:
+        pass
+
+    try:
+        with open('/proc/stat') as f:
+            line = f.readline().strip().split()
+        if line[0] == 'cpu' and len(line) >= 5:
+            user = int(line[1]); nice = int(line[2]); sys = int(line[3]); idle = int(line[4])
+            total = user + nice + sys + idle
+            prev_idle = state.cpu_prev_idle
+            prev_total = state.cpu_prev_total
+            if prev_total > 0 and prev_idle > 0:
+                delta_idle = idle - prev_idle
+                delta_total = total - prev_total
+                result['cpu_pct'] = round((1 - delta_idle / delta_total) * 100, 1) if delta_total > 0 else 0
+            state.cpu_prev_idle = idle
+            state.cpu_prev_total = total
+    except Exception:
+        pass
+
+    for zone in ['/sys/class/thermal/thermal_zone0/temp',
+                  '/sys/class/thermal/thermal_zone1/temp',
+                  '/sys/class/thermal/thermal_zone2/temp']:
+        try:
+            with open(zone) as f:
+                val = int(f.read().strip()) // 1000
+                if 20 < val < 110:
+                    result['cpu_temp'] = val
+                    break
+        except Exception:
+            continue
+
+    state.sys_history.append({
+        "ts": time.time(),
+        "ram_pct": result["ram_pct"],
+        "ram_used_mb": result["ram_used_mb"],
+        "ram_total_mb": result["ram_total_mb"],
+        "cpu_pct": result["cpu_pct"],
+        "cpu_temp": result["cpu_temp"]
+    })
+    if len(state.sys_history) > state.MAX_SYS_HISTORY:
+        state.sys_history = state.sys_history[-state.MAX_SYS_HISTORY:]
+
+    return result
 
 
 async def get_gpu_metrics():
@@ -870,6 +1035,34 @@ async def get_stats():
 
     gpu = await get_gpu_metrics()
 
+    sys_m = collect_sys_metrics()
+
+    # Inference delta tracking
+    prev_req = getattr(state, '_prev_total_requests', None)
+    prev_pt = getattr(state, '_prev_prompt_tokens', None)
+    prev_ct = getattr(state, '_prev_completion_tokens', None)
+    cur_req = getattr(state, 'total_requests', 0)
+    cur_pt = getattr(state, 'total_prompt_tokens', 0)
+    cur_ct = getattr(state, 'total_completion_tokens', 0)
+
+    if prev_req is not None and prev_pt is not None and prev_ct is not None:
+        delta_req = cur_req - prev_req
+        delta_pt = cur_pt - prev_pt
+        delta_ct = cur_ct - prev_ct
+        state.inference_history.append({
+            "ts": time.time(),
+            "requests": max(delta_req, 0),
+            "prompt_tokens": max(delta_pt, 0),
+            "completion_tokens": max(delta_ct, 0),
+            "tokens_per_sec": round(max(delta_ct, 0) / 3, 1) if delta_ct > 0 else 0
+        })
+        if len(state.inference_history) > state.MAX_INF_HISTORY:
+            state.inference_history = state.inference_history[-state.MAX_INF_HISTORY:]
+
+    state._prev_total_requests = cur_req
+    state._prev_prompt_tokens = cur_pt
+    state._prev_completion_tokens = cur_ct
+
     qdrant_collections = []
     qdrant_up = False
     try:
@@ -909,10 +1102,22 @@ async def get_stats():
             cp2 = getattr(cm, 'context_params', None)
             ngl = (getattr(mp2, 'n_gpu_layers', '?') if mp2 else
                    getattr(cm, 'n_gpu_layers', '?'))
-            details.append({"label": "n_gpu_layers", "value": str(ngl)})
+            try:
+                meta = cm.metadata if hasattr(cm, 'metadata') else {}
+                total_layers = meta.get('gemma4.block_count') or meta.get('llama.block_count') or meta.get('LLaMA.block_count') or '?'
+            except Exception:
+                total_layers = '?'
+            ngl_str = f"{ngl} / {total_layers}" if total_layers != '?' else str(ngl)
+            details.append({"label": "n_gpu_layers", "value": ngl_str})
             try:
                 ctx = cm.n_ctx()
-                details.append({"label": "n_ctx", "value": str(ctx)})
+                try:
+                    meta = cm.metadata if hasattr(cm, 'metadata') else {}
+                    ctx_max = meta.get('gemma4.context_length') or meta.get('llama.context_length') or meta.get('LLaMA.context_length') or cm.n_ctx_train()
+                except Exception:
+                    ctx_max = None
+                ctx_str = f"{ctx} / {ctx_max}" if ctx_max and ctx_max != ctx else str(ctx)
+                details.append({"label": "n_ctx", "value": ctx_str})
             except Exception:
                 details.append({"label": "n_ctx", "value": "?"})
             fa_type = (getattr(cp2, 'flash_attn_type', None) if cp2 else
@@ -991,6 +1196,21 @@ async def get_stats():
 
     total_chunks = sum(len(f_data.get('chunks', [])) for f_data in state.rag_state.values())
 
+    features = {
+        "llm": bool(engine and engine.chat_model),
+        "embeddings": bool(engine and engine.embed_model),
+        "rag": qdrant_up,
+        "memory": bool(state.memory),
+        "ast_parser": True,
+        "file_watcher": True,
+        "telegram": bool(state.telegram_app),
+        "cron": active_crons > 0 or True,
+        "searxng": searxng_up,
+        "crawl4ai": crawl4ai_up,
+        "whisper": bool(state.telegram_app),
+        "userbots": True,
+    }
+
     return JSONResponse({
         "rag_stats": {
             "indexed_files": len(state.rag_state),
@@ -998,6 +1218,7 @@ async def get_stats():
             "total_chunks": total_chunks
         },
         "models": models,
+        "features": features,
         "inference": {
             "total_requests": total_requests,
             "total_prompt_tokens": total_prompt_tokens,
@@ -1005,6 +1226,9 @@ async def get_stats():
         },
         "gpu": gpu,
         "gpu_history": state.gpu_history[-120:] if state.gpu_history else [],
+        "sys_metrics": sys_m,
+        "sys_history": state.sys_history[-120:] if state.sys_history else [],
+        "inference_history": state.inference_history[-120:] if state.inference_history else [],
         "qdrant_collections": qdrant_collections,
         "agent_stats": {
             "active_todos": active_todos,
