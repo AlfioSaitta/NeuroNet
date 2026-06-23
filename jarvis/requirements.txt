@@ -30,3 +30,4 @@ apscheduler
 asyncssh
 telethon>=1.33.0
 tzdata
+tiktoken>=0.13.0

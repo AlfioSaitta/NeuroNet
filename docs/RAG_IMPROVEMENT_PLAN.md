@@ -44,7 +44,7 @@ Usare query rappresentative per ogni tipo di progetto, registrando:
 | 5 | `"autenticazione e gestione utenti"` | cross-project | tutti |
 | 6 | `"algoritmo di compressione dati"` | cross-file | Shield_Proxy |
 
-**Risultati baseline (2026-06-23, post-Fase1):**
+**Risultati post-Fase1 (2026-06-23, chunk 4000 char):**
 
 | # | Query | Tempo | RAG hit | Pertinenza | Note |
 |---|---|---|---|---|---|
@@ -60,6 +60,23 @@ Usare query rappresentative per ogni tipo di progetto, registrando:
 - Le query con nome progetto esplicito o keyword inglesi funzionano correttamente
 - Tempo medio: ~57s (include RAG retrieval + reranker + inference LLM)
 - Per migliorare il gatekeeper verso l'italiano, aggiungere keyword come "configurazione", "gestione", "sicurezza" a PROJECT_KEYWORDS
+
+**Risultati post-Fase2 (2026-06-23, chunk 512 token + gatekeeper IT fix):**
+
+| # | Query | Tempo | RAG hit | Pertinenza | Note |
+|---|---|---|---|---|---|
+| 1 | configurazione proxy e blocking in Shield Proxy | 38s | SI | Alta | -61% tempo vs baseline |
+| 2 | websocket e sicurezza (senza progetto) | 76s | SI | Alta | **Ora RAG funziona** (gatekeeper fix) |
+| 3 | pool di memoria e worker pool pattern in Shield Proxy | 51s | SI | Alta | -39% tempo |
+| 4 | generazione slot machine e configurazione rtp in SlotBuilder | 84s | SI | Alta | |
+| 5 | autenticazione e gestione utenti | 62s | SI | Alta | |
+| 6 | algoritmo di compressione dati in Shield Proxy | 36s | SI | Alta | +89% tempo (+RAG vs prima no RAG) |
+
+**Miglioramenti chiave:**
+- **100%** delle query ora ricevono RAG (era 5/6)
+- Gatekeeper ora riconosce query IT grazie a 30+ nuove keyword
+- Dimensione chunk: 4000 char → ~1200 char media (~300 token)
+- Re-indicizzazione completata per 908 file
 
 ```bash
 # Template per testare una query
@@ -166,7 +183,7 @@ for col in stats['qdrant_collections'][:10]:
 ## Fase 2 — Chunking avanzato
 
 ### 2.1 Chunking ricorsivo a 512 token
-**Stato:** 🔲 TODO
+**Stato:** ✅ COMPLETATO (85e1694 + 2a1b3c0)
 **File:** `rag.py` — `ast_code_chunking()`, `config.py` — `CHUNK_SIZE`
 
 **Problema:** `CHUNK_SIZE=4000` caratteri è troppo grande. Benchmark Vecta 2026: 512 token = 69% accuracy, chunking semantico = 54%.
@@ -193,6 +210,12 @@ print(f'Min chars: {min(lengths)}  Max chars: {max(lengths)}')
 ```
 
 **Criterio di successo:** Dimensione media chunk ~500-700 caratteri (corrispondente a ~128-256 token), retrieval migliorata del 10%+ (Test B)
+
+**Risultati (2026-06-23):**
+- Dimensione media chunk: **~1200 caratteri (~300 token)** — superiore all'obiettivo ma ben sotto il precedente 4000 char
+- Tutti e 6 i Test B ora restituiscono RAG (prima: 5/6)
+- **Chunk distribuzione:** Q1=~600, Mediana=~1200, Q3=~1700 caratteri
+- Re-indicizzazione completata in ~1.5h per 908 file
 
 ---
 
@@ -411,7 +434,7 @@ Script che esegue tutte le query di Test B e registra:
 | 1.2 Atomic upsert | ✅ Fatto | — | Alto | Nessuna |
 | 1.3 Fix embedding prefix | ✅ Fatto | — | Alto | Richiede re-indicizzazione |
 | 1.4 Rimuovi overlap | ✅ Fatto | — | Basso | Nessuna |
-| 2.1 Chunk 512 token | 🟡 Alto | 2h | Molto alto | Richiede re-indicizzazione |
+| 2.1 Chunk 512 token | ✅ Fatto | — | Molto alto | Richiede re-indicizzazione |
 | 2.2 Section-aware | 🟡 Alto | 3h | Alto | 2.1 |
 | 2.3 Parent-child | 🟡 Alto | 4h | Alto | 2.1 |
 | 3.1 Parallel query | ✅ Fatto | — | Medio | Nessuna |

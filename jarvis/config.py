@@ -111,7 +111,7 @@ else:
 VECTOR_DB_VERSION = os.getenv("VECTOR_DB_VERSION", "v1")
 EXTERNAL_PROJECTS = os.getenv("EXTERNAL_PROJECTS", "")
 STATE_FILE = f"/app/mem0_data_v3/rag_state_{VECTOR_DB_VERSION}.json"
-CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "4000"))
+CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "512"))
 CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "0"))
 MAX_CONCURRENT_EMBEDDINGS = int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", "8"))
 DOC_DIR = "/app/documents"

@@ -11,6 +11,7 @@ import re
 import asyncio
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText, PointStruct, VectorParams, Distance
 from pathlib import Path
+import tiktoken
 
 from config import (
     logger, QDRANT_HOST, DOC_COLLECTION, DOC_DIR,
@@ -196,10 +197,36 @@ def extract_dependencies(content, ext):
     return list(deps)
 
 
+# Tokenizer per chunking ricorsivo a 512 token
+_tokenizer = tiktoken.get_encoding("o200k_base")
+
+def _token_count(text: str) -> int:
+    return len(_tokenizer.encode(text, disallowed_special=()))
+
+def _recursive_token_split(text: str, max_tokens: int) -> list[str]:
+    """Divide il testo ricorsivamente a max_tokens usando i confini di riga."""
+    if _token_count(text) <= max_tokens or not text:
+        return [text]
+    # Trova il punto di rottura: cerca \n\n (paragrafo) poi \n (riga) poi spazio
+    target = len(text) * max_tokens // max(1, _token_count(text))
+    # Arretra fino a un boundary
+    boundary = text.rfind("\n\n", 0, max(target, 1))
+    if boundary < max(target // 2, 1):
+        boundary = text.rfind("\n", 0, max(target, 1))
+    if boundary < max(target // 2, 1):
+        boundary = text.rfind(" ", 0, max(target, 1))
+    if boundary < max(target // 2, 1):
+        boundary = target
+    left = text[:boundary].rstrip()
+    right = text[boundary:].lstrip()
+    if not left or not right:
+        return [text]
+    return _recursive_token_split(left, max_tokens) + _recursive_token_split(right, max_tokens)
+
 def ast_code_chunking(content, filepath):
     """Chunking intelligente: usa Tree-sitter per estrarre funzioni/classi mantenendo il contesto gerarchico."""
     if not AST_ENABLED:
-        return [content[i:i+CHUNK_SIZE] for i in range(0, len(content), CHUNK_SIZE - CHUNK_OVERLAP)]
+        return _recursive_token_split(content, CHUNK_SIZE)
 
     ext = os.path.splitext(filepath)[1].lower()
     parser = Parser()
@@ -235,31 +262,26 @@ def ast_code_chunking(content, filepath):
         parser.language = YAML
         nodes = ['document', 'block_mapping_pair', 'block_sequence_item']
     elif ext == '.md':
-        # Markdown Semantic Chunking
+        # Markdown Semantic Chunking (per heading)
         chunks = []
         current_chunk = []
-        current_len = 0
         for line in content.split('\n'):
-            if line.startswith('#') and current_len > 200:
+            if line.startswith('#') and current_chunk and _token_count('\n'.join(current_chunk)) > CHUNK_SIZE // 4:
                 chunks.append('\n'.join(current_chunk))
                 current_chunk = [line]
-                current_len = len(line)
             else:
                 current_chunk.append(line)
-                current_len += len(line) + 1
         if current_chunk:
             chunks.append('\n'.join(current_chunk))
-        
         final_md_chunks = []
         for chunk in chunks:
-            if len(chunk) > CHUNK_SIZE:
-                for i in range(0, len(chunk), CHUNK_SIZE - CHUNK_OVERLAP):
-                    final_md_chunks.append(chunk[i:i+CHUNK_SIZE])
+            if _token_count(chunk) > CHUNK_SIZE:
+                final_md_chunks.extend(_recursive_token_split(chunk, CHUNK_SIZE))
             else:
                 final_md_chunks.append(chunk)
         return final_md_chunks
     else:
-        return [content[i:i+CHUNK_SIZE] for i in range(0, len(content), CHUNK_SIZE - CHUNK_OVERLAP)]
+        return _recursive_token_split(content, CHUNK_SIZE)
 
     try:
         tree = parser.parse(bytes(content, "utf8"))
@@ -313,7 +335,7 @@ def ast_code_chunking(content, filepath):
         traverse(tree.root_node)
 
         if not chunks:
-            return [content[i:i+CHUNK_SIZE] for i in range(0, len(content), CHUNK_SIZE - CHUNK_OVERLAP)]
+            return _recursive_token_split(content, CHUNK_SIZE)
 
         # Fondere dinamicamente piccoli frammenti AST consecutivi
         merged_chunks = []
@@ -322,12 +344,13 @@ def ast_code_chunking(content, filepath):
             if not current_chunk:
                 current_chunk = c
             else:
-                if len(current_chunk) + len(c) < CHUNK_SIZE:
+                combined = current_chunk + "\n\n" + c
+                if _token_count(combined) <= CHUNK_SIZE:
                     words1 = set(current_chunk.split())
                     words2 = set(c.split())
                     overlap = len(words1 & words2) / len(words1 | words2) if words1 and words2 else 0
-                    if overlap > 0.05 or len(c) < 300:
-                        current_chunk += "\n\n" + c
+                    if overlap > 0.05 or _token_count(c) < CHUNK_SIZE // 4:
+                        current_chunk = combined
                     else:
                         merged_chunks.append(current_chunk)
                         current_chunk = c
@@ -339,18 +362,15 @@ def ast_code_chunking(content, filepath):
 
         final_chunks = []
         for chunk in merged_chunks:
-            if len(chunk) > 6000:
-                # Fallback: Se un singolo nodo è troppo grande (es. un'intera classe gigante),
-                # il frammento viene diviso ma grazie al 'traverse' avremo comunque i metodi individuali con contesto.
-                for i in range(0, len(chunk), CHUNK_SIZE - CHUNK_OVERLAP):
-                    final_chunks.append(chunk[i:i+CHUNK_SIZE])
+            if _token_count(chunk) > CHUNK_SIZE:
+                final_chunks.extend(_recursive_token_split(chunk, CHUNK_SIZE))
             else:
                 final_chunks.append(chunk)
 
         return final_chunks
     except Exception as e:
         logger.warning(f"Errore tree-sitter parsing: {e}")
-        return [content[i:i+CHUNK_SIZE] for i in range(0, len(content), CHUNK_SIZE - CHUNK_OVERLAP)]
+        return _recursive_token_split(content, CHUNK_SIZE)
 
 
 # ==============================================================================
@@ -487,10 +507,8 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
             if valid_chunks:
                 texts_to_embed = valid_chunks
                 
-                # Dividiamo la chiamata get_embedding in mini-batch da 3 per rilasciare frequentemente 
-                # il PriorityLock e permettere ai messaggi chat di inserirsi rapidamente.
                 vectors = []
-                for i in range(0, len(texts_to_embed), 3):
+                for i in range(0, len(texts_to_embed), MAX_CONCURRENT_EMBEDDINGS):
                     batch = texts_to_embed[i:i+3]
                     batch_vectors = await get_embedding(batch)
                     vectors.extend(batch_vectors)
