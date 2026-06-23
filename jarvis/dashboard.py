@@ -813,7 +813,7 @@ async def get_stats():
                        getattr(cm, 'flash_attn_type', None))
             if fa_type is None:
                 fa = '?'
-            elif fa_type == 2:  # LLAMA_FLASH_ATTN_TYPE_ENABLED
+            elif fa_type == 1:
                 fa = 'True'
             else:
                 fa = 'False'
