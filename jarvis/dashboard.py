@@ -158,41 +158,52 @@ HTML_CONTENT = r"""
         .btn:hover { background: var(--primary); color: #000; box-shadow: 0 0 15px var(--primary); }
 
         .modal {
-            display: none; position: fixed; z-index: 1000; left: 0; top: 0;
-            width: 100%; height: 100%; background-color: rgba(5, 7, 10, 0.95);
+            display: none; position: fixed; z-index: 1000;
+            left: 320px; top: 0;
+            width: calc(100% - 320px); height: 100%;
+            background-color: rgba(5, 7, 10, 0.97);
             backdrop-filter: blur(10px);
         }
         .modal-header {
-            position: absolute; top: 0; left: 0; width: 100%; padding: 20px 40px;
+            position: absolute; top: 0; left: 0; width: 100%; padding: 12px 24px;
             display: flex; justify-content: space-between; align-items: center;
-            background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
+            background: linear-gradient(to bottom, rgba(0,0,0,0.85), transparent);
             z-index: 1010;
         }
-        .modal-header h2 { margin: 0; font-size: 1.3rem; font-weight: 600; display: flex; align-items: center; gap: 15px;}
-        .close-modal { color: #fff; font-size: 32px; cursor: pointer; transition: 0.2s; line-height: 1;}
+        .modal-header h2 { margin: 0; font-size: 1rem; font-weight: 600; display: flex; align-items: center; gap: 10px;}
+        .close-modal { color: #fff; font-size: 28px; cursor: pointer; transition: 0.2s; line-height: 1;}
         .close-modal:hover { color: var(--danger); transform: scale(1.1);}
         
-        #graph-container { width: 100vw; height: 100vh; }
-        #filter-container { display: none; align-items: center; gap: 12px; background: rgba(0,0,0,0.5); padding: 6px 14px; border-radius: 8px; border: 1px solid var(--glass-border); }
+        #graph-container { width: 100%; height: 100%; }
+        #filter-container { display: none; align-items: center; gap: 8px; background: rgba(0,0,0,0.5); padding: 4px 12px; border-radius: 8px; border: 1px solid var(--glass-border); }
         #filter-container input, #filter-container select {
-            background: rgba(0,0,0,0.8); color: #fff; padding: 4px 8px;
+            background: rgba(0,0,0,0.8); color: #fff; padding: 3px 8px;
             border: 1px solid var(--glass-border); border-radius: 4px;
-            font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.7rem;
         }
 
         .node-info {
-            position: absolute; bottom: 30px; left: 40px; width: 450px;
-            max-height: 80vh; overflow-y: auto;
-            background: rgba(15, 20, 30, 0.85); border: 1px solid var(--primary);
-            padding: 20px; border-radius: 12px; backdrop-filter: blur(15px);
+            position: absolute; bottom: 20px; left: 20px; width: 380px;
+            max-height: 70vh; overflow-y: auto;
+            background: rgba(10, 15, 25, 0.92); border: 1px solid var(--primary);
+            padding: 16px; border-radius: 10px; backdrop-filter: blur(15px);
             display: none; z-index: 1010;
             box-shadow: 0 10px 40px rgba(0,0,0,0.5), 0 0 20px rgba(0,255,204,0.1);
         }
-        .node-info h3 { margin: 0 0 15px 0; color: var(--primary); font-size: 1rem; border-bottom: 1px solid rgba(0,255,204,0.2); padding-bottom: 10px;}
-        .node-info .property-row { margin-bottom: 12px; }
-        .node-info .property-label { font-size: 0.7rem; color: var(--secondary); text-transform: uppercase; font-weight: 600; margin-bottom: 4px; }
-        .node-info .property-value { font-size: 0.85rem; line-height: 1.4; color: #fff; word-break: break-word;}
-        .node-info pre { margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); }
+        .node-info h3 { margin: 0 0 10px 0; color: var(--primary); font-size: 0.85rem; border-bottom: 1px solid rgba(0,255,204,0.2); padding-bottom: 8px;}
+        .node-info .property-row { margin-bottom: 8px; }
+        .node-info .property-label { font-size: 0.65rem; color: var(--secondary); text-transform: uppercase; font-weight: 600; margin-bottom: 2px; }
+        .node-info .property-value { font-size: 0.8rem; line-height: 1.4; color: #fff; word-break: break-word;}
+        .node-info pre { margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); }
+
+        .graph-legend {
+            position: absolute; bottom: 20px; right: 20px; z-index: 1010;
+            background: rgba(10, 15, 25, 0.85); border: 1px solid rgba(255,255,255,0.08);
+            padding: 10px 14px; border-radius: 8px; font-size: 0.65rem;
+            display: none; flex-direction: column; gap: 3px;
+        }
+        .graph-legend .legend-row { display: flex; align-items: center; gap: 6px; }
+        .graph-legend .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
         
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); }
@@ -444,7 +455,7 @@ HTML_CONTENT = r"""
         <div class="modal-header">
             <h2><span class="dot dot-primary pulsing"></span> <span id="modal-title">Vector Network</span></h2>
             <div id="filter-container">
-                <input type="text" id="node-search" placeholder="Search content..." onkeyup="applyGraphFilter()">
+                <input type="text" id="node-search" placeholder="Search..." onkeyup="applyGraphFilter()">
                 <label style="color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; font-family: 'JetBrains Mono', monospace;">Type:</label>
                 <select id="file-type-filter" onchange="applyGraphFilter()">
                     <option value="ALL">All Files</option>
@@ -457,6 +468,7 @@ HTML_CONTENT = r"""
             <h3>NODE DETAILS</h3>
             <div id="node-content"></div>
         </div>
+        <div class="graph-legend" id="graph-legend"></div>
     </div>
 
     <script>
@@ -505,6 +517,19 @@ HTML_CONTENT = r"""
             }
         }
 
+        const EXT_COLORS = {
+            '.py': '#3572A5', '.js': '#F7DF1E', '.ts': '#3178C6', '.tsx': '#3178C6',
+            '.jsx': '#61DAFB', '.md': '#083FA1', '.html': '#E34F26', '.css': '#563D7C',
+            '.json': '#292929', '.txt': '#888888', '.yaml': '#6CB4EE', '.yml': '#6CB4EE',
+            '.go': '#00ADD8', '.rs': '#DEA584', '.cpp': '#F34B7D', '.c': '#555555',
+            '.java': '#ED8B00', '.sql': '#E38C00',
+        };
+        const EXT_NAMES = { '.py': 'Python', '.js': 'JavaScript', '.ts': 'TypeScript', '.tsx': 'TSX',
+            '.jsx': 'JSX', '.md': 'Markdown', '.html': 'HTML', '.css': 'CSS',
+            '.json': 'JSON', '.yaml': 'YAML', '.yml': 'YAML', '.go': 'Go',
+            '.rs': 'Rust', '.cpp': 'C++', '.c': 'C', '.java': 'Java', '.sql': 'SQL',
+        };
+
         async function openGraphModal(collectionName) {
             isModalOpen = true;
             document.getElementById('graph-modal').style.display = "block";
@@ -513,23 +538,23 @@ HTML_CONTENT = r"""
             document.getElementById('graph-container').innerHTML = '';
             document.getElementById('filter-container').style.display = "none";
             document.getElementById('node-search').value = '';
-            
+
             allNodes = [];
             allLinks = [];
 
             try {
                 const res = await fetch(`/api/dashboard/qdrant/${collectionName}/vectors`);
                 const data = await res.json();
-                
+
                 if(!data.points || data.points.length === 0) {
                     document.getElementById('modal-title').innerText = `${collectionName} - No Vectors Found`;
                     return;
                 }
 
-                document.getElementById('modal-title').innerText = `${collectionName} - Graph Network`;
+                document.getElementById('modal-title').innerText = `${collectionName} — Graph Network (${data.points.length} vectors)`;
 
                 const extSet = new Set();
-                
+
                 data.points.forEach(p => {
                     let ext = "Unknown";
                     const potentialFields = [p.payload.file_path, p.payload.source, p.payload.url];
@@ -546,7 +571,7 @@ HTML_CONTENT = r"""
                     }
                     if (ext === "Unknown" && p.payload) {
                          const payloadStr = JSON.stringify(p.payload);
-                         const match = payloadStr.match(/[\w-]+\.(js|py|tsx|ts|jsx|md|html|css|txt|json)\b/i);
+                         const match = payloadStr.match(/[\w-]+\.(js|py|tsx|ts|jsx|md|html|css|txt|json|yaml|yml|go|rs|cpp|c|java|sql)\b/i);
                          if(match) ext = "." + match[1].toLowerCase();
                     }
 
@@ -556,7 +581,6 @@ HTML_CONTENT = r"""
                         id: p.id,
                         payload: p.payload || {},
                         ext: ext,
-                        val: 1
                     });
                 });
 
@@ -566,24 +590,60 @@ HTML_CONTENT = r"""
                 sortedExts.forEach(e => {
                     const opt = document.createElement('option');
                     opt.value = e;
-                    opt.innerText = e.toUpperCase();
+                    opt.innerText = EXT_NAMES[e] || e.toUpperCase();
                     filterSelect.appendChild(opt);
                 });
-                
+
                 if (sortedExts.length > 1 || allNodes.length > 0) {
                     document.getElementById('filter-container').style.display = "flex";
                 }
 
                 allLinks = data.links || [];
 
+                // Compute node degree (connection count)
+                const degree = {};
+                allLinks.forEach(l => {
+                    const sId = l.source?.id || l.source;
+                    const tId = l.target?.id || l.target;
+                    degree[sId] = (degree[sId] || 0) + 1;
+                    degree[tId] = (degree[tId] || 0) + 1;
+                });
+                const maxDeg = Math.max(1, ...Object.values(degree));
+
+                function nodeColor(node) {
+                    if (node === currentSelectedNode) return '#ff00ff';
+                    return EXT_COLORS[node.ext] || '#888888';
+                }
+
+                // Build legend
+                const legendEl = document.getElementById('graph-legend');
+                legendEl.style.display = 'flex';
+                legendEl.innerHTML = '';
+                sortedExts.forEach(ext => {
+                    const row = document.createElement('div');
+                    row.className = 'legend-row';
+                    const dot = document.createElement('span');
+                    dot.className = 'legend-dot';
+                    dot.style.background = EXT_COLORS[ext] || '#888';
+                    row.appendChild(dot);
+                    row.appendChild(document.createTextNode(EXT_NAMES[ext] || ext));
+                    legendEl.appendChild(row);
+                });
+
                 Graph = ForceGraph()(document.getElementById('graph-container'))
                     .backgroundColor('transparent')
-                    .nodeRelSize(8)
+                    .nodeRelSize(6)
+                    .nodeVal(node => 1 + (degree[node.id] || 0) / maxDeg * 4)
                     .linkDirectionalParticles(link => link.similarity > 0.7 ? 2 : 0)
-                    .linkDirectionalParticleSpeed(d => (d.similarity - 0.6) * 0.02)
-                    .nodeColor(node => node === currentSelectedNode ? '#ff00ff' : '#00ffcc')
-                    .linkColor(link => `rgba(123, 44, 191, ${Math.max(0.1, (link.similarity - 0.5) * 2)})`)
-                    .linkWidth(link => Math.max(1, (link.similarity - 0.6) * 15))
+                    .linkDirectionalParticleSpeed(d => 0.008)
+                    .linkDirectionalParticleWidth(2)
+                    .linkColor(link => {
+                        const a = Math.max(0.1, (link.similarity - 0.35) * 2);
+                        return `rgba(0, 255, 204, ${a})`;
+                    })
+                    .linkWidth(link => Math.max(0.3, (link.similarity - 0.35) * 8))
+                    .nodeColor(nodeColor)
+                    .nodeLabel(node => `${EXT_NAMES[node.ext] || node.ext} — ${degree[node.id] || 0} connections`)
                     .onNodeClick(node => {
                         currentSelectedNode = node;
                         Graph.nodeColor(Graph.nodeColor());
@@ -591,9 +651,9 @@ HTML_CONTENT = r"""
                         const infoBox = document.getElementById('node-info');
                         const contentBox = document.getElementById('node-content');
                         infoBox.style.display = "block";
-                        
+
                         let htmlContent = `<div class="property-row"><div class="property-label">Vector ID</div><div class="property-value">${node.id}</div></div>`;
-                        
+
                         function escapeHtml(unsafe) {
                             return String(unsafe)
                                  .replace(/&/g, "&amp;")
@@ -605,14 +665,14 @@ HTML_CONTENT = r"""
 
                         if(node.payload.text || node.payload.data) {
                             const mainText = node.payload.text || node.payload.data;
-                            htmlContent += `<div class="property-row"><div class="property-label">Primary Text</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 10px; border-radius: 6px;">${escapeHtml(mainText)}</code></pre></div></div>`;
+                            htmlContent += `<div class="property-row"><div class="property-label">Primary Text</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(mainText)}</code></pre></div></div>`;
                         }
-                        
+
                         const payloadStr = JSON.stringify(node.payload, null, 2);
-                        htmlContent += `<div class="property-row"><div class="property-label">Raw Payload (JSON)</div><pre><code class="language-json" style="padding: 10px; border-radius: 6px;">${escapeHtml(payloadStr)}</code></pre></div>`;
-                        
+                        htmlContent += `<div class="property-row"><div class="property-label">Raw Payload (JSON)</div><pre><code class="language-json" style="padding: 8px; border-radius: 4px;">${escapeHtml(payloadStr)}</code></pre></div>`;
+
                         contentBox.innerHTML = htmlContent;
-                        
+
                         contentBox.querySelectorAll('pre code').forEach((block) => {
                             hljs.highlightElement(block);
                         });
@@ -628,8 +688,8 @@ HTML_CONTENT = r"""
                     .graphData({ nodes: allNodes, links: allLinks });
 
                 setTimeout(() => {
-                    Graph.zoomToFit(400);
-                }, 500);
+                    Graph.zoomToFit(400, 50);
+                }, 600);
 
             } catch(e) {
                 console.error(e);
@@ -640,6 +700,7 @@ HTML_CONTENT = r"""
         function closeModal() {
             document.getElementById('graph-modal').style.display = "none";
             document.getElementById('node-info').style.display = "none";
+            document.getElementById('graph-legend').style.display = "none";
             if(Graph) {
                 Graph._destructor();
                 Graph = null;
@@ -1253,17 +1314,19 @@ async def get_stats():
 @dashboard_router.get("/api/dashboard/qdrant/{collection}/vectors")
 async def get_qdrant_vectors(collection: str):
     import numpy as np
+    from collections import defaultdict
     points_data = []
     links_data = []
+    added_pairs = set()
     try:
         res_pts = await state.http_client.post(
             f"http://{QDRANT_HOST}:6333/collections/{collection}/points/scroll",
-            json={"limit": 300, "with_payload": True, "with_vector": True},
+            json={"limit": 500, "with_payload": True, "with_vector": True},
             timeout=5.0
         )
         if res_pts.status_code == 200:
             raw_points = res_pts.json().get("result", {}).get("points", [])
-            
+
             vectors = []
             for p in raw_points:
                 vec = p.get("vector")
@@ -1271,33 +1334,63 @@ async def get_qdrant_vectors(collection: str):
                     vectors.append(vec)
                     del p["vector"]
                 points_data.append(p)
-                
+
             if vectors:
                 vec_mat = np.array(vectors)
                 norms = np.linalg.norm(vec_mat, axis=1, keepdims=True)
                 norms[norms == 0] = 1
                 vec_mat_norm = vec_mat / norms
                 sim_matrix = np.dot(vec_mat_norm, vec_mat_norm.T)
-                
+
+                # Map point index -> filename for diversity filtering
+                filenames = []
+                for p in points_data:
+                    fn = (p.get("payload") or {}).get("filename", "") or ""
+                    filenames.append(fn)
+
                 for i in range(len(vectors)):
-                    similar_indices = np.argsort(sim_matrix[i])[::-1]
-                    added_links = 0
-                    for j in similar_indices:
+                    candidates = []
+                    for j in range(len(vectors)):
                         if i == j:
                             continue
                         sim = float(sim_matrix[i][j])
-                        if sim > 0.6:
-                            if i < j:
-                                links_data.append({
-                                    "source": points_data[i]["id"],
-                                    "target": points_data[j]["id"],
-                                    "similarity": sim
-                                })
-                            added_links += 1
-                        if added_links >= 4:
+                        if sim > 0.45:
+                            same_file = filenames[i] and filenames[j] and filenames[i] == filenames[j]
+                            candidates.append((j, sim, same_file))
+
+                    # Sort by similarity descending
+                    candidates.sort(key=lambda x: -x[1])
+
+                    # Pick links with file diversity: up to 2 same-file, up to 8 total
+                    added = 0
+                    same_file_count = 0
+                    seen_files = set()
+                    for j, sim, same_file in candidates:
+                        pair_key = (min(i, j), max(i, j))
+                        if pair_key in added_pairs:
+                            continue
+
+                        if same_file:
+                            if same_file_count >= 2:
+                                continue
+                            same_file_count += 1
+                        elif filenames[j]:
+                            seen_files.add(filenames[j])
+                            if len(seen_files) > 6:
+                                continue
+
+                        if added >= 10:
                             break
-                            
+
+                        added_pairs.add(pair_key)
+                        links_data.append({
+                            "source": points_data[i]["id"],
+                            "target": points_data[j]["id"],
+                            "similarity": sim
+                        })
+                        added += 1
+
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-        
+
     return JSONResponse({"points": points_data, "links": links_data})
