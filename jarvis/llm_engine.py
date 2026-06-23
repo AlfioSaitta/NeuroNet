@@ -268,22 +268,30 @@ class LlamaEngine:
         if stream:
             async def async_generator():
                 async with PriorityLockContextManager(self.chat_lock, priority=0):
-                    generator = await loop.run_in_executor(
-                        self.executor,
-                        lambda: self.chat_model.create_chat_completion(
-                            messages=messages,
-                            tools=openai_tools,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            presence_penalty=presence_penalty,
-                            frequency_penalty=frequency_penalty,
-                            repeat_penalty=repeat_penalty,
-                            top_p=top_p,
-                            top_k=top_k,
-                            stream=True,
-                            grammar=grammar
+                    try:
+                        generator = await asyncio.wait_for(
+                            loop.run_in_executor(
+                                self.executor,
+                                lambda: self.chat_model.create_chat_completion(
+                                    messages=messages,
+                                    tools=openai_tools,
+                                    temperature=temperature,
+                                    max_tokens=max_tokens,
+                                    presence_penalty=presence_penalty,
+                                    frequency_penalty=frequency_penalty,
+                                    repeat_penalty=repeat_penalty,
+                                    top_p=top_p,
+                                    top_k=top_k,
+                                    stream=True,
+                                    grammar=grammar
+                                )
+                            ),
+                        timeout=300
                         )
-                    )
+                    except asyncio.TimeoutError:
+                        logger.error("LLM streaming timed out after 120s")
+                        yield {"error": "LLM inference timed out"}
+                        return
                     def get_next(gen):
                         try:
                             return next(gen)
@@ -302,23 +310,30 @@ class LlamaEngine:
             return async_generator()
         else:
             async with PriorityLockContextManager(self.chat_lock, priority=0):
-                response = await loop.run_in_executor(
-                    self.executor,
-                    lambda: self.chat_model.create_chat_completion(
-                        messages=messages,
-                        tools=openai_tools,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        presence_penalty=presence_penalty,
-                        frequency_penalty=frequency_penalty,
-                        repeat_penalty=repeat_penalty,
-                        top_p=top_p,
-                        top_k=top_k,
-                        stream=False,
-                        grammar=grammar
+                try:
+                    response = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            self.executor,
+                            lambda: self.chat_model.create_chat_completion(
+                                messages=messages,
+                                tools=openai_tools,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                                presence_penalty=presence_penalty,
+                                frequency_penalty=frequency_penalty,
+                                repeat_penalty=repeat_penalty,
+                                top_p=top_p,
+                                top_k=top_k,
+                                stream=False,
+                                grammar=grammar
+                            )
+                        ),
+                        timeout=120
                     )
-                )
-                return response
+                    return response
+                except asyncio.TimeoutError:
+                    logger.error(f"LLM inference timed out after 120s (max_tokens={max_tokens})")
+                    return {"error": "LLM inference timed out", "choices": [{"message": {"role": "assistant", "content": "Mi dispiace, la generazione della risposta ha superato il tempo limite. Prova con una domanda più specifica."}}]}  # noqa
 
     async def get_embeddings(self, texts, priority=10):
         if not self.embed_model:

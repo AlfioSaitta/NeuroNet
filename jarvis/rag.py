@@ -224,9 +224,10 @@ def _recursive_token_split(text: str, max_tokens: int) -> list[str]:
     return _recursive_token_split(left, max_tokens) + _recursive_token_split(right, max_tokens)
 
 def ast_code_chunking(content, filepath):
-    """Chunking intelligente: usa Tree-sitter per estrarre funzioni/classi mantenendo il contesto gerarchico."""
+    """Chunking intelligente: usa Tree-sitter per estrarre funzioni/classi mantenendo il contesto gerarchico.
+    Returns list of dict: {text: str, section_hierarchy: list[str] | None}"""
     if not AST_ENABLED:
-        return _recursive_token_split(content, CHUNK_SIZE)
+        return [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
 
     ext = os.path.splitext(filepath)[1].lower()
     parser = Parser()
@@ -276,12 +277,13 @@ def ast_code_chunking(content, filepath):
         final_md_chunks = []
         for chunk in chunks:
             if _token_count(chunk) > CHUNK_SIZE:
-                final_md_chunks.extend(_recursive_token_split(chunk, CHUNK_SIZE))
+                for t in _recursive_token_split(chunk, CHUNK_SIZE):
+                    final_md_chunks.append({"text": t, "section_hierarchy": None})
             else:
-                final_md_chunks.append(chunk)
+                final_md_chunks.append({"text": chunk, "section_hierarchy": None})
         return final_md_chunks
     else:
-        return _recursive_token_split(content, CHUNK_SIZE)
+        return [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
 
     try:
         tree = parser.parse(bytes(content, "utf8"))
@@ -290,7 +292,7 @@ def ast_code_chunking(content, filepath):
         # CHUNK 0: PREAMBOLO (prime 50 righe)
         preamble = "\n".join(content.split("\n")[:50])
         if len(preamble.strip()) > 20:
-            chunks.append(f"PREAMBOLO:\n{preamble}")
+            chunks.append({"text": f"PREAMBOLO:\n{preamble}", "section_hierarchy": None})
 
         def get_signature(n):
             # Tenta di estrarre la firma (es. class MyClass extends Parent)
@@ -318,13 +320,11 @@ def ast_code_chunking(content, filepath):
                 if len(b.strip()) > 20:
                     start_line = n.start_point[0] + 1
                     end_line = n.end_point[0] + 1
-                    
-                    # Prepend context (e.g. parent class) to methods/fields
-                    prefix = ""
-                    if not is_context and context_stack:
-                        prefix = f"// CONTESTO GERARCHICO: {' -> '.join(context_stack)}\n"
-                        
-                    chunks.append(f"RIGHE {start_line}-{end_line}:\n{prefix}{b}")
+
+                    chunks.append({
+                        "text": f"RIGHE {start_line}-{end_line}:\n{b}",
+                        "section_hierarchy": list(context_stack) if context_stack else None
+                    })
 
             for c in n.children:
                 traverse(c)
@@ -335,22 +335,23 @@ def ast_code_chunking(content, filepath):
         traverse(tree.root_node)
 
         if not chunks:
-            return _recursive_token_split(content, CHUNK_SIZE)
+            return [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
 
         # Fondere dinamicamente piccoli frammenti AST consecutivi
         merged_chunks = []
-        current_chunk = ""
+        current_chunk = None
         for c in chunks:
             if not current_chunk:
                 current_chunk = c
             else:
-                combined = current_chunk + "\n\n" + c
-                if _token_count(combined) <= CHUNK_SIZE:
-                    words1 = set(current_chunk.split())
-                    words2 = set(c.split())
+                combined_text = current_chunk["text"] + "\n\n" + c["text"]
+                if _token_count(combined_text) <= CHUNK_SIZE:
+                    words1 = set(current_chunk["text"].split())
+                    words2 = set(c["text"].split())
                     overlap = len(words1 & words2) / len(words1 | words2) if words1 and words2 else 0
-                    if overlap > 0.05 or _token_count(c) < CHUNK_SIZE // 4:
-                        current_chunk = combined
+                    if overlap > 0.05 or _token_count(c["text"]) < CHUNK_SIZE // 4:
+                        current_chunk["text"] = combined_text
+                        # Mantieni la gerarchia del primo chunk (più esterna)
                     else:
                         merged_chunks.append(current_chunk)
                         current_chunk = c
@@ -362,15 +363,16 @@ def ast_code_chunking(content, filepath):
 
         final_chunks = []
         for chunk in merged_chunks:
-            if _token_count(chunk) > CHUNK_SIZE:
-                final_chunks.extend(_recursive_token_split(chunk, CHUNK_SIZE))
+            if _token_count(chunk["text"]) > CHUNK_SIZE:
+                for t in _recursive_token_split(chunk["text"], CHUNK_SIZE):
+                    final_chunks.append({"text": t, "section_hierarchy": chunk.get("section_hierarchy")})
             else:
                 final_chunks.append(chunk)
 
         return final_chunks
     except Exception as e:
         logger.warning(f"Errore tree-sitter parsing: {e}")
-        return _recursive_token_split(content, CHUNK_SIZE)
+        return [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
 
 
 # ==============================================================================
@@ -503,9 +505,9 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
             chunks = ast_code_chunking(content, filepath)
             points = []
 
-            valid_chunks = [c for c in chunks if len(c.strip()) >= 50]
+            valid_chunks = [c for c in chunks if len(c["text"].strip()) >= 50]
             if valid_chunks:
-                texts_to_embed = valid_chunks
+                texts_to_embed = [c["text"] for c in valid_chunks]
                 
                 vectors = []
                 for i in range(0, len(texts_to_embed), MAX_CONCURRENT_EMBEDDINGS):
@@ -519,10 +521,13 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
                 _project_id = rel_path.replace('\\', '/').split('/')[0] if '/' in rel_path.replace('\\', '/') else "default"
                 for chunk, vector in zip(valid_chunks, vectors):
                     if vector:
+                        payload = {"filename": rel_path, "text": chunk["text"], "deps": list(deps), "project": _project_id}
+                        if chunk.get("section_hierarchy"):
+                            payload["section_hierarchy"] = chunk["section_hierarchy"]
                         points.append(PointStruct(
                             id=str(uuid.uuid4()),
                             vector=vector,
-                            payload={"filename": rel_path, "text": chunk, "deps": list(deps), "project": _project_id}
+                            payload=payload
                         ))
 
             if points:
@@ -555,6 +560,10 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
 
 async def ingest_local_documents():
     """Scansione completa della cartella documenti: indicizza file nuovi/modificati, rimuove i cancellati."""
+    if state.is_reindexing:
+        logger.info("Re-indexing già in corso, salto scansione duplicata")
+        return
+    state.is_reindexing = True
     async with state.state_lock:
         _load_state_unsafe()
     ignore_filter = GitignoreFilter(DOC_DIR)
@@ -692,6 +701,8 @@ async def ingest_local_documents():
     
     # Aggiorna cache del tree in background (Fix 9.4)
     await update_project_tree_cache()
+    
+    state.is_reindexing = False
 
 
 # ==============================================================================
@@ -960,8 +971,10 @@ async def search_documents(query, is_project_query=False, project_name=None):
             filename = r["meta"].get("filename")
             project_label = r["meta"].get("_project", "")
             project_prefix = f"[{project_label}] " if project_label else ""
+            hierarchy = r["meta"].get("section_hierarchy")
+            hierarchy_prefix = f"// CONTESTO GERARCHICO: {' -> '.join(hierarchy)}\n" if hierarchy else ""
             if filename:
-                primary_docs.append(f"📄 File Primario ({project_prefix}{filename}):\n```\n{r['text']}\n```")
+                primary_docs.append(f"📄 File Primario ({project_prefix}{filename}):\n```\n{hierarchy_prefix}{r['text']}\n```")
             if r["meta"].get("deps"):
                 deps_to_search.update(r["meta"].get("deps"))
 
@@ -1181,6 +1194,9 @@ async def rag_queue_worker():
                     break
                     
             for fp, act in pending.items():
+                if state.is_reindexing:
+                    logger.debug("Re-indexing in corso, salto evento watchdog")
+                    continue
                 rel_path = os.path.relpath(fp, DOC_DIR)
                 try:
                     if act == 'delete':
