@@ -894,8 +894,7 @@ async def search_documents(query, is_project_query=False, project_name=None):
         else:
             per_col_limit = top_k
 
-        results = []
-        for col_name in target_cols:
+        async def _query_col(col_name):
             try:
                 res = await state.qdrant.query_points(
                     collection_name=col_name,
@@ -904,12 +903,18 @@ async def search_documents(query, is_project_query=False, project_name=None):
                     score_threshold=required_score,
                     with_payload=True
                 )
-                # Arricchisce ogni punto con il nome del progetto di provenienza
                 ws = _ws_name(col_name)
                 for point in res.points:
                     point.payload["_project"] = ws
-                results.extend(res.points)
-            except Exception as e: logger.warning(f"Errore silenziato: {e}")
+                return res.points
+            except Exception as e:
+                logger.warning(f"Errore silenziato: {e}")
+                return []
+
+        col_results = await asyncio.gather(*[_query_col(c) for c in target_cols])
+        results = []
+        for pts in col_results:
+            results.extend(pts)
 
         results = sorted(results, key=lambda x: x.score, reverse=True)[:10]
 
@@ -942,8 +947,7 @@ async def search_documents(query, is_project_query=False, project_name=None):
                 for dep in list(deps_to_search)[:10]
             ]
             if should_conditions:
-                sec_results = []
-                for col_name in target_cols:
+                async def _scroll_col(col_name):
                     try:
                         res, _ = await state.qdrant.scroll(
                             collection_name=col_name,
@@ -951,8 +955,13 @@ async def search_documents(query, is_project_query=False, project_name=None):
                             limit=5,
                             with_payload=True
                         )
-                        sec_results.extend(res)
-                    except Exception as e: logger.warning(f"Errore silenziato: {e}")
+                        return res
+                    except Exception as e:
+                        logger.warning(f"Errore silenziato: {e}")
+                        return []
+                sec_results = []
+                for pts in await asyncio.gather(*[_scroll_col(c) for c in target_cols]):
+                    sec_results.extend(pts)
                 for hit in sec_results:
                     filename = hit.payload.get('filename')
                     if filename and f"📄 File Primario ({filename}):" not in "".join(primary_docs):

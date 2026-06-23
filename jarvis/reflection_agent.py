@@ -73,7 +73,7 @@ Rispondi SOLO con i fatti condensati, formattati in un elenco puntato. Nessuna i
                     logger.warning(f"Errore cancellazione memoria {m_id}: {e}")
             
             # Add consolidated one
-            await loop.run_in_executor(state.mem0_executor, partial(state.memory.add, f"Sintesi Profilo Utente: \n{consolidated}", user_id="alfio_dev"))
+            await loop.run_in_executor(state.mem0_executor, partial(state.memory.add, f"Sintesi Profilo Utente: \n{consolidated}", user_id="alfio_dev", infer=False))
             logger.info("✅ Consolidamento memoria completato con successo.")
             
     except Exception as e:

@@ -56,7 +56,7 @@ async def import_memory_from_json(filepath):
         for m in memory_list:
             text = m.get("memory", m.get("text", "")) if isinstance(m, dict) else str(m)
             if text:
-                await loop.run_in_executor(state.mem0_executor, partial(state.memory.add, text, user_id="alfio_dev"))
+                await loop.run_in_executor(state.mem0_executor, partial(state.memory.add, text, user_id="alfio_dev", infer=False))
                 count += 1
                 
         return True, f"Ripristinati {count} ricordi con successo."

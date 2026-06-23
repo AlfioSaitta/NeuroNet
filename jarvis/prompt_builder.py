@@ -207,12 +207,11 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if full_files_content:
             rag_ctx = full_files_content + "\n" + rag_ctx
 
-    # Auto web discovery: se RAG non ha trovato nulla (sia query codice che non),
-    # cerca automaticamente su web e salva in Qdrant + Mem0 per il futuro.
-    # Previene allucinazioni quando il modello non ha contesto locale sufficiente.
-    if not latest_msg.startswith("/web ") and not rag_ctx.strip() and not web_ctx:
+    # Auto web discovery: per saluti e conversazione generica breve si salta
+    # (evita chiamate web inutili e lente per "ciao" o "grazie").
+    _is_short_greeting = len(clean_msg.strip()) < 20 and not is_project_query
+    if not _is_short_greeting and not rag_ctx.strip() and not web_ctx:
         from rag import search_web_knowledge, save_web_knowledge
-        # Per query di progetto con RAG vuoto, arricchisci con il nome del progetto
         search_query = clean_msg
         if is_project_query and active_project and active_project not in search_query:
             search_query = f"{active_project} {search_query}"
@@ -231,7 +230,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 web_ctx = web_search_ctx
                 tag = f" [progetto: {active_project}]" if active_project else ""
                 logger.info(f"🌐 Auto web discovery: ricercato e salvato '{clean_msg[:60]}...'{tag}")
-                # Salva in Mem0 in background
                 async def _bg_save_web():
                     from memory import save_to_memory
                     summary = f"[Web Knowledge] Query: {clean_msg[:200]}\nFonti: {', '.join(sources[:3])}\nRisultati: {web_search_ctx[:600]}"

@@ -153,6 +153,15 @@ class LlamaEngine:
                 pooling=2
             )
             log_vram_usage("Dopo caricamento Embed Model")
+
+            # Warmup: prima chiamata di embedding per CUDA JIT compilation
+            # (evita ritardo di 30+s sulla prima richiesta utente)
+            try:
+                logger.info(f"🔄 Warmup Embed Model (CUDA JIT compilation)...")
+                self.embed_model.create_embedding(["warmup"])
+                logger.info(f"✅ Embed Model warmup completato")
+            except Exception as e:
+                logger.warning(f"⚠️ Embed Model warmup fallito (non critico): {e}")
         else:
             logger.warning(f"File {embed_model_path} non trovato!")
 

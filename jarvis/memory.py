@@ -23,6 +23,16 @@ async def init_mem0_delayed():
         except Exception as e:
             logger.error(f"⚠️ Inizializzazione Mem0 Fallita ({e}). Ritento tra 5 secondi...")
             await asyncio.sleep(5)
+    # Warmup: forza la lazy init di spaCy e BM25 (10-30s sulla prima richiesta altrimenti)
+    try:
+        logger.info(f"🔄 Mem0 warmup (spaCy/BM25 lazy init)...")
+        _ = await loop.run_in_executor(
+            state.mem0_executor,
+            partial(state.memory.search, query="warmup", filters={"user_id": "alfio_dev"}, limit=1)
+        )
+        logger.info(f"✅ Mem0 warmup completato")
+    except Exception as e:
+        logger.warning(f"⚠️ Mem0 warmup fallito (non critico): {e}")
 
 
 def extract_memories(relevant_memories):
@@ -53,7 +63,7 @@ async def save_to_memory(text, user_id="alfio_dev", project=None):
     try:
         loop = asyncio.get_running_loop()
         metadata = {"project": project} if project is not None else None
-        add_func = partial(state.memory.add, text, user_id=user_id, metadata=metadata)
+        add_func = partial(state.memory.add, text, user_id=user_id, metadata=metadata, infer=False)
         await loop.run_in_executor(state.mem0_executor, add_func)
         tag = f" [{project}]" if project else ""
         logger.debug(f"🧠 Memoria salvata{tag} ({len(text)} chars, user={user_id})")

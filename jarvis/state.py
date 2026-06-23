@@ -25,7 +25,7 @@ file_event_queue = asyncio.Queue()
 llm_semaphore = asyncio.Semaphore(1)
 
 from concurrent.futures import ThreadPoolExecutor
-mem0_executor = ThreadPoolExecutor(max_workers=1)
+mem0_executor = ThreadPoolExecutor(max_workers=4)
 
 # Inferenza
 total_requests = 0
