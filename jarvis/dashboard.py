@@ -705,7 +705,7 @@ async def get_gpu_metrics():
     result = {"temp": None, "vram_used": None, "vram_total": None, "util": None, "cuda_version": None, "processes": None}
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=temperature.gpu,memory.used,memory.total,utilization.gpu.enc,utilization.gpu.dec",
+            ["nvidia-smi", "--query-gpu=temperature.gpu,memory.used,memory.total,utilization.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5
         )
@@ -715,10 +715,8 @@ async def get_gpu_metrics():
                 result["temp"] = int(parts[0])
                 result["vram_used"] = int(parts[1])
                 result["vram_total"] = int(parts[2])
-            if len(parts) >= 5:
-                enc = int(parts[3]) if parts[3].isdigit() else 0
-                dec = int(parts[4]) if parts[4].isdigit() else 0
-                result["util"] = max(enc, dec)
+            if len(parts) >= 4:
+                result["util"] = int(parts[3]) if parts[3].lstrip('-').isdigit() else 0
     except Exception:
         pass
 
@@ -798,15 +796,26 @@ async def get_stats():
         embed_model_name = "N/A"
         details = []
         if engine and engine.chat_model:
-            mp = getattr(engine.chat_model, 'model_path', '')
+            cm = engine.chat_model
+            mp = getattr(cm, 'model_path', '') or ''
             chat_model_name = mp.split('/')[-1] if mp else "Loaded"
-            details.append({"label": "n_gpu_layers", "value": str(getattr(engine.chat_model, 'n_gpu_layers', '?'))})
-            details.append({"label": "n_ctx", "value": str(getattr(engine.chat_model, 'n_ctx', '?'))})
-            details.append({"label": "flash_attn", "value": str(getattr(engine.chat_model, 'flash_attn', '?'))})
+            ngl = getattr(cm, 'n_gpu_layers', None)
+            if ngl is None:
+                ngl = getattr(cm, '_n_gpu_layers', '?')
+            details.append({"label": "n_gpu_layers", "value": str(ngl)})
+            try:
+                ctx = cm.n_ctx()
+                details.append({"label": "n_ctx", "value": str(ctx)})
+            except Exception:
+                details.append({"label": "n_ctx", "value": "?"})
+            fa = getattr(cm, 'flash_attn', None)
+            if fa is None:
+                fa = getattr(cm, '_flash_attn', '?')
+            details.append({"label": "flash_attn", "value": str(fa)})
         else:
             details.append({"label": "Status", "value": "Not loaded"})
         if engine and engine.embed_model:
-            mp = getattr(engine.embed_model, 'model_path', '')
+            mp = getattr(engine.embed_model, 'model_path', '') or ''
             embed_model_name = mp.split('/')[-1] if mp else "Loaded"
         models = {"chat_model": chat_model_name, "embed_model": embed_model_name, "details": details}
     except Exception as e:
