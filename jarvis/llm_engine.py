@@ -61,13 +61,23 @@ class PriorityLock:
                 fut.set_result(None)
                 break
 
+class PriorityLockTimeoutError(Exception):
+    pass
+
 class PriorityLockContextManager:
-    def __init__(self, lock: PriorityLock, priority: int):
+    def __init__(self, lock: PriorityLock, priority: int, timeout: float = 0):
         self.lock = lock
         self.priority = priority
+        self.timeout = timeout
 
     async def __aenter__(self):
-        await self.lock.acquire(self.priority)
+        if self.timeout > 0:
+            try:
+                await asyncio.wait_for(self.lock.acquire(self.priority), timeout=self.timeout)
+            except asyncio.TimeoutError:
+                raise PriorityLockTimeoutError(f"Lock acquisition timed out after {self.timeout}s")
+        else:
+            await self.lock.acquire(self.priority)
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.lock.release()
@@ -90,8 +100,10 @@ class LlamaEngine:
         self.embed_model = None
         # Thread pool per non bloccare l'event loop di FastAPI (concurrency safe)
         self.executor = ThreadPoolExecutor(max_workers=8)
-        # Semaforo a priorità per non far aspettare le chat utente dietro ai batch di embedding
+        # Lock separati: chat e embedding usano modelli Llama diversi,
+        # non devono bloccarsi a vicenda
         self.chat_lock = PriorityLock()
+        self.embed_lock = PriorityLock()
         self.initialized = True
 
     def load_models(self):
@@ -239,6 +251,11 @@ class LlamaEngine:
 
         loop = asyncio.get_running_loop()
 
+        # Cap ragionevole: evita 68-minuti di generazione a 0.5 tok/s
+        # Sovrascrivibile via LLM_MAX_TOKENS env var nel .env
+        _max_tokens_cap = int(os.environ.get("LLM_MAX_TOKENS", "512"))
+        max_tokens = min(max_tokens, _max_tokens_cap)
+
         if stream:
             async def async_generator():
                 async with PriorityLockContextManager(self.chat_lock, priority=0):
@@ -298,7 +315,7 @@ class LlamaEngine:
         if not self.embed_model:
             return {"error": "Modello embedding non caricato"}
         
-        async with PriorityLockContextManager(self.chat_lock, priority=priority):
+        async with PriorityLockContextManager(self.embed_lock, priority=priority):
             loop = asyncio.get_running_loop()
             
             # Se text è una singola stringa, lo incapsuliamo

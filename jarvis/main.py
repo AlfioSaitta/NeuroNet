@@ -670,7 +670,9 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
     messages = [{"role": "user", "content": prompt}]
     
     if not is_stream:
-        response = await engine.generate_chat(messages, stream=False)
+        opts = body.get("options", {})
+        if not isinstance(opts, dict): opts = {}
+        response = await engine.generate_chat(messages, options=opts, stream=False)
         if "error" in response:
             return JSONResponse(status_code=500, content={"error": response["error"]})
         

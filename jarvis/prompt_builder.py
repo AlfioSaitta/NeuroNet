@@ -38,6 +38,14 @@ async def llm_gatekeeper_classify(user_message):
         logger.info(f"🧠 Gatekeeper: True (Regex Match) | Query: '{user_message[:30]}...'")
         return True
 
+    # Salta gatekeeper LLM per saluti e conversazione generica (troppo lento)
+    GREETING_WORDS = {'ciao', 'hello', 'hi', 'hey', 'buongiorno', 'buonasera', 'salve',
+                      'grazie', 'thanks', 'ok', 'okay', 'si', 'no', 'come', 'stai',
+                      'chi', 'che', 'cosa', 'quale', 'quanto', 'dove', 'quando'}
+    if words.intersection(GREETING_WORDS):
+        logger.info(f"🧠 Gatekeeper: False (Greeting Bypass) | Query: '{user_message[:30]}...'")
+        return False
+
     truncated_msg = user_message[:1000]
     gatekeeper_prompt = f"""
 Sei un classificatore di intenti rapido. Il tuo unico scopo è decidere se la richiesta dell'utente necessita della lettura del codice sorgente o della documentazione tecnica dei suoi progetti.
@@ -79,6 +87,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     """
     Pipeline di arricchimento: fonde memoria episodica, RAG documentale e web intelligence
     in un unico super-prompt con tag XML.
+    Timeout di 30s per evitare blocchi su gateway/model lenti.
     """
     user_messages = [m["content"] for m in messages if m["role"] == "user"]
     latest_msg = user_messages[-1] if user_messages else ""
