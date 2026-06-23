@@ -511,6 +511,7 @@ async def git_webhook(request: Request):
 @app.post("/api/chat")
 @limiter.limit(API_RATE_LIMIT_DEFAULT)
 async def ollama_chat(payload: ChatRequest, request: Request):
+    state.total_requests += 1
     """Endpoint chat Ollama-nativa simulata con LlamaEngine in locale."""
     from agent_tools import TOOLS_SCHEMA, execute_tool_call
     from datetime import datetime
@@ -546,6 +547,9 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         response = await engine.generate_chat(body["messages"], tools=body.get("tools"), options=body.get("options"), stream=False)
         if "error" in response:
             return JSONResponse(status_code=500, content={"error": response["error"]})
+        
+        state.total_prompt_tokens += response.get("usage", {}).get("prompt_tokens", 0)
+        state.total_completion_tokens += response.get("usage", {}).get("completion_tokens", 0)
         
         # Mappa formato OpenAI a Ollama
         choice = response["choices"][0]["message"]
@@ -624,6 +628,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
 @app.post("/api/generate")
 @limiter.limit(API_RATE_LIMIT_DEFAULT)
 async def ollama_generate(payload: GenerateRequest, request: Request):
+    state.total_requests += 1
     """Endpoint generate Ollama simulato con iniezione RAG."""
     from datetime import datetime
     body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
@@ -668,6 +673,9 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
         response = await engine.generate_chat(messages, stream=False)
         if "error" in response:
             return JSONResponse(status_code=500, content={"error": response["error"]})
+        
+        state.total_prompt_tokens += response.get("usage", {}).get("prompt_tokens", 0)
+        state.total_completion_tokens += response.get("usage", {}).get("completion_tokens", 0)
         
         content = response["choices"][0]["message"].get("content", "")
         
@@ -811,6 +819,7 @@ async def openai_models():
 @app.post("/v1/chat/completions")
 @limiter.limit(API_RATE_LIMIT_DEFAULT)
 async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request: Request):
+    state.total_requests += 1
     from datetime import datetime
     import uuid
 
@@ -836,6 +845,9 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
         response = await engine.generate_chat(chat_body["messages"], options=options, stream=False)
         if "error" in response:
             return JSONResponse(status_code=500, content={"error": response["error"]})
+
+        state.total_prompt_tokens += response.get("usage", {}).get("prompt_tokens", 0)
+        state.total_completion_tokens += response.get("usage", {}).get("completion_tokens", 0)
 
         choice = response["choices"][0]["message"]
         content = choice.get("content", "")

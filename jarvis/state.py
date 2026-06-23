@@ -27,6 +27,11 @@ llm_semaphore = asyncio.Semaphore(1)
 from concurrent.futures import ThreadPoolExecutor
 mem0_executor = ThreadPoolExecutor(max_workers=1)
 
+# Inferenza
+total_requests = 0
+total_prompt_tokens = 0
+total_completion_tokens = 0
+
 # Contesto progetto attivo per utente e conversazione (persiste tra turni)
 # Mappa: user_id -> conversation_id -> nome_progetto
 # Previene contaminazione tra conversazioni concorrenti dello stesso utente.
