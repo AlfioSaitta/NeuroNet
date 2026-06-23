@@ -38,7 +38,9 @@ RUN python -m pip install --upgrade pip
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN python -m spacy download en_core_web_sm || echo "⚠️ Spacy model download non riuscito (verrà scaricato al runtime se necessario)"
+# en_core_web_sm per mem0 entity extraction (installato via pip wheel per caching offline)
+RUN pip install "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" \
+    || echo "⚠️ en_core_web_sm non disponibile offline? Usare python -m spacy download en_core_web_sm"
 
 # Installazione di llama-cpp-python dalla master di GitHub con il fix Gemma 4
 # Fix PR #22133 (GGML_SCHED_MAX_SPLIT_INPUTS) non ancora in PyPI — richiede build da sorgente
