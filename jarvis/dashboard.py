@@ -809,8 +809,14 @@ async def get_stats():
                 details.append({"label": "n_ctx", "value": str(ctx)})
             except Exception:
                 details.append({"label": "n_ctx", "value": "?"})
-            fa = (getattr(cp2, 'flash_attn', '?') if cp2 else
-                  getattr(cm, 'flash_attn', '?'))
+            fa_type = (getattr(cp2, 'flash_attn_type', None) if cp2 else
+                       getattr(cm, 'flash_attn_type', None))
+            if fa_type is None:
+                fa = '?'
+            elif fa_type == 2:  # LLAMA_FLASH_ATTN_TYPE_ENABLED
+                fa = 'True'
+            else:
+                fa = 'False'
             details.append({"label": "flash_attn", "value": str(fa)})
         else:
             details.append({"label": "Status", "value": "Not loaded"})
