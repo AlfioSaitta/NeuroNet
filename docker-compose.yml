@@ -1,0 +1,89 @@
+# =====================================================================
+# ECOSISTEMA AI LOCALE ENTERPRISE - COLLATERAL STUDIOS (DATA CENTRIC)
+# =====================================================================
+
+networks:
+  ai_network:
+    driver: bridge
+    name: ai_network
+
+services:
+
+
+  # -------------------------------------------------------------------
+  # 3. PROXY & ARCHIVIO VETTORIALE EPISODICO (Mem0 + Qdrant DB)
+  # -------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant_db
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    networks:
+      - ai_network
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./data/searxng:/etc/searxng
+    networks:
+      - ai_network
+
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    container_name: crawl4ai_server
+    restart: unless-stopped
+    ports:
+      - "11235:11235"
+    environment:
+      - MAX_CONCURRENT_TASKS=3
+    networks:
+      - ai_network
+
+  jarvis:
+    build:
+      context: ./jarvis
+      dockerfile: Dockerfile
+    container_name: jarvis
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    env_file:
+      - .env
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - TZ=Europe/Rome
+      - POSTHOG_DISABLED=1
+      - MEM0_TELEMETRY_ENABLED=false
+      - PYTHONWARNINGS=ignore::DeprecationWarning
+    volumes:
+      - ./jarvis:/app
+      - ./data/jarvis_mem0:/app/mem0_data_v3
+      - ./data/documents:/app/documents
+      - /:/host_fs
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    depends_on:
+      - qdrant
+      - searxng
+      - crawl4ai
+    networks:
+      - ai_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,0 +1,5 @@
+jarvis/models/
+.git/
+__pycache__/
+*.pyc
+.env

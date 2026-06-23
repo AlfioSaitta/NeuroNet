@@ -1,0 +1,71 @@
+# ==============================================================================
+# ECOSISTEMA AI LOCALE - GITIGNORE
+# ==============================================================================
+
+# Segreti e variabili d'ambiente
+.env
+.env.*
+!.env.example
+
+# Dati persistenti (volumi Docker)
+data/
+
+# Recovery codes e file sensibili
+recovery_codes.txt
+
+# Client binaries (AppImage)
+clients/
+
+# Python e Ambienti Virtuali
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env_python/
+
+# Dati Persistenti e Database
+data/
+qdrant_storage/
+*.db
+*.sqlite3
+
+# Modelli LLM e Pesi
+models/
+*.gguf
+*.bin
+*.pt
+*.safetensors
+*.onnx
+
+# Log e File Temporanei
+*.log
+jarvis/scratch/
+.system_generated/
+*.tmp
+*.bak
+
+# Sicurezza, Chiavi e Variabili d'ambiente
+.env
+.env.*
+!.env.example
+recovery_codes.txt
+*.pem
+*.rsa
+*.key
+allowed_users.json
+
+# IDE e Sistemi Operativi
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Client Binaries
+clients/
+mem0_data_v3
+
+jarvis/documents

@@ -1,0 +1,95 @@
+# =====================================================================
+# ECOSISTEMA AI LOCALE - GPU WORKER NODE
+# =====================================================================
+# Avvia Jarvis in modalità Worker sul PC locale con GPU.
+#
+# Modalità operative (configurabili via .env):
+# - OFFLINE: QDRANT_HOST=localhost — Jarvis usa Qdrant embedded in-process
+#            + memoria/documenti locali via volumi montati
+# - ONLINE:  QDRANT_HOST=<IP_TAILSCALE_MASTER> — Jarvis usa il Qdrant della VPS
+#            e delega l'inferenza pesante al Worker tramite EXTERNAL_GPU_URL
+#
+# Il Bot Telegram è DISABILITATO su questo nodo (TELEGRAM_ENABLED=false nel .env).
+
+networks:
+  ai_network:
+    driver: bridge
+    name: ai_network
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant_db
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    networks:
+      - ai_network
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./data/searxng:/etc/searxng
+    networks:
+      - ai_network
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    container_name: crawl4ai_server
+    restart: unless-stopped
+    depends_on:
+      - searxng
+    ports:
+      - "11235:11235"
+    environment:
+      - MAX_CONCURRENT_TASKS=3
+    networks:
+      - ai_network
+  jarvis_worker:
+    build:
+      context: ./jarvis
+      dockerfile: Dockerfile
+    container_name: jarvis_worker
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+      - searxng
+      - crawl4ai
+    ports:
+      - "8000:8000"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    env_file:
+      - .env
+    environment:
+      # QDRANT_HOST è letto dal .env (non hardcoded qui):
+      # - Offline: QDRANT_HOST=localhost (Qdrant embedded in-process)
+      # - Online: QDRANT_HOST=<IP_TAILSCALE_MASTER> (es. 100.64.0.1)
+      - TZ=Europe/Rome
+      - POSTHOG_DISABLED=1
+      - MEM0_TELEMETRY_ENABLED=false
+      - NEXT_TELEMETRY_DISABLED=1
+      - PYTHONWARNINGS=ignore::DeprecationWarning
+    volumes:
+      - /:/host_fs
+      - ./jarvis:/app
+      - ./data/jarvis_mem0:/app/mem0_data_v3
+      - ./data/documents:/app/documents
+      - /home/alfio:/host_fs/home/alfio
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    networks:
+      - ai_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
