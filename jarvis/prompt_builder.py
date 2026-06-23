@@ -17,7 +17,14 @@ PROJECT_KEYWORDS = {
     'codice', 'progetto', 'file', 'script', 'funzione', 'classe', 'metodo',
     'bug', 'errore', 'riga', 'cartella', 'struttura', 'repo', 'repository',
     'implementa', 'refactor', 'test', 'compila', 'variabile', 'log', 'modifica',
-    'aggiungi', 'rimuovi', 'codebase'
+    'aggiungi', 'rimuovi', 'codebase',
+    'configurazione', 'gestione', 'sicurezza', 'autenticazione', 'connessione',
+    'websocket', 'database', 'api', 'endpoint', 'middleware', 'protocollo',
+    'server', 'client', 'richiesta', 'risposta', 'proxy', 'rete', 'network',
+    'pool', 'worker', 'buffer', 'cache', 'thread', 'processo', 'memoria',
+    'algoritmo', 'compressione', 'crittografia', 'token', 'sessione',
+    'debug', 'deploy', 'build', 'config', 'runtime', 'dependency', 'package',
+    'versione', 'release', 'commit', 'branch', 'migrazione', 'backup'
 }
 
 async def llm_gatekeeper_classify(user_message):

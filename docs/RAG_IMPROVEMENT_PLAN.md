@@ -44,6 +44,23 @@ Usare query rappresentative per ogni tipo di progetto, registrando:
 | 5 | `"autenticazione e gestione utenti"` | cross-project | tutti |
 | 6 | `"algoritmo di compressione dati"` | cross-file | Shield_Proxy |
 
+**Risultati baseline (2026-06-23, post-Fase1):**
+
+| # | Query | Tempo | RAG hit | Pertinenza | Note |
+|---|---|---|---|---|---|
+| 1 | configurazione proxy e blocking | 99s | SI | Alta | Include nome progetto nella query |
+| 2 | websocket e sicurezza | 70s | NO | N/A | Gatekeeper: non classificata come project query |
+| 3 | pool di memoria e worker pool pattern | 84s | SI | Alta | Include nome progetto nella query |
+| 4 | generazione slot machine e configurazione rtp | 40s | SI | Alta | Include nome progetto |
+| 5 | autenticazione e gestione utenti | 32s | SI | Alta | Gatekeeper: project query rilevata |
+| 6 | algoritmo di compressione dati | 19s | SI | Alta | Include nome progetto |
+
+**Osservazioni:**
+- Le query in italiano SENZA nome progetto (test 2) non attivano il RAG → il gatekeeper le classifica come non-progetto
+- Le query con nome progetto esplicito o keyword inglesi funzionano correttamente
+- Tempo medio: ~57s (include RAG retrieval + reranker + inference LLM)
+- Per migliorare il gatekeeper verso l'italiano, aggiungere keyword come "configurazione", "gestione", "sicurezza" a PROJECT_KEYWORDS
+
 ```bash
 # Template per testare una query
 QUERY="la tua query qui"
