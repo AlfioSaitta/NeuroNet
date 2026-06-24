@@ -327,6 +327,7 @@ def ast_code_chunking(content, filepath):
             return " ".join(sig).split('{')[0].strip()
 
         context_stack = []
+        seen_byte_ranges = set()
 
         def traverse(n):
             is_context = n.type in ['class_definition', 'class_declaration', 'class_specifier', 'struct_specifier', 'interface_declaration', 'impl_item', 'type_declaration', 'namespace_definition']
@@ -336,15 +337,18 @@ def ast_code_chunking(content, filepath):
                 if sig: context_stack.append(sig)
 
             if n.type in nodes:
-                b = content[n.start_byte:n.end_byte]
-                if len(b.strip()) > 20:
-                    start_line = n.start_point[0] + 1
-                    end_line = n.end_point[0] + 1
+                byte_range = (n.start_byte, n.end_byte)
+                if byte_range not in seen_byte_ranges:
+                    seen_byte_ranges.add(byte_range)
+                    b = content[n.start_byte:n.end_byte]
+                    if len(b.strip()) > 20:
+                        start_line = n.start_point[0] + 1
+                        end_line = n.end_point[0] + 1
 
-                    chunks.append({
-                        "text": f"RIGHE {start_line}-{end_line}:\n{b}",
-                        "section_hierarchy": list(context_stack) if context_stack else None
-                    })
+                        chunks.append({
+                            "text": f"RIGHE {start_line}-{end_line}:\n{b}",
+                            "section_hierarchy": list(context_stack) if context_stack else None
+                        })
 
             for c in n.children:
                 traverse(c)
@@ -382,16 +386,48 @@ def ast_code_chunking(content, filepath):
         if current_chunk:
             merged_chunks.append(current_chunk)
 
-        final_chunks = []
+        # ── Raggruppa chunk consecutivi per prossimità (fino a ~2000 token per gruppo) ──
+        PARENT_MAX_TOKENS = 2000
+        proximity_groups: list[list[dict]] = []
+        current_group = []
+        current_tokens = 0
         for chunk in merged_chunks:
-            if _token_count(chunk["text"]) > CHUNK_SIZE:
-                children = [{"text": t, "section_hierarchy": chunk.get("section_hierarchy")} for t in _recursive_token_split(chunk["text"], CHUNK_SIZE)]
-                final_chunks.extend(_assign_parent(children, chunk["text"]))
+            tok = _token_count(chunk["text"])
+            if current_group and current_tokens + tok > PARENT_MAX_TOKENS:
+                proximity_groups.append(current_group)
+                current_group = []
+                current_tokens = 0
+            current_group.append(chunk)
+            current_tokens += tok
+        if current_group:
+            proximity_groups.append(current_group)
+
+        final_chunks = []
+        for group in proximity_groups:
+            if len(group) > 1:
+                parent_text = "\n\n".join(c["text"] for c in group)
+                pid = _make_parent_chunk_id(parent_text)
+                for i, c in enumerate(group):
+                    if _token_count(c["text"]) > CHUNK_SIZE:
+                        for t in _recursive_token_split(c["text"], CHUNK_SIZE):
+                            final_chunks.append({"text": t, "section_hierarchy": c.get("section_hierarchy"),
+                                                  "parent_chunk_id": pid, "chunk_index": i, "chunk_count": len(group)})
+                    else:
+                        c["parent_chunk_id"] = pid
+                        c["chunk_index"] = i
+                        c["chunk_count"] = len(group)
+                        final_chunks.append(c)
             else:
+                chunk = group[0]
                 chunk["parent_chunk_id"] = None
                 chunk["chunk_index"] = None
                 chunk["chunk_count"] = None
-                final_chunks.append(chunk)
+                if _token_count(chunk["text"]) > CHUNK_SIZE:
+                    for t in _recursive_token_split(chunk["text"], CHUNK_SIZE):
+                        final_chunks.append({"text": t, "section_hierarchy": chunk.get("section_hierarchy"),
+                                              "parent_chunk_id": None, "chunk_index": None, "chunk_count": None})
+                else:
+                    final_chunks.append(chunk)
 
         return final_chunks
     except Exception as e:
