@@ -17,7 +17,8 @@ from config import (
     logger, QDRANT_HOST, DOC_COLLECTION, DOC_DIR,
     STATE_FILE, CHUNK_SIZE, CHUNK_OVERLAP, MAX_CONCURRENT_EMBEDDINGS,
     RAG_CONFIG, AST_ENABLED, GO, PY, JS, TSX,
-    VECTOR_DB_VERSION, FLASHRANK_MODEL, Qwen3_RERANKER_MODEL, RERANKER_DEVICE,
+    VECTOR_DB_VERSION, FLASHRANK_MODEL, Qwen3_RERANKER_MODEL,
+    QENABLED_QWEN3_RERANKER, RERANKER_DEVICE,
     WATCHDOG_BATCH_DELAY, SEMANTIC_CACHE_THRESHOLD,
     C, CPP, JAVA, RUST, SQL, YAML,
     PATHSPEC_ENABLED, WATCHDOG_ENABLED, EMBEDDING_DIMS,
@@ -36,12 +37,12 @@ os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 # ==============================================================================
 # RERANKER STRATEGY:
-#   1. Se Qwen3_RERANKER_MODEL punta a una directory esistente, prova Qwen3 (migliore qualità)
-#   2. Altrimenti FlashRank ONNX (leggero e veloce)
+#   1. FlashRank ONNX (leggero e veloce, sempre disponibile)
+#   2. Se QENABLED_QWEN3_RERANKER=true E la directory esiste, prova Qwen3 (migliore qualità)
 # ==============================================================================
-_has_qwen3_reranker = os.path.isdir(Qwen3_RERANKER_MODEL)
+_use_qwen3_reranker = QENABLED_QWEN3_RERANKER and os.path.isdir(Qwen3_RERANKER_MODEL)
 
-if _has_qwen3_reranker:
+if _use_qwen3_reranker:
     try:
         import torch
         from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -72,10 +73,10 @@ if _has_qwen3_reranker:
         _reranker = _reranker
 
     except Exception as e:
-        logger.warning(f"Qwen3-Reranker caricabile ma errore runtime ({e}), fallback su FlashRank...")
-        _has_qwen3_reranker = False
+        logger.warning(f"Qwen3-Reranker errore ({e}), fallback su FlashRank...")
+        _use_qwen3_reranker = False
 
-if not _has_qwen3_reranker:
+if not _use_qwen3_reranker:
     try:
         from flashrank import Ranker, RerankRequest
         _flash = Ranker(model_name=FLASHRANK_MODEL, cache_dir="/app/mem0_data_v3/flashrank_cache")
