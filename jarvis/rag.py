@@ -1055,20 +1055,25 @@ async def search_documents(query, is_project_query=False, project_name=None):
         if parent_ids:
             for col in target_cols:
                 try:
-                    sibling_scroll, _ = await state.qdrant.scroll(
-                        collection_name=col,
-                        scroll_filter=Filter(should=[
-                            FieldCondition(key="parent_chunk_id", match=MatchValue(value=pid))
-                            for pid in parent_ids
-                        ]),
-                        limit=100,
-                        with_payload=True
+                    sibling_scroll, _ = await asyncio.wait_for(
+                        state.qdrant.scroll(
+                            collection_name=col,
+                            scroll_filter=Filter(should=[
+                                FieldCondition(key="parent_chunk_id", match=MatchValue(value=pid))
+                                for pid in parent_ids
+                            ]),
+                            limit=100,
+                            with_payload=True
+                        ),
+                        timeout=5.0
                     )
                     for s in sibling_scroll:
                         pid = s.payload.get("parent_chunk_id")
                         if pid not in parent_siblings:
                             parent_siblings[pid] = []
                         parent_siblings[pid].append(s)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Qdrant scroll parent reconstruction timeout su {col}")
                 except Exception:
                     pass
 
