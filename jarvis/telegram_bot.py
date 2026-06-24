@@ -1150,7 +1150,9 @@ if TELEGRAM_ENABLED:
                     await msg.reply_text(chunk)
 
         except Exception as e:
-            logger.error(f"Errore Telegram: {e}")
+            logger.error(f"Errore Telegram [{type(e).__module__}.{type(e).__name__}]: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{''.join(traceback.format_exc())}")
             await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Si è verificato un errore nell'elaborazione locale.")
         finally:
             typing_task.cancel()
