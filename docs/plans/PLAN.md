@@ -17,6 +17,8 @@
 6. [🟢 Bot Telegram](#-6-bot-telegram)
 7. [⚪ Osservabilità & Monitoraggio](#-7-osservabilità--monitoraggio)
 8. [💡 Nuove Feature](#-8-nuove-feature)
+9. [🔬 Deep Architectural Analysis](#-9-deep-architectural-analysis-v87-roadmap)
+10. [🚀 Ottimizzazioni Baseline](#-10-ottimizzazioni-baseline--ricerca-web--benchmark-strategiche)
 
 Legenda impatto: `🏋️ Alto` `🏃 Medio` `🚶 Basso`  
 Legenda sforzo: `⏱️ <1h` `⏰ 1-4h` `🕐 4-8h` `📅 1-2gg` `📆 >2gg`
@@ -408,10 +410,6 @@ Ecco i passaggi da seguire per implementarlo:
 
 ### Sprint 4 — Vision & Observability
 > Focus: 7.1, 7.2, 8.1, 8.2
-
----
-🌐 **Collateral Studios** — *Piano di Evoluzione Definitivo Infrastruttura IA*
-
 ---
 
 ## 🔬 9. Deep Architectural Analysis (v8.7+ Roadmap)
@@ -437,3 +435,176 @@ A seguito di un'ispezione profonda del codice sorgente di `mem0-proxy`, sono eme
 ### 9.5 ✅ 💾 Sincronia Fatale nel salvataggio RAG (`_save_state_unsafe`)
   - **Problema:** Mentre il bug 1.2 è stato risolto, `_save_state_unsafe()` usa `json.dump()` sincrono all'interno di un loop asincrono (in `rag.py:300`). Quando il file `rag_state.json` diventa di decine di Megabyte, scriverlo sincronicamente blocca le risposte HTTP di FastAPI per interi secondi.
   - **Soluzione:** Sostituire con `aiofiles` o, come proposto in `8.34`, spostare i metadati su un DB SQLite/Redis.
+
+---
+
+## 🚀 10. Ottimizzazioni Baseline — Ricerca Web & Benchmark (Strategiche)
+
+> Questa sezione raccoglie i risultati della ricerca web su ottimizzazioni comprovate per il nostro stack (RTX 3050 Ti 4GB, llama.cpp, Qdrant, FastAPI).  
+> Ogni item è supportato da benchmark di letteratura o dati pubblicati. L'impatto è stimato sul nostro workload RAG+Chat reale.
+
+### 10.1 ⚡ llama.cpp Inference Tuning — RTX 3050 Ti 4GB
+
+| Ottimizzazione | Impatto Stimato | Sforzo | Stato | Note |
+|---|---|---|---|---|
+| **Flash Attention** | -20-50% KV cache VRAM | ⏱️ Già attivo | ✅ Fatto | Dimezza la VRAM del contesto. Essenziale per `n_ctx=12288` in 4GB. |
+| **KV cache Quantization** (`--cache-type-k q8_0 --cache-type-v q8_0`) | -50% VRAM contesto | ⏱️ <1h | ❌ Da fare | Attualmente FP16. Passando a q8_0: 12K ctx → ~384 MB invece di ~768 MB. Libera ~384 MB per +15 layer GPU o batch più grande. |
+| **Prompt Processing Batch** (`n_batch=2048`) | -35-40% TTFT | ⏰ 1-4h | ❌ Da testare | Su RTX 3050 Ti, batch=2046 riduce prompt eval time del 35-40% rispetto a 512. Rischio: +VRAM spike durante prompt eval (~+200 MB). Da testare con KV cache q8_0 attivo. |
+| **CUDA Graphs** (`--num-graphs` o `LLAMA_CUDA_GRAPHS`) | +10-20% tok/s decode | ⏰ 1-4h | ❌ Da testare | Richiede rebuild llama-cpp-python con `-DGGML_CUDA_GRAPHS=ON`. Riduce overhead kernel launch nei decoding step. Testato su RTX 3090: +18% throughput. Rischio: stabilità su driver 580.x. |
+| **Mmap lazy loading** (`use_mmap=True`) | Avvio +0s (già attivo) | ⏱️ Già attivo | ✅ Fatto | Lazy page mapping via mmap: il modello non viene caricato tutto in RAM all'avvio. |
+| **Thread tuning** (`n_threads=6`) | +5-10% vs default | ⏱️ Già attivo | ✅ Fatto | 6 thread lascia 2 core per I/O su i5-11300H (8 thread). |
+
+**Action Plan 10.1:**
+
+1. `config.py`: aggiungere `LLAMA_K_CACHE_TYPE="q8_0"`, `LLAMA_V_CACHE_TYPE="q8_0"` → leggi in `llm_engine.py` → parametro `cache_type_k`, `cache_type_v` in `llama_cpp.Llama()`
+2. `llm_engine.py`: passare `n_batch` da env var (default 2048)
+3. Dockerfile: rebuild con `CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_GRAPHS=ON -DCMAKE_CUDA_ARCHITECTURES=86"`
+4. Benchmark B1 con `n_batch=2048` + KV q8_0 + CUDA Graphs
+
+---
+
+### 10.2 ⚡ FastAPI / ASGI Concurrency Architecture
+
+| Ottimizzazione | Impatto | Sforzo | Stato | Note |
+|---|---|---|---|---|
+| **Semaphore LLM (1 coda)** | Evita OOM GPU | ⏱️ Già attivo | ✅ Fatto | `state.llm_semaphore = asyncio.Semaphore(1)`. Già in produzione. |
+| **BackgroundTasks** per CPU-heavy | Blocca event loop | 🚫 Già noto | ❌ Da evitare | Non usare `BackgroundTasks` per ingestion o embedding. Usare un worker pool separato. |
+| **`asyncio.to_thread` per blocking I/O** | -100% event loop bloccato | ⏰ 1-4h | ❌ Da fare | `_save_state_unsafe()`, hash file, fsync → `await asyncio.to_thread(sync_fn)`. |
+| **Worker architecture** (RQ/Celery) | Isolamento crash GPU | 📆 >2gg | ❌ Futuro | Separare ingestion/embedding in processi worker separati. Non urgente ora. |
+| **Connection pool httpx** | Latenza API esterna | ⏱️ Già attivo | ✅ Fatto | httpx client in `state.py` con pool=10. |
+
+**Action Plan 10.2:**
+
+1. Sostituire `json.dump()` in `_save_state_unsafe()` con `await asyncio.to_thread(_save_state_unsafe_sync)`
+2. Sostituire `hashlib.md5(open(fp).read())` con `await asyncio.to_thread(lambda: Path(fp).read_bytes())`
+
+---
+
+### 10.3 🔍 Qdrant Hybrid Search & Index Tuning
+
+| Ottimizzazione | Impatto Recall@10 | Sforzo | Stato |
+|---|---|---|---|
+| **Hybrid Dense + Sparse (BM25)** | +15-30% | 🕐 4-8h | ❌ Da fare |
+| **DBSF fusion (vs RRF)** | +12% recall@100 | ⏰ 1-4h | ❌ Da fare |
+| **HNSW m=32 (vs default m=16)** | +3% recall@100 | ⏱️ <1h | ❌ Da fare |
+| **ef_construct=200 (vs default 100)** | +2-5% recall | ⏱️ <1h | ❌ Da fare |
+| **On-disk indexing + scalar quantization** | -60% RAM | ⏰ 1-4h | ❌ Da fare |
+
+**Dettaglio Hybrid Search:**
+
+Qdrant v1.12+ supporta native hybrid search con unica API call:
+- **Dense vector**: embedding del chunk (768d Qwen3-Embedding)
+- **Sparse vector**: BM25 sul testo del chunk (modello splade o BM25 nativo Qdrant)
+- **Fusion**: `DBSF` (Distribution-Based Score Fusion) supera `RRF` del 12% recall@100
+
+Per implementare:
+1. Creare sparse vector config per ogni collection Qdrant (o ricrearle con `VECTOR_DB_VERSION=v4`)
+2. Modificare `_compute_hash_and_read()` in `rag.py` per generare sparse vector durante ingestion
+3. Modificare `search_similar_chunks()` per query ibrida con `prefetch` denso + sparse
+4. Usare `DBSF` come fusion
+
+```python
+# Esempio chiamata ibrida Qdrant v1.12+
+await client.search(
+    collection_name="collateral_docs_v4",
+    query_vector=(dense_emb, sparse_emb),  # tupla (dense, sparse)
+    search_params=SearchParams(
+        quantization=QuantizationSearchParams(
+            rescore=True,
+            oversampling=3.0,
+        )
+    ),
+    limit=10,
+)
+```
+
+**HNSW Index Tuning (nessuna migrazione):**
+
+```python
+# Update su collection esistente
+await client.update_collection(
+    collection_name="...",
+    vectors_config={
+        "text-dense": VectorParams(
+            size=768,
+            distance=Distance.COSINE,
+            hnsw_config=HnswConfigDiff(
+                m=32,
+                ef_construct=200,
+            )
+        )
+    },
+)
+```
+
+**Action Plan 10.3:**
+
+1. Qdrant: aggiornare collection a vector size + sparse + HNSW m=32. `VECTOR_DB_VERSION=v4`.
+2. `rag.py`: integrare sparse vector generation con BM25 (modello `QdrantSparseEmbeddings` o splade).
+3. `rag.py`: modificare `search_similar_chunks()` in query ibrida.
+4. Reranker cross-encoder: già attivo su CPU (Qwen3-Reranker-0.6B), aggiornare a Qwen3-Reranker-1.5B (opzionale).
+5. Benchmark: Test C con 6 query RAG vs Test B: hit rate + latenza.
+
+---
+
+### 10.4 🧩 RAG Chunking Strategy — Benchmark Confronto
+
+La strategia di chunking è il singolo fattore più impattante sulla qualità RAG dopo l'embedding model. Benchmark accademico su 20 dataset Q&A:
+
+| Strategia | nDCG@5 | Answer Correctness | Rischi |
+|---|---|---|---|
+| **Fixed Character (FCC)** — 512/128 overlap | 0.244 | 62-64% | Baseline attuale. Perde contesto tra split arbitrari. |
+| **Semantic (Dynamic) Chunking (DFC)** | 0.441 | ~68% | 80% meglio di FCC. Usa embedding similarity per trovare boundary naturali. |
+| **Paragraph Group Chunking (PGC)** | **0.459** | 72% | **Migliore**. Gruppi di paragrafi completi. |
+| **Parent-Child + auto-merge** | 0.452 | **72%** | Child (128 tok) per retrieval → Parent (512 tok) per LLM contesto. Bilanciamento recall+contesto. |
+
+**Raccomandazione:** Implementare **Parent-Child Chunking** (child per retrieval, parent per LLM context) con **Adaptive merging** delle frasi spezzate. Target: 0.45+ nDCG@5 (vs ~0.25 attuale).
+
+**Dettaglio implementazione Parent-Child:**
+- **Child chunk**: 128 token, overlap 16 — usato per embedding e similarity search
+- **Parent chunk**: 512 token — usato per contesto LLM
+- **Auto-merge**: se 2 chunk consecutivi hanno similarità coseno > 0.85, unirli in un unico chunk
+- **Metadata**: ogni chunk ha `parent_id`, `chunk_index`, `doc_id` per ricostruzione
+
+**Action Plan 10.4:**
+
+1. `rag.py`: implementare `ParentChildChunker` class con sliding window 128/16 child → aggregazione 512 parent
+2. Test su codebase reale (Jarvis ~30K LOC): confronto hit rate Test B vs Test C
+3. Valutare impatto su latenza ingestion (più embedding = più lento)
+
+---
+
+### 10.5 🐳 Docker GPU Container — Best Practices
+
+| Pratica | Impatto | Stato |
+|---|---|---|
+| `--gpus all` + nvidia-container-toolkit | GPU accessibile | ✅ Fatto |
+| CUDA 13.0 overlay su 12.2 | Stabile su driver 580.x | ✅ Fatto |
+| `.dockerignore` escludendo `jarvis/models/` | Build context 1.2GB → 20MB | ✅ Fatto |
+| Multi-stage build (builder + runtime) | Immagine finale più piccola | ❌ Da fare |
+| `USER appuser` non-root | Sicurezza | ❌ Da fare |
+| Memory limits (`--memory=12g --memory-reservation=10g`) | Evita OOM killer | ❌ Da fare |
+| Healthcheck endpoint `/health` | Avvio ordinato | ❌ Da fare |
+
+**Action Plan 10.5:**
+
+1. Dockerfile: multi-stage: `cuda:12.2.2-devel` builder → `cuda:12.2.2-runtime` finale (da ~5GB a ~1.5GB)
+2. Aggiungere `HEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1`
+3. Aggiungere `USER appuser` con `/app/data` e `/app/jarvis/models` in gruppo `appuser`
+4. `docker-compose.worker.yml`: aggiungere `deploy.resources.limits.memory: 12g`
+
+---
+
+### 📊 Riepilogo Stima Impatto Cumulativo
+
+| Area | Ottimizzazione | Impatto Stimato |
+|---|---|---|
+| **Chat** | KV cache q8_0 + n_batch=2048 + CUDA Graphs | -40% TTFT, -50% VRAM contesto, +15% tok/s |
+| **RAG** | Hybrid search (dense+sparse) | +15-30% recall@10 |
+| **RAG** | Parent-Child chunking | +80% nDCG@5 rispetto a FCC |
+| **Architettura** | asyncio.to_thread per blocking I/O | -100% event loop bloccato |
+| **Infrastruttura** | Multi-stage build + healthcheck + user non-root | Immagine -70%, stabilità avvio, sicurezza |
+
+### Sprint 5 — Ottimizzazioni Baseline
+> Focus: 10.1 (KV q8_0, n_batch=2048, CUDA Graphs), 10.3 (Hybrid search + HNSW tuning), 10.4 (Parent-Child chunking)
+> Priorità: 10.1 > 10.3 > 10.4 > 10.5

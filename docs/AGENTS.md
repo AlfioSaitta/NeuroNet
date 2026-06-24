@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-06-23 (pulizia generale, benchmark 3 modelli)
+> **Data ultimo aggiornamento:** 2026-06-24 (planning + optimizations research)
 
 ---
 
@@ -317,7 +317,15 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 ### Cronologia Modifiche Recenti
 
 | Data | Modifica | Impatto |
-|---|---|---|
+|---|---|---|---|
+| 24/06 | **Dashboard log viewer + restart container/ingestion** | Docker logs con combo box, auto-refresh, restart container/ingestion |
+| 24/06 | **tiktoken caching offline** | `o200k_base` pre-scaricato in build, lazy init con fallback chain, niente crash su DNS assente |
+| 24/06 | **Docker API via Unix socket** | Sostituito httpx http+unix:// con http.client + AF_UNIX per compatibilità |
+| 24/06 | Test B RAG: 100% hit (6/6), media 59s | Nessun crash durante sessione, stabilità migliorata |
+| 24/06 | **PLAN.md v2: sezione Ottimizzazioni Baseline** | Aggiunta sezione 10 con ricerca web: KV q8_0, n_batch=2048, CUDA Graphs, Hybrid search Qdrant, Parent-Child chunking, Docker best practices. Tabella impatto cumulativo + Sprint 5 |
+| 24/06 | **RAG 4.1: tree-sitter per estrazione dipendenze** | Riscritta `extract_dependencies()` con AST tree-sitter per Go, Python, JS/TS. 12/12 test PASS. Eliminati falsi positivi da stringhe/commenti. Cattura CommonJS `require()`. Tabella comparativa in RAG_IMPROVEMENT_PLAN.md |
+| 24/06 | **RAG 4.2: dependency graph traversal** | Migliorata `search_documents()`: limit=20 per collezione (era 5 tot), parent-child reconstruction su risultati dipendenze, dedup via set `seen_filenames`, `asyncio.as_completed` per parallelismo reattivo |
+| 24/06 | **RAG 4.3: File-level co-embedding** | `_mean_vector()`, `ensure_file_profile_collection()`, `search_file_profiles()`. Media aritmetica chunk embedding upsertata in collezione `file_profiles_v3`. Cleanup su delete file. Test PASS: vettore 768 dim, search funziona. |
 | 23/06 | **Gemma 4 E2B QAT attivo** | VRAM 1036MiB (25%), -46% vs Qwen3.5 |
 | 23/06 | **Benchmark completi (3 modelli)** | QAT: 6.88 tok/s, Qwen3.5: ~5.58, Q4_K_M: 4.29 |
 | 23/06 | N_GPU_LAYERS=18 → crash confermato su QAT e Q4_K_M | Segfault oltre 15 layer |

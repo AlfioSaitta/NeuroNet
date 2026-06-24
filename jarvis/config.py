@@ -117,9 +117,10 @@ MAX_CONCURRENT_EMBEDDINGS = int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", "8"))
 DOC_DIR = "/app/documents"
 DOC_COLLECTION = f"collateral_documents_{VECTOR_DB_VERSION}"
 
-# Cache HuggingFace / FastEmbed
+# Cache HuggingFace / FastEmbed / tiktoken
 os.environ["HF_HOME"] = "/app/mem0_data_v3/hf_cache"
 os.environ["FASTEMBED_CACHE_PATH"] = "/app/mem0_data_v3/fastembed_cache"
+os.environ["TIKTOKEN_CACHE_DIR"] = "/app/mem0_data_v3/tiktoken_cache"
 
 # ==============================================================================
 # 🎛️ PANNELLO DI CONTROLLO CENTRALIZZATO (HYPERPARAMETERS & RAG)

@@ -174,34 +174,127 @@ async def get_embedding(texts, priority=10, is_query=False):
 # ==============================================================================
 
 def extract_dependencies(content, ext):
-    """Estrae le dipendenze (import/from/require) dalla testa del file."""
+    """Estrae le dipendenze (import/from/require) usando tree-sitter per Go, Python, JS/TS.
+    Fallback a regex per linguaggi non supportati o se AST disabilitato."""
     deps = set()
-    head = content[:2500]
-    if ext == '.go':
-        matches = re.findall(r'"([^"]+)"', head)
-        for m in matches:
-            deps.add(m.split('/')[-1])
-    elif ext == '.py':
-        matches = re.findall(r'^(?:from|import)\s+([a-zA-Z0-9_\.]+)', head, re.MULTILINE)
-        for m in matches:
-            deps.add(m.split('.')[0])
-    elif ext in ['.js', '.jsx', '.ts', '.tsx']:
-        matches = re.findall(r'from\s+[\'"]([^(\'|")]+)[\'"]', head)
-        for m in matches:
-            deps.add(m.split('/')[-1].replace('.js', '').replace('.ts', ''))
-    elif ext == '.md':
-        # Per Markdown cerchiamo i link [Testo](file.md) in tutto il documento
-        matches = re.findall(r'\[.*?\]\((.*?\.md.*?)\)', content)
-        for m in matches:
-            deps.add(m.split('/')[-1].split('#')[0]) # Rimuoviamo gli anchor e prendiamo il nome
+
+    if AST_ENABLED:
+        try:
+            if ext == '.go':
+                parser = Parser()
+                parser.language = GO
+                tree = parser.parse(bytes(content, "utf8"))
+                def _find_specs(n):
+                    if n.type == 'import_spec':
+                        for ch in n.children:
+                            if ch.type in ('interpreted_string_literal', 'raw_string_literal'):
+                                path = ch.text.decode().strip('"`')
+                                deps.add(path.split('/')[-1])
+                    for c in n.children:
+                        _find_specs(c)
+                def _walk(n):
+                    if n.type == 'import_declaration':
+                        _find_specs(n)
+                    for c in n.children:
+                        _walk(c)
+                _walk(tree.root_node)
+
+            elif ext == '.py':
+                parser = Parser()
+                parser.language = PY
+                tree = parser.parse(bytes(content, "utf8"))
+                def _walk(n):
+                    if n.type == 'import_statement':
+                        for c in n.children:
+                            if c.type == 'dotted_name':
+                                module = c.text.decode().split('.')[0]
+                                if module: deps.add(module)
+                            elif c.type == 'aliased_import':
+                                for ac in c.children:
+                                    if ac.type == 'dotted_name':
+                                        module = ac.text.decode().split('.')[0]
+                                        if module: deps.add(module)
+                    elif n.type == 'import_from_statement':
+                        for c in n.children:
+                            if c.type == 'dotted_name':
+                                module = c.text.decode().split('.')[0]
+                                if module:
+                                    deps.add(module)
+                                break
+                    for c in n.children:
+                        _walk(c)
+                _walk(tree.root_node)
+
+            elif ext in ('.js', '.jsx', '.ts', '.tsx'):
+                lang = JS if ext in ('.js', '.jsx') else TSX
+                parser = Parser()
+                parser.language = lang
+                tree = parser.parse(bytes(content, "utf8"))
+                def _walk(n):
+                    if n.type == 'import_statement':
+                        for c in n.children:
+                            if c.type == 'string':
+                                path = c.text.decode().strip('\'"`')
+                                name = path.split('/')[-1].replace('.js', '').replace('.ts', '').replace('.jsx', '').replace('.tsx', '')
+                                if name: deps.add(name)
+                    elif n.type == 'call_expression':
+                        first = n.children[0] if n.children else None
+                        if first and first.type == 'identifier' and first.text.decode() == 'require':
+                            for c in n.children:
+                                if c.type == 'arguments':
+                                    for a in c.children:
+                                        if a.type == 'string':
+                                            path = a.text.decode().strip('\'"`')
+                                            name = path.split('/')[-1].replace('.js', '').replace('.ts', '').replace('.jsx', '').replace('.tsx', '')
+                                            if name: deps.add(name)
+                    for c in n.children:
+                        _walk(c)
+                _walk(tree.root_node)
+        except Exception:
+            pass
+
+    # Fallback regex se tree-sitter non ha prodotto risultati o AST disabilitato
+    if not deps:
+        head = content[:2500]
+        if ext == '.go':
+            for m in re.findall(r'"([^"]+)"', head):
+                deps.add(m.split('/')[-1])
+        elif ext == '.py':
+            for m in re.findall(r'^(?:from|import)\s+([a-zA-Z0-9_\.]+)', head, re.MULTILINE):
+                deps.add(m.split('.')[0])
+        elif ext in ('.js', '.jsx', '.ts', '.tsx'):
+            for m in re.findall(r'from\s+[\'"]([^(\'|")]+)[\'"]', head):
+                deps.add(m.split('/')[-1].replace('.js', '').replace('.ts', ''))
+        elif ext == '.md':
+            for m in re.findall(r'\[.*?\]\((.*?\.md.*?)\)', content):
+                deps.add(m.split('/')[-1].split('#')[0])
+
     return list(deps)
 
 
 # Tokenizer per chunking ricorsivo a 512 token
-_tokenizer = tiktoken.get_encoding("o200k_base")
+_tokenizer = None
+
+def _get_tokenizer():
+    global _tokenizer
+    if _tokenizer is not None:
+        return _tokenizer
+
+    cache_dir = os.environ.get("TIKTOKEN_CACHE_DIR", "")
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+
+    for enc_name in ("o200k_base", "cl100k_base", "gpt2"):
+        try:
+            _tokenizer = tiktoken.get_encoding(enc_name)
+            return _tokenizer
+        except Exception:
+            continue
+
+    raise RuntimeError("Nessun tokenizer tiktoken disponibile (offline e cache vuota)")
 
 def _token_count(text: str) -> int:
-    return len(_tokenizer.encode(text, disallowed_special=()))
+    return len(_get_tokenizer().encode(text, disallowed_special=()))
 
 def _recursive_token_split(text: str, max_tokens: int) -> list[str]:
     """Divide il testo ricorsivamente a max_tokens usando i confini di riga."""
@@ -530,7 +623,39 @@ def get_workspace_col_name(rel_path):
         return f"collateral_docs_{ws_name}_{VECTOR_DB_VERSION}"
     return f"collateral_docs_default_{VECTOR_DB_VERSION}"
 
+def get_file_profile_col_name():
+    return f"file_profiles_{VECTOR_DB_VERSION}"
+
+def _mean_vector(vectors: list[list[float]]) -> list[float] | None:
+    """Media elemento-per-elemento di una lista di vettori."""
+    if not vectors:
+        return None
+    n = len(vectors)
+    dim = len(vectors[0])
+    result = [0.0] * dim
+    for v in vectors:
+        for i in range(dim):
+            result[i] += v[i]
+    return [x / n for x in result]
+
+
 async def ensure_workspace_collection(col_name):
+    if col_name not in state.created_collections:
+        async with state.state_lock:
+            if col_name not in state.created_collections:
+                try:
+                    exists = await state.qdrant.collection_exists(collection_name=col_name)
+                    if not exists:
+                        await state.qdrant.create_collection(
+                            collection_name=col_name,
+                            vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
+                        )
+                except Exception as e: logger.warning(f"Errore silenziato: {e}")
+                state.created_collections.add(col_name)
+
+
+async def ensure_file_profile_collection():
+    col_name = get_file_profile_col_name()
     if col_name not in state.created_collections:
         async with state.state_lock:
             if col_name not in state.created_collections:
@@ -635,6 +760,38 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
                         collection_name=col_name,
                         points_selector=old_ids
                     )
+
+                # ── File-level co-embedding ──────────────────────────────────
+                valid_vectors = [v for v in vectors if v and len(v) == EMBEDDING_DIMS]
+                if valid_vectors:
+                    _project_id = rel_path.replace('\\', '/').split('/')[0] if '/' in rel_path.replace('\\', '/') else "default"
+                    mean_v = _mean_vector(valid_vectors)
+                    if mean_v:
+                        await ensure_file_profile_collection()
+                        fp_col = get_file_profile_col_name()
+                        fp_id = hashlib.md5(rel_path.encode()).hexdigest()
+                        # Delete old profile first (re-index)
+                        try:
+                            await state.qdrant.delete(
+                                collection_name=fp_col,
+                                points_selector=[fp_id]
+                            )
+                        except Exception:
+                            pass
+                        await state.qdrant.upsert(
+                            collection_name=fp_col,
+                            points=[PointStruct(
+                                id=fp_id,
+                                vector=mean_v,
+                                payload={
+                                    "filename": rel_path,
+                                    "project": _project_id,
+                                    "deps": list(deps),
+                                    "chunk_count": len(valid_chunks),
+                                    "total_chars": sum(len(c["text"]) for c in valid_chunks)
+                                }
+                            )]
+                        )
             async with state.state_lock:
                 state.rag_state[rel_path] = {"hash": file_hash, "mtime": mtime, "size": size}
                 _save_file_state_unsafe(rel_path)
@@ -730,6 +887,16 @@ async def ingest_local_documents():
                     points_selector=Filter(must=[FieldCondition(key="filename", match=MatchValue(value=rp))])
                 )
             except Exception as e: logger.warning(f"Errore silenziato: {e}")
+            # Delete file profile too
+            try:
+                fp_col = get_file_profile_col_name()
+                fp_id = hashlib.md5(rp.encode()).hexdigest()
+                await state.qdrant.delete(
+                    collection_name=fp_col,
+                    points_selector=[fp_id]
+                )
+            except Exception:
+                pass
             async with state.state_lock:
                 if rp in state.rag_state:
                     del state.rag_state[rp]
@@ -948,6 +1115,34 @@ def generate_telegram_ls_data(subpath=None):
 # RICERCA VETTORIALE
 # ==============================================================================
 
+async def search_file_profiles(query_vector: list[float], top_k: int = 5) -> list[dict]:
+    """Cerca file semanticamente simili nella collezione file_profiles."""
+    try:
+        fp_col = get_file_profile_col_name()
+        exists = await state.qdrant.collection_exists(collection_name=fp_col)
+        if not exists:
+            return []
+        res = await state.qdrant.query_points(
+            collection_name=fp_col,
+            query=query_vector,
+            limit=top_k,
+            with_payload=True
+        )
+        return [
+            {
+                "filename": p.payload.get("filename", ""),
+                "project": p.payload.get("project", ""),
+                "score": p.score,
+                "deps": p.payload.get("deps", []),
+                "chunk_count": p.payload.get("chunk_count", 0)
+            }
+            for p in res.points
+        ]
+    except Exception as e:
+        logger.warning(f"Errore search_file_profiles: {e}")
+        return []
+
+
 async def search_documents(query, is_project_query=False, project_name=None):
     """Cerca documenti rilevanti nei Workspace Qdrant isolati."""
     try:
@@ -1097,6 +1292,7 @@ async def search_documents(query, is_project_query=False, project_name=None):
 
         primary_docs, deps_to_search = [], set()
         seen_parents = set()
+        seen_filenames = set()
         for r in best_results:
             filename = r["meta"].get("filename")
             pid = r["meta"].get("parent_chunk_id")
@@ -1109,6 +1305,7 @@ async def search_documents(query, is_project_query=False, project_name=None):
                 hierarchy = parent["meta"].get("section_hierarchy")
                 hierarchy_prefix = f"// CONTESTO GERARCHICO: {' -> '.join(hierarchy)}\n" if hierarchy else ""
                 if filename:
+                    seen_filenames.add(filename)
                     primary_docs.append(
                         f"📄 File Primario ({project_prefix}{filename}) [Padre: {parent['sibling_count']} frammenti]:\n"
                         f"```\n{hierarchy_prefix}{parent['text']}\n```"
@@ -1117,38 +1314,86 @@ async def search_documents(query, is_project_query=False, project_name=None):
                 hierarchy = r["meta"].get("section_hierarchy")
                 hierarchy_prefix = f"// CONTESTO GERARCHICO: {' -> '.join(hierarchy)}\n" if hierarchy else ""
                 if filename:
+                    seen_filenames.add(filename)
                     primary_docs.append(f"📄 File Primario ({project_prefix}{filename}):\n```\n{hierarchy_prefix}{r['text']}\n```")
             if r["meta"].get("deps"):
                 deps_to_search.update(r["meta"].get("deps"))
 
+        # ── Dependency graph traversal ──────────────────────────────────────
         secondary_docs = []
         if is_project_query and deps_to_search:
-            should_conditions = [
-                FieldCondition(key="filename", match=MatchText(text=dep))
-                for dep in list(deps_to_search)[:10]
-            ]
-            if should_conditions:
-                async def _scroll_col(col_name):
-                    try:
-                        res, _ = await state.qdrant.scroll(
-                            collection_name=col_name,
-                            scroll_filter=Filter(should=should_conditions),
-                            limit=5,
+            deps_list = list(deps_to_search)[:15]
+            dep_scroll_tasks = []
+            for col in target_cols:
+                dep_scroll_tasks.append(
+                    asyncio.ensure_future(
+                        state.qdrant.scroll(
+                            collection_name=col,
+                            scroll_filter=Filter(should=[
+                                FieldCondition(key="filename", match=MatchText(text=dep))
+                                for dep in deps_list
+                            ]),
+                            limit=20,
                             with_payload=True
                         )
-                        return res
-                    except Exception as e:
-                        logger.warning(f"Errore silenziato: {e}")
-                        return []
-                sec_results = []
-                for pts in await asyncio.gather(*[_scroll_col(c) for c in target_cols]):
-                    sec_results.extend(pts)
-                for hit in sec_results:
-                    filename = hit.payload.get('filename')
-                    if filename and f"📄 File Primario ({filename}):" not in "".join(primary_docs):
-                        secondary_docs.append(
-                            f"🔗 Dipendenza Inclusa ({filename}):\n```\n{hit.payload.get('text', '')}\n```"
+                    )
+                )
+            dep_raw = []
+            for fut in asyncio.as_completed(dep_scroll_tasks):
+                try:
+                    res, _ = await fut
+                    dep_raw.extend(res)
+                except Exception:
+                    pass
+
+            # Apply parent-child reconstruction to dep results
+            dep_parent_ids = set()
+            for r in dep_raw:
+                pid = r.payload.get("parent_chunk_id")
+                if pid:
+                    dep_parent_ids.add(pid)
+
+            dep_parent_texts = {}
+            if dep_parent_ids:
+                for col in target_cols:
+                    try:
+                        siblings, _ = await asyncio.wait_for(
+                            state.qdrant.scroll(
+                                collection_name=col,
+                                scroll_filter=Filter(should=[
+                                    FieldCondition(key="parent_chunk_id", match=MatchValue(value=pid))
+                                    for pid in dep_parent_ids
+                                ]),
+                                limit=100,
+                                with_payload=True
+                            ),
+                            timeout=5.0
                         )
+                        groups = {}
+                        for s in siblings:
+                            gpid = s.payload.get("parent_chunk_id")
+                            if gpid:
+                                groups.setdefault(gpid, []).append(s)
+                        for gpid, group in groups.items():
+                            if gpid not in dep_parent_texts:
+                                group.sort(key=lambda x: x.payload.get("chunk_index", 0))
+                                dep_parent_texts[gpid] = "\n\n".join(
+                                    s.payload.get("text", "") for s in group
+                                )
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+
+            seen_dep = set()
+            for r in dep_raw:
+                filename = r.payload.get("filename")
+                if not filename or filename in seen_filenames or filename in seen_dep:
+                    continue
+                seen_dep.add(filename)
+                pid = r.payload.get("parent_chunk_id")
+                text = dep_parent_texts.get(pid, r.payload.get("text", ""))
+                secondary_docs.append(
+                    f"🔗 Dipendenza ({filename}):\n```\n{text}\n```"
+                )
 
         # Raccogli e inietta le regole di progetto (se presenti) per i workspace coinvolti
         workspaces = set()

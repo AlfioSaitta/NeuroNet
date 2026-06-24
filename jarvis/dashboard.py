@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import struct
+import asyncio
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, JSONResponse
 from config import OLLAMA_BASE, QDRANT_HOST, ALLOWED_USERS
@@ -297,13 +299,32 @@ HTML_CONTENT = r"""
         </div>
 
         <div class="card" style="padding: 16px;">
-            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 12px;"><span class="dot dot-secondary"></span> Services</div>
+            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 12px;">
+                <span class="dot dot-secondary"></span> Services
+                <span style="flex:1;"></span>
+                <button class="btn" onclick="openLogModal()" style="font-size:0.65rem;padding:2px 6px;">Logs</button>
+            </div>
             <ul class="data-list">
-                <li><span>SearXNG</span> <span class="badge" id="health-searxng">...</span></li>
-                <li><span>Crawl4AI</span> <span class="badge" id="health-crawl4ai">...</span></li>
-                <li><span>Qdrant</span> <span class="badge" id="health-qdrant">...</span></li>
+                <li style="display:flex;gap:4px;flex-wrap:wrap;">
+                    <span style="flex:1;">SearXNG</span>
+                    <span class="badge" id="health-searxng">...</span>
+                    <button class="btn" onclick="restartContainer('searxng')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
+                </li>
+                <li style="display:flex;gap:4px;flex-wrap:wrap;">
+                    <span style="flex:1;">Crawl4AI</span>
+                    <span class="badge" id="health-crawl4ai">...</span>
+                    <button class="btn" onclick="restartContainer('crawl4ai_server')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
+                </li>
+                <li style="display:flex;gap:4px;flex-wrap:wrap;">
+                    <span style="flex:1;">Qdrant</span>
+                    <span class="badge" id="health-qdrant">...</span>
+                    <button class="btn" onclick="restartContainer('qdrant_db')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
+                </li>
                 <li><span>GPU (CUDA)</span> <span class="badge" id="health-cuda">...</span></li>
             </ul>
+            <div style="display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.05);">
+                <button class="btn" onclick="restartIngestion()" style="font-size:0.65rem;padding:3px 8px;">⟳ Restart Ingestion</button>
+            </div>
         </div>
     </div>
 
@@ -469,6 +490,26 @@ HTML_CONTENT = r"""
             <div id="node-content"></div>
         </div>
         <div class="graph-legend" id="graph-legend"></div>
+    </div>
+
+    <!-- Log Viewer Modal -->
+    <div id="log-modal" class="modal" style="display:none;">
+        <div class="modal-header">
+            <h2><span class="dot dot-primary pulsing"></span> Container Logs</h2>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <select id="log-container-select" onchange="fetchLogs()" style="background:rgba(0,0,0,0.8);color:#fff;padding:4px 8px;border:1px solid var(--glass-border);border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:0.75rem;">
+                    <option value="all">All Containers</option>
+                </select>
+                <label style="color:var(--text-muted);font-size:0.7rem;display:flex;align-items:center;gap:4px;cursor:pointer;">
+                    <input type="checkbox" id="log-auto-refresh" checked onchange="toggleAutoRefresh()"> Auto
+                </label>
+                <button class="btn" onclick="fetchLogs()" style="font-size:0.7rem;">Refresh</button>
+            </div>
+            <div class="close-modal" onclick="closeLogModal()">&times;</div>
+        </div>
+        <div style="height:100%;padding-top:56px;overflow-y:auto;">
+            <pre id="log-display" style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;padding:16px;margin:0;white-space:pre-wrap;word-break:break-all;color:var(--text-main);"></pre>
+        </div>
     </div>
 
     <script>
@@ -949,6 +990,92 @@ HTML_CONTENT = r"""
         setInterval(fetchStats, 3000);
         initCharts();
         fetchStats();
+
+        // ================================================================
+        // LOG VIEWER
+        // ================================================================
+        let logInterval = null;
+
+        function openLogModal() {
+            document.getElementById('log-modal').style.display = 'block';
+            loadContainers();
+            fetchLogs();
+            if (document.getElementById('log-auto-refresh').checked) {
+                logInterval = setInterval(fetchLogs, 5000);
+            }
+        }
+
+        function closeLogModal() {
+            document.getElementById('log-modal').style.display = 'none';
+            if (logInterval) { clearInterval(logInterval); logInterval = null; }
+        }
+
+        function toggleAutoRefresh() {
+            if (logInterval) { clearInterval(logInterval); logInterval = null; }
+            if (document.getElementById('log-auto-refresh').checked) {
+                logInterval = setInterval(fetchLogs, 5000);
+            }
+        }
+
+        async function loadContainers() {
+            try {
+                const res = await fetch('/api/dashboard/containers');
+                const data = await res.json();
+                const select = document.getElementById('log-container-select');
+                const currentVal = select.value;
+                select.innerHTML = '<option value="all">All Containers</option>';
+                (data.containers || []).forEach(c => {
+                    const opt = document.createElement('option');
+                    opt.value = c.name;
+                    opt.textContent = c.name + ' (' + (c.status || c.state) + ')';
+                    select.appendChild(opt);
+                });
+                if (currentVal && [...select.options].some(o => o.value === currentVal)) {
+                    select.value = currentVal;
+                }
+            } catch(e) {
+                console.error('Failed to load containers', e);
+            }
+        }
+
+        async function fetchLogs() {
+            const container = document.getElementById('log-container-select').value;
+            const display = document.getElementById('log-display');
+            try {
+                const res = await fetch(`/api/dashboard/containers/${encodeURIComponent(container)}/logs?tail=500`);
+                const data = await res.json();
+                if (data.logs) {
+                    display.textContent = data.logs.map(l => `[${l.container}] ${l.message}`).join('\n');
+                    display.scrollTop = display.scrollHeight;
+                } else if (data.error) {
+                    display.textContent = 'Error: ' + data.error;
+                }
+            } catch(e) {
+                display.textContent = 'Failed to fetch logs: ' + (e.message || e);
+            }
+        }
+
+        async function restartContainer(name) {
+            if (!confirm('Restart container "' + name + '"?')) return;
+            try {
+                const res = await fetch(`/api/dashboard/containers/${encodeURIComponent(name)}/restart`, { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'restarting') {
+                    setTimeout(fetchStats, 3000);
+                }
+            } catch(e) {
+                console.error('Failed to restart', name, e);
+            }
+        }
+
+        async function restartIngestion() {
+            if (!confirm('Restart document ingestion?')) return;
+            try {
+                await fetch('/api/dashboard/ingestion/restart', { method: 'POST' });
+            } catch(e) {
+                console.error('Failed to restart ingestion', e);
+            }
+        }
     </script>
 </body>
 </html>
@@ -1394,3 +1521,168 @@ async def get_qdrant_vectors(collection: str):
         return JSONResponse({"error": str(e)}, status_code=500)
 
     return JSONResponse({"points": points_data, "links": links_data})
+
+
+# ==============================================================================
+# DOCKER HELPERS
+# ==============================================================================
+
+import http.client
+import json
+import socket as skt
+
+DOCKER_SOCKET_PATH = next(
+    (p for p in ["/var/run/docker.sock", "/run/docker.sock", "/host_fs/var/run/docker.sock", "/host_fs/run/docker.sock"] if os.path.exists(p)),
+    "/var/run/docker.sock"
+)
+
+
+def _docker_connect(timeout: float = 10.0):
+    """Create an HTTPConnection over a Unix socket to the Docker daemon."""
+    conn = http.client.HTTPConnection("localhost", timeout=timeout)
+    sock = skt.socket(skt.AF_UNIX, skt.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect(DOCKER_SOCKET_PATH)
+    conn.sock = sock
+    return conn
+
+
+def _docker_api_sync(method: str, path: str, timeout: float = 10.0):
+    """Call Docker Engine API via Unix socket (synchronous). Returns (data, error)."""
+    try:
+        conn = _docker_connect(timeout)
+        conn.request(method, path, headers={"Host": "localhost"})
+        resp = conn.getresponse()
+        body = resp.read()
+        ct = resp.getheader("Content-Type", "") or ""
+
+        if resp.status >= 400:
+            return None, f"Docker API returned {resp.status}: {body.decode(errors='replace')[:200]}"
+
+        if "application/json" in ct.lower():
+            return json.loads(body), None
+        return body, None
+
+    except Exception as e:
+        return None, str(e)
+
+
+async def _docker_api(method: str, path: str, timeout: float = 10.0):
+    """Async wrapper around _docker_api_sync."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _docker_api_sync, method, path, timeout)
+
+
+def _parse_docker_logs(data: bytes) -> list[str]:
+    """Parse Docker's multiplexed log stream (8-byte header + payload)."""
+    lines = []
+    idx = 0
+    while idx + 8 <= len(data):
+        length = struct.unpack('>I', data[idx+4:idx+8])[0]
+        idx += 8
+        if idx + length > len(data):
+            break
+        chunk = data[idx:idx+length]
+        text = chunk.decode('utf-8', errors='replace').rstrip('\n\r')
+        if text:
+            lines.append(text)
+        idx += length
+    return lines
+
+
+FALLBACK_CONTAINERS = [
+    {"id": "jarvis", "name": "jarvis", "status": "Running (jarvis)", "state": "running", "image": "jarvis:latest"},
+    {"id": "qdrant_db", "name": "qdrant_db", "status": "Running (qdrant)", "state": "running", "image": "qdrant/qdrant:latest"},
+    {"id": "searxng", "name": "searxng", "status": "Running (searxng)", "state": "running", "image": "searxng/searxng:latest"},
+    {"id": "crawl4ai_server", "name": "crawl4ai_server", "status": "Running (crawl4ai)", "state": "running", "image": "unclecode/crawl4ai:latest"},
+]
+
+
+async def _fetch_containers() -> list[dict]:
+    data, err = await _docker_api("GET", "/containers/json?all=true")
+    if err or not isinstance(data, list):
+        return FALLBACK_CONTAINERS
+    result = []
+    for c in data:
+        names = [n.lstrip("/") for n in c.get("Names", [])]
+        result.append({
+            "id": c.get("Id", "")[:12],
+            "name": names[0] if names else "unknown",
+            "names": names,
+            "status": c.get("Status", "unknown"),
+            "state": c.get("State", "unknown"),
+            "image": c.get("Image", ""),
+        })
+    return result
+
+
+async def _resolve_container(name: str) -> tuple[str | None, str | None]:
+    """Resolve container name/prefix to full ID. Returns (id, display_name) or (None, error)."""
+    data, err = await _docker_api("GET", "/containers/json?all=true")
+    if err or not isinstance(data, list):
+        return None, f"Docker API error: {err}"
+    for c in data:
+        cnames = [n.lstrip("/") for n in c.get("Names", [])]
+        cid = c.get("Id", "")
+        if name in cnames or cid.startswith(name):
+            return cid, cnames[0] if cnames else cid[:12]
+    return None, f"Container '{name}' not found"
+
+
+# ==============================================================================
+# DOCKER API ROUTES
+# ==============================================================================
+
+@dashboard_router.get("/api/dashboard/containers")
+async def list_containers():
+    containers = await _fetch_containers()
+    return JSONResponse({"containers": containers})
+
+
+@dashboard_router.get("/api/dashboard/containers/{name:path}/logs")
+async def get_container_logs(name: str, tail: int = 200):
+    if name == "all":
+        containers = await _fetch_containers()
+        all_logs: list[dict] = []
+        for c in containers:
+            raw, err = await _docker_api("GET", f"/containers/{c['id']}/logs?stdout=1&stderr=1&tail={tail}", timeout=8.0)
+            if err or not isinstance(raw, bytes):
+                all_logs.append({"container": c["name"], "message": f"[Error fetching logs: {err}]"})
+            else:
+                for line in _parse_docker_logs(raw):
+                    all_logs.append({"container": c["name"], "message": line})
+        return JSONResponse({"logs": all_logs, "container": "all"})
+
+    cid, err = await _resolve_container(name)
+    if err or not cid:
+        return JSONResponse({"error": err or "Container not found"}, status_code=404)
+
+    raw, err = await _docker_api("GET", f"/containers/{cid}/logs?stdout=1&stderr=1&tail={tail}", timeout=8.0)
+    if err or not isinstance(raw, bytes):
+        return JSONResponse({"error": err or "Failed to fetch logs"}, status_code=500)
+
+    lines = _parse_docker_logs(raw)
+    cname = name
+    return JSONResponse({"logs": [{"container": cname, "message": l} for l in lines], "container": cname})
+
+
+@dashboard_router.post("/api/dashboard/containers/{name:path}/restart")
+async def restart_container(name: str):
+    cid, err = await _resolve_container(name)
+    if err or not cid:
+        return JSONResponse({"error": err or "Container not found"}, status_code=404)
+
+    _, api_err = await _docker_api("POST", f"/containers/{cid}/restart", timeout=30.0)
+    if api_err:
+        return JSONResponse({"error": api_err}, status_code=500)
+    return JSONResponse({"status": "restarting", "container": name})
+
+
+@dashboard_router.post("/api/dashboard/ingestion/restart")
+async def restart_ingestion():
+    from rag import ingest_local_documents
+    state.is_reindexing = True
+    task = asyncio.create_task(ingest_local_documents())
+    state.background_tasks.add(task)
+    task.add_done_callback(state.background_tasks.discard)
+    return JSONResponse({"status": "success", "message": "Document ingestion re-started"})
