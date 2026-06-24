@@ -58,6 +58,7 @@ if WATCHDOG_ENABLED:
 if TELEGRAM_ENABLED:
     from telegram import BotCommand, Update
     from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, TypeHandler
+    from telegram.request import BaseRequest, HTTPXRequest
     from telegram_bot import telegram_start, handle_telegram_message, telegram_callback_handler, auth_middleware
 
 try:
@@ -270,13 +271,34 @@ async def lifespan(app: FastAPI):
     # Bot Telegram
     if TELEGRAM_ENABLED and TELEGRAM_TOKEN and ALLOWED_USERS:
         try:
+            # HTTPXRequest con retry automatico su OSError (DNS/network sporadici)
+            from telegram.error import NetworkError
+            _base_req = HTTPXRequest(
+                read_timeout=120.0,
+                write_timeout=120.0,
+                connect_timeout=60.0,
+                pool_timeout=60.0,
+            )
+            _orig_wrapper = _base_req._request_wrapper
+
+            async def _retry_wrapper(self, *args, **kwargs):
+                for _attempt in range(3):
+                    try:
+                        return await _orig_wrapper(*args, **kwargs)
+                    except (OSError, NetworkError) as _e:
+                        if _attempt < 2:
+                            logger.warning(f"DNS/Network error su Telegram API, retry {_attempt+2}/3: {_e}")
+                            await asyncio.sleep(2 ** _attempt)
+                        else:
+                            raise
+
+            import types as _types
+            _base_req._request_wrapper = _types.MethodType(_retry_wrapper, _base_req)
+
             state.telegram_app = (
                 ApplicationBuilder()
                 .token(TELEGRAM_TOKEN)
-                .read_timeout(120.0)
-                .write_timeout(120.0)
-                .connect_timeout(60.0)
-                .pool_timeout(60.0)
+                .request(_base_req)
                 .build()
             )
             # Middleware di sicurezza per bloccare utenti non autorizzati su tutti gli handler

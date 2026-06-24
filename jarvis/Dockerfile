@@ -54,17 +54,16 @@ RUN pip install --no-cache-dir "llama-cpp-python[server] @ git+https://github.co
 RUN pip install --no-cache-dir granian
 
 # Pre-cache tiktoken tokenizer per funzionamento offline
-RUN python3 -c "
-import os
+RUN python3 <<'PYEOF'
+import os, tiktoken
 os.environ['TIKTOKEN_CACHE_DIR'] = '/app/mem0_data_v3/tiktoken_cache'
-import tiktoken
 os.makedirs(os.environ['TIKTOKEN_CACHE_DIR'], exist_ok=True)
 try:
     tiktoken.get_encoding('o200k_base')
     print('✅ o200k_base cached')
 except Exception as e:
     print(f'⚠️ o200k_base download failed (will retry at runtime): {e}')
-"
+PYEOF
 
 COPY . .
 
