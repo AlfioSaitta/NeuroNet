@@ -59,18 +59,18 @@ Query rappresentative per ogni tipo di progetto, misurando: `# chunk restituiti`
 
 ### Tabella riepilogativa fasi
 
-| # | Query | Fase 1 (4000 char) | Fase 2.1 (512 tok) | Fase 2.2 (section) | Fase 2.3 (parent-child) | **Corrente** (Bug fix, no reindex) |
-|---|---|---|---|---|---|---|
-| 1 | proxy e blocking | 99s ⚠️ RAG | 38s ✅ | **13s** ✅ | 27s ✅ | 40s ✅ |
-| 2 | websocket | 70s ❌ NO RAG | 76s ✅ | **42s** ✅ | **13s** ✅ | 66s ✅ |
-| 3 | memory pool | 84s ⚠️ RAG | 51s ✅ | **27s** ✅ | 54s ✅ | 56s ✅ |
-| 4 | slot machine | 40s ✅ RAG | 84s ✅ | **26s** ✅ | 37s ✅ | 62s ✅ |
-| 5 | autenticazione | 32s ✅ RAG | 62s ✅ | **33s** ✅ | 34s ✅ | 18s ❌ NO RAG |
-| 6 | compressione | 19s ✅ RAG | 36s ✅ | **17s** ✅ | 24s ✅ | 22s ✅ |
-| | **Media** | **57s** | **58s** | **26s** | **31s** | **44s** |
+| # | Query | Fase 1 (4000 char) | Fase 2.1 (512 tok) | Fase 2.2 (section) | Fase 2.3 (parent-child) | **Dopo reindex** (B6–B11) |
+|---|---|---|---|---|---|---|---|
+| 1 | proxy e blocking | 99s ⚠️ RAG | 38s ✅ | **13s** ✅ | 27s ✅ | 50s ✅ |
+| 2 | websocket | 70s ❌ NO RAG | 76s ✅ | **42s** ✅ | **13s** ✅ | 82s ✅ |
+| 3 | memory pool | 84s ⚠️ RAG | 51s ✅ | **27s** ✅ | 54s ✅ | 65s ✅ |
+| 4 | slot machine | 40s ✅ RAG | 84s ✅ | **26s** ✅ | 37s ✅ | 97s ✅ |
+| 5 | autenticazione | 32s ✅ RAG | 62s ✅ | **33s** ✅ | 34s ✅ | 8s ❌ NO RAG |
+| 6 | compressione | 19s ✅ RAG | 36s ✅ | **17s** ✅ | 24s ✅ | 29s ✅ |
+| | **Media** | **57s** | **58s** | **26s** | **31s** | **55s** |
 | | **RAG hit** | **83%** (5/6) | **100%** | **100%** | **100%** | **83%** (5/6) |
 
-> **Osservazioni colonna Corrente:** Container riavviato senza re-indicizzazione completa (solo 2 file processati). B6/B7 non ancora applicati ai chunk esistenti. Query 5 fallisce per design: il sistema anti-contaminazione richiede nome progetto nella query. Tempi più alti rispetto a Fase 2.3 per GPU non ancora termicamente stabile (riavvio recente). RAG hit su query con progetto esplicitato: **5/5 (100%)**.
+> **Osservazioni dopo reindex (B6–B11):** Tempi più alti (media 55s) per GPU termicamente calda (re-indexing appena completato). RAG hit invariato a 83% (5/6): query 5 non specifica progetto → anti-contaminazione restituisce vuoto (atteso). RAG hit su query con progetto esplicitato: **5/5 (100%)**. Due query ora includono blocchi di codice (`has_code_block=True`). B6 (deduplicazione chunk) ha ridotto il rumore nel contesto LLM; B7 (signature non troncate) ha migliorato l'accuratezza delle gerarchie. Nessun crash, nessuna contaminazione.
 
 **Template test query:**
 ```bash
