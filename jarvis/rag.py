@@ -310,11 +310,6 @@ def ast_code_chunking(content, filepath):
         tree = parser.parse(bytes(content, "utf8"))
         chunks = []
 
-        # CHUNK 0: PREAMBOLO (prime 50 righe)
-        preamble = "\n".join(content.split("\n")[:50])
-        if len(preamble.strip()) > 20:
-            chunks.append({"text": f"PREAMBOLO:\n{preamble}", "section_hierarchy": None})
-
         def get_signature(n):
             try:
                 raw = n.text.decode()
@@ -360,6 +355,18 @@ def ast_code_chunking(content, filepath):
                 context_stack.pop()
 
         traverse(tree.root_node)
+
+        # PREAMBOLO solo se nessun chunk AST si sovrappone alle prime 50 righe
+        preamble_overlap = False
+        for c in chunks:
+            m = re.match(r"RIGHE (\d+)-\d+:", c["text"])
+            if m and int(m.group(1)) <= 50:
+                preamble_overlap = True
+                break
+        if not preamble_overlap:
+            preamble = "\n".join(content.split("\n")[:50])
+            if len(preamble.strip()) > 20:
+                chunks.insert(0, {"text": f"PREAMBOLO:\n{preamble}", "section_hierarchy": None})
 
         if not chunks:
             children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
