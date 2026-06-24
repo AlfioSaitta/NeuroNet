@@ -954,12 +954,15 @@ if TELEGRAM_ENABLED:
             
             while iterations < max_iterations:
                 iterations += 1
+                options = dict(LLM_OPTIONS)
+                if "localhost" in OLLAMA_BASE or "127.0.0.1" in OLLAMA_BASE:
+                    options["skip_rag"] = True
                 payload = {
                     "model": OLLAMA_MODEL,
                     "messages": current_messages,
                     "stream": False,
                     "keep_alive": GLOBAL_KEEP_ALIVE,
-                    "options": LLM_OPTIONS,
+                    "options": options,
                     "tools": TOOLS_SCHEMA
                 }
 
