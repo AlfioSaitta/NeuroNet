@@ -169,7 +169,7 @@ def save_allowed_users():
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen3-embedding-0.6b")
 EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))  # 768 via MRL (Qwen3 nativo 1024)
 FLASHRANK_MODEL = os.getenv("FLASHRANK_MODEL", "ms-marco-MiniLM-L-6-v2")
-Qwen3_RERANKER_MODEL = os.getenv("Qwen3_RERANKER_MODEL", "/root/models/Qwen3-Reranker-0.6B")
+Qwen3_RERANKER_MODEL = os.getenv("Qwen3_RERANKER_MODEL", "/app/models/Qwen3-Reranker-0.6B")
 RERANKER_DEVICE = os.getenv("RERANKER_DEVICE", "cpu")  # cpu per non rubare VRAM alla chat
 
 # Sicurezza Webhook
