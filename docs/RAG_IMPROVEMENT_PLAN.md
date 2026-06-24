@@ -255,24 +255,25 @@ print(f'Min chars: {min(lengths)}  Max chars: {max(lengths)}')
 ---
 
 ### 2.3 Parent-child chunking (hierarchical retrieval)
-**Stato:** 🔲 TODO
-**File:** `rag.py`, `search_documents()`
+**Stato:** ✅ COMPLETATO (cd1f06b)
+**File:** `rag.py` — `ast_code_chunking()`, `search_documents()`
 
 **Problema:** Chunk piccoli (512 token) hanno alta precisione ma perdono contesto. Chunk grandi hanno contesto ma bassa precisione.
 
-**Soluzione:** Implementare ParentDocumentRetriever pattern:
-- Index: chunk piccoli (512 token) per retrieval
-- Store: chunk grandi (l'intera funzione/classe, ~2000 token) per generazione
-- Payload: `parent_chunk_id` → retrieve il piccolo, restituisci il grande
+**Soluzione:** Raggruppamento per prossimità (proximity grouping):
+- Chunk AST consecutivi vengono raggruppati in "genitori" fino a ~2000 token
+- Ogni figlio riceve `parent_chunk_id` (hash deterministico), `chunk_index`, `chunk_count`
+- In `search_documents()`: dopo il retrieval, scrolla Qdrant per TUTTI i sibling con lo stesso `parent_chunk_id` e ricostruisce il testo del genitore concatenato
+- Deduplicazione: se più figli dello stesso genitore sono tra i risultati, viene incluso solo il genitore una volta
+- Nessuna modifica allo schema Qdrant (solo nuovi campi payload: `parent_chunk_id`, `chunk_index`, `chunk_count`)
 
-**Test:**
-```bash
-# Confronta la completezza delle risposte
-# PRIMA: la risposta include solo il chunk piccolo
-# DOPO: la risposta include l'intera funzione/classe
-```
+**Risultati:**
+- Verificato su `handlers.go` (SlotBuilder): 3 chunk figli → ricostruiti in genitore da **4405 caratteri** (vs ~1400 media figli)
+- ~32% dei chunk SlotBuilder hanno `parent_chunk_id` dopo re-indicizzazione
+- `CONTESTO GERARCHICO` assente dal testo ricostruito ✅
+- Nessun impatto su performance Qdrant (scroll index su `parent_chunk_id`)
 
-**Criterio di successo:** Le risposte LLM hanno più contesto e sono più complete (valutazione soggettiva)
+**Test:** Verifica via scroll Qdrant — sibling lookup restituisce tutti i frammenti, concatenazione ordinata per `chunk_index`
 
 ---
 
@@ -457,7 +458,7 @@ Script che esegue tutte le query di Test B e registra:
 | 1.4 Rimuovi overlap | ✅ Fatto | — | Basso | Nessuna |
 | 2.1 Chunk 512 token | ✅ Fatto | — | Molto alto | Richiede re-indicizzazione |
 | 2.2 Section-aware | ✅ Fatto | 3h | Alto | 2.1 |
-| 2.3 Parent-child | 🟡 Alto | 4h | Alto | 2.1 |
+| 2.3 Parent-child | ✅ Fatto | 4h | Alto | 2.1 |
 | 3.1 Parallel query | ✅ Fatto | — | Medio | Nessuna |
 | 3.2 Hybrid search | 🟢 Medio | 4h | Molto alto | Nessuna |
 | 4.1 Fix dipendenze reali | 🟢 Medio | 3h | Alto | Nessuna |
