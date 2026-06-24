@@ -119,6 +119,18 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(engine.load_models)
     logger.info("Modelli Llama caricati in locale (No Ollama).")
 
+    # Inizializzazione provider esterni (Gemini, ecc.)
+    try:
+        router = engine.init_provider_router()
+        if router:
+            providers = router.get_available_providers()
+            if providers:
+                logger.info(f"☁️ Provider esterni disponibili: {', '.join(providers)}")
+            else:
+                logger.info("☁️ Nessun provider esterno configurato (GEMINI_API_KEY non impostata)")
+    except Exception as e:
+        logger.warning(f"ProviderRouter: errore inizializzazione: {e}")
+
     state.http_client = httpx.AsyncClient(timeout=300.0)
     if QDRANT_HOST == "local":
         state.qdrant = AsyncQdrantClient(path="./data/qdrant_local")
@@ -537,8 +549,12 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                 
     current_user_id = body.get("user_id") or (options.get("user_id") if isinstance(options, dict) else None) or "alfio_dev"
     conversation_id = body.get("conversation_id") or request.headers.get("X-Conversation-Id", "default")
+    concise = isinstance(options, dict) and options.get("concise") is True
     if not is_internal:
-        body["messages"] = await build_omniscient_prompt(raw_messages, user_id=current_user_id, conversation_id=str(conversation_id))
+        body["messages"] = await build_omniscient_prompt(
+            raw_messages, user_id=current_user_id,
+            conversation_id=str(conversation_id), concise=concise
+        )
     
     is_stream = body.get("stream", True)
     
@@ -841,7 +857,11 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
     current_user_id = body.get("user_id") or "alfio_dev"
     conversation_id = body.get("conversation_id") or request.headers.get("X-Conversation-Id", "default")
-    enriched = await build_omniscient_prompt(ollama_messages, user_id=current_user_id, conversation_id=str(conversation_id))
+    concise = body.get("concise", False)
+    enriched = await build_omniscient_prompt(
+        ollama_messages, user_id=current_user_id,
+        conversation_id=str(conversation_id), concise=concise
+    )
     chat_body = {"model": OLLAMA_MODEL, "messages": enriched, "stream": is_stream, "options": options}
     if not is_stream:
         response = await engine.generate_chat(chat_body["messages"], options=options, stream=False)

@@ -90,11 +90,13 @@ boolean ::= "true" | "false"'''
     return False
 
 
-async def build_omniscient_prompt(messages, user_id=None, conversation_id="default"):
+async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False):
     """
     Pipeline di arricchimento: fonde memoria episodica, RAG documentale e web intelligence
     in un unico super-prompt con tag XML.
     Timeout di 30s per evitare blocchi su gateway/model lenti.
+
+    Se concise=True, salta RAG/memoria/web e usa solo un system prompt minimo.
     """
     user_messages = [m["content"] for m in messages if m["role"] == "user"]
     latest_msg = user_messages[-1] if user_messages else ""
@@ -110,11 +112,44 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if m.get("content") and len(m["content"]) > 1500:
             m["content"] = m["content"][:1500] + "\n...[TRUNCATED FOR CONTEXT LIMIT]..."
 
+    current_user_id = user_id if user_id else "alfio_dev"
+
+    # ── MODALITÀ CONCISE: skip RAG, memoria, web, progetto ──
+    if concise:
+        import datetime
+        _, clean_msg = await perform_web_search_and_crawl(latest_msg)
+        # Salva comunque in memoria il messaggio utente
+        if state.memory:
+            try:
+                async def _bg_add_concise():
+                    from memory import save_to_memory
+                    await save_to_memory(clean_msg, user_id=current_user_id)
+                task = asyncio.create_task(_bg_add_concise())
+                import state as gstate
+                gstate.background_tasks.add(task)
+                task.add_done_callback(gstate.background_tasks.discard)
+            except Exception:
+                pass
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        system_directive = (
+            f"\n\n<system_instructions>\n"
+            f"Sei {BOT_NAME}, assistente AI di Alfio. Ora attuale: {now_str}.\n"
+            "Rispondi in modo estremamente CONCISO. Massimo 2-3 frasi. Vai dritto al punto.\n"
+            "Non usare tag XML, non elencare opzioni, non fare domande di follow-up.\n"
+            "Non menzionare il contesto o i tag.\n"
+            "</system_instructions>"
+        )
+        super_prompt = system_directive + f"\n{clean_msg}"
+        for m in reversed(messages):
+            if m["role"] == "user":
+                m["content"] = super_prompt
+                break
+        return messages
+
+    # ── MODALITÀ NORMALE ──
     is_project_query = await llm_gatekeeper_classify(latest_msg)
     web_ctx, clean_msg = await perform_web_search_and_crawl(latest_msg)
     mem_ctx, rag_ctx = "", ""
-
-    current_user_id = user_id if user_id else "alfio_dev"
 
     # Rilevamento progetto: cerca in tutta la conversazione (dal più recente), una sola query Qdrant
     active_project = await detect_project_in_conversation(user_messages)
