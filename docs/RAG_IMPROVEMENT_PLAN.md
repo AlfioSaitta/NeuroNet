@@ -309,6 +309,108 @@ print(f'Min chars: {min(lengths)}  Max chars: {max(lengths)}')
 
 ---
 
+## Bug Fix — Issue scoperte durante Fase 2
+
+### B6. Chunk duplicati da tree-sitter (AST overlapping nodes)
+**Stato:** 🔴 Critico — DA FIXARE
+
+**Problema:** Tree-sitter restituisce nodi duplicati per certi costrutti. Esempio su `rtp_calibrator.go`:
+- `struct_type` nodo cattura `struct { ... }` (byte range esatto)
+- `type_declaration` cattura l'intera dichiarazione `type Foo struct { ... }`
+Il `traverse()` processa entrambi, producendo due chunk identici (`RIGHE 106-136` appare 2× nel file). Questo causa:
+- Contenuto duplicato nei gruppi di prossimità parent-child (testo gonfiato)
+- Chunk_count non corrispondente ai figli reali dopo filtro valid_chunks
+
+**Soluzione:**
+- Aggiungere un set `seen_byte_ranges` in `traverse()` per saltare nodi con byte range già processato
+- Oppure: dopo la merge, deduplicare chunk con stesso `text` all'interno del file
+
+**Stima:** 30 min
+**File:** `rag.py` — `ast_code_chunking()`, funzione `traverse()`
+
+---
+
+### B7. get_signature() tronca il primo carattere delle gerarchie
+**Stato:** 🟡 Alto — DA FIXARE
+
+**Problema:** La funzione `get_signature()` in `ast_code_chunking()` produce gerarchie troncate:
+- `"struct MyStruct"` → `"truct MyStruct"` (manca 's')
+- `"type BlockingWork struct"` → `"ype BlockingWork struct"` (manca 't')
+
+Causa probabile: `n.start_byte` di tree-sitter punta dopo un certo prefisso per alcuni linguaggi (es. `struct_specifier` in C include solo il nome, non la keyword). Il `content[n.start_byte:n.start_byte+1]` è uno spazio o newline che viene stripato, ma la riga risultante perde il primo carattere significativo della parola successiva.
+
+**Soluzione:**
+- Sostituire `get_signature()` con estrazione basata sul nome del nodo tree-sitter quando disponibile
+- Per le signature che iniziano con `{` o `:` dopo split, usare `n.text.decode()` invece di calculare da `content[start_byte:end_byte]`
+- Aggiungere controllo: `if sig_text and len(sig_text) > 3` prima di pushare in context_stack
+
+**Stima:** 1h
+**File:** `rag.py` — `ast_code_chunking()`
+
+---
+
+### B8. chunk_count non aggiornato dopo filtro valid_chunks
+**Stato:** 🟡 Alto — DA FIXARE
+
+**Problema:** `ast_code_chunking()` assegna `chunk_count = len(group)` ai figli di un gruppo di prossimità. Ma in `process_single_file()` (riga ~548), i chunk con `len(text.strip()) < 50` vengono filtrati via (`valid_chunks`). I chunk rimanenti mantengono il `chunk_count` originale che non corrisponde al numero reale di sibling presenti in Qdrant.
+
+Effetto: la scroll per parent_chunk_id in `search_documents()` può restituire meno sibling del previsto. Non rompe la funzionalità, ma il label "[Padre: X frammenti]" risulta inaccurato e alcuni sibling mancanti potrebbero ridurre il contesto.
+
+**Soluzione:**
+- Dopo il filtro `valid_chunks`, rilevare i gruppi con stesso `parent_chunk_id` e ricalcolare `chunk_count` e `chunk_index`
+- Oppure: non filtrare chunk < 50 char che hanno parent_chunk_id (conservarli comunque)
+
+**Stima:** 30 min
+**File:** `rag.py` — `process_single_file()`
+
+---
+
+### B9. _assign_parent() dead code nel path AST
+**Stato:** 🔵 Basso — DA PULIRE
+
+**Problema:** La funzione helper `_assign_parent()` è usata solo nei fallback non-AST (markdown, linguaggi non supportati, eccezioni). Nel path AST principale, la logica di raggruppamento è inline direttamente nel codice. Questo crea:
+- Duplicazione di logica (assegnazione parent_chunk_id)
+- Possibile deriva: modificando una logica, l'altra rimane indietro
+
+**Soluzione:**
+- Refactor: unificare la creazione dei chunk finali in un unico helper che gestisce sia chunk singoli che gruppi
+- Rimuovere `_assign_parent()` e inlineare la logica in un unico punto
+
+**Stima:** 30 min
+**File:** `rag.py` — `ast_code_chunking()`
+
+---
+
+### B10. Qdrant scroll per parent reconstruction non ha timeout
+**Stato:** 🟢 Medio — DA AGGIUNGERE
+
+**Problema:** In `search_documents()`, la scroll per sibling con stesso `parent_chunk_id` non ha timeout. Se Qdrant è sovraccarico (o se la collezione ha migliaia di punti), la scroll potrebbe bloccarsi o richiedere secondi, ritardando la risposta LLM.
+
+**Soluzione:**
+- Aggiungere `asyncio.wait_for()` o timeout al client Qdrant per la scroll
+- Se la scroll fallisce per timeout, restituire i chunk figli originali come fallback (senza ricostruzione parent)
+
+**Stima:** 15 min
+**File:** `rag.py` — `search_documents()`
+
+---
+
+### B11. PREAMBOLO chunk include sovrapposizioni con altri chunk
+**Stato:** 🔵 Basso — DA MIGLIORARE
+
+**Problema:** Il chunk PREAMBOLO (prime 50 righe) viene creato indipendentemente, ma il tree-sitter cattura anche funzioni/struct che iniziano nelle prime 50 righe (es. import blocchi, const). Questo causa:
+- Duplicazione di contenuto nel parent proximity group
+- Gonfiamento del contesto LLM con informazioni ridondanti
+
+**Soluzione:**
+- Estrarre il PREAMBOLO SOLO se non ci sono altri chunk che coprono le righe 1-50
+- Oppure: ridurre il preambolo a 20 righe e escludere blocchi già catturati da tree-sitter (import, const, var)
+
+**Stima:** 30 min
+**File:** `rag.py` — `ast_code_chunking()`
+
+---
+
 ## Fase 3 — Hybrid search
 
 ### 3.1 Parallelizzare le query Qdrant
@@ -491,6 +593,12 @@ Script che esegue tutte le query di Test B e registra:
 | 2.1 Chunk 512 token | ✅ Fatto | — | Molto alto | Richiede re-indicizzazione |
 | 2.2 Section-aware | ✅ Fatto | 3h | Alto | 2.1 |
 | 2.3 Parent-child | ✅ Fatto | 4h | Alto | 2.1 |
+| B6 Duplicati tree-sitter | 🔴 Critico | 30m | Alto | 2.3 |
+| B7 Signature troncate | 🟡 Alto | 1h | Medio | 2.2 |
+| B8 chunk_count errato | 🟡 Alto | 30m | Medio | 2.3 |
+| B9 Dead code cleanup | 🔵 Basso | 30m | Basso | 2.3 |
+| B10 Scroll timeout | 🟢 Medio | 15m | Basso | 2.3 |
+| B11 PREAMBOLO overlap | 🔵 Basso | 30m | Basso | 2.2 |
 | 3.1 Parallel query | ✅ Fatto | — | Medio | Nessuna |
 | 3.2 Hybrid search | 🟢 Medio | 4h | Molto alto | Nessuna |
 | 4.1 Fix dipendenze reali | 🟢 Medio | 3h | Alto | Nessuna |
