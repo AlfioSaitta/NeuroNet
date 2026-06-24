@@ -569,6 +569,17 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
             points = []
 
             valid_chunks = [c for c in chunks if len(c["text"].strip()) >= 50]
+
+            # Ricalcola chunk_count e chunk_index dopo il filtro valid_chunks
+            groups: dict[str | None, list[dict]] = {}
+            for c in valid_chunks:
+                pid = c.get("parent_chunk_id")
+                groups.setdefault(pid, []).append(c)
+            for _, group in groups.items():
+                for i, c in enumerate(group):
+                    c["chunk_index"] = i
+                    c["chunk_count"] = len(group)
+
             if valid_chunks:
                 texts_to_embed = [c["text"] for c in valid_chunks]
                 
