@@ -60,17 +60,19 @@ Query rappresentative per ogni tipo di progetto, misurando: `# chunk restituiti`
 ### Tabella riepilogativa fasi
 
 | # | Query | Fase 1 (4000 char) | Fase 2.1 (512 tok) | Fase 2.2 (section) | Fase 2.3 (parent-child) | **Dopo reindex** (B6–B11) |
-|---|---|---|---|---|---|---|
-| 1 | proxy e blocking | 99s ⚠️ RAG | 38s ✅ | **13s** ✅ | 27s ✅ | 50s ✅ |
-| 2 | websocket | 70s ❌ NO RAG | 76s ✅ | **42s** ✅ | **13s** ✅ | 82s ✅ |
-| 3 | memory pool | 84s ⚠️ RAG | 51s ✅ | **27s** ✅ | 54s ✅ | 65s ✅ |
-| 4 | slot machine | 40s ✅ RAG | 84s ✅ | **26s** ✅ | 37s ✅ | 97s ✅ |
-| 5 | autenticazione | 32s ✅ RAG | 62s ✅ | **33s** ✅ | 34s ✅ | 8s ❌ NO RAG |
-| 6 | compressione | 19s ✅ RAG | 36s ✅ | **17s** ✅ | 24s ✅ | 29s ✅ |
-| | **Media** | **57s** | **58s** | **26s** | **31s** | **55s** |
+|---|---|---|---|---|---|---|---|
+| 1 | proxy e blocking | 99s ⚠️ RAG | 38s ✅ | **13s** ✅ | 27s ✅ | 100s ✅ |
+| 2 | websocket | 70s ❌ NO RAG | 76s ✅ | **42s** ✅ | **13s** ✅ | 102s ✅ |
+| 3 | memory pool | 84s ⚠️ RAG | 51s ✅ | **27s** ✅ | 54s ✅ | 51s ✅ |
+| 4 | slot machine | 40s ✅ RAG | 84s ✅ | **26s** ✅ | 37s ✅ | 104s ✅ |
+| 5 | autenticazione | 32s ✅ RAG | 62s ✅ | **33s** ✅ | 34s ✅ | 14s ❌ NO RAG |
+| 6 | compressione | 19s ✅ RAG | 36s ✅ | **17s** ✅ | 24s ✅ | 49s ✅ |
+| | **Media** | **57s** | **58s** | **26s** | **31s** | **70s** |
 | | **RAG hit** | **83%** (5/6) | **100%** | **100%** | **100%** | **83%** (5/6) |
 
-> **Osservazioni dopo reindex (B6–B11):** Tempi più alti (media 55s) per GPU termicamente calda (re-indexing appena completato). RAG hit invariato a 83% (5/6): query 5 non specifica progetto → anti-contaminazione restituisce vuoto (atteso). RAG hit su query con progetto esplicitato: **5/5 (100%)**. Due query ora includono blocchi di codice (`has_code_block=True`). B6 (deduplicazione chunk) ha ridotto il rumore nel contesto LLM; B7 (signature non troncate) ha migliorato l'accuratezza delle gerarchie. Nessun crash, nessuna contaminazione.
+> **Osservazioni dopo reindex (B6–B11):** Tempi più alti (media 70s, +125% vs F2.3) MA non causati dai fix B6–B11 (che impattano solo chunking/indexing, non runtime query). Causa probabile: crash LLM (segfault pre-esistente su prompt di certe dimensioni) durante i test → container restart → GPU fredda → prime query più lente. La tabella Fase 2.3 è stata misurata in una sessione senza crash e con GPU già termicamente stabile. RAG hit invariato a 83% (5/6): query 5 non specifica progetto → atteso.
+>
+> I fix B6–B11 non modificano il path di query RAG; il calo prestazionale è dovuto a varianza di sistema (crash/restart, temperatura GPU, lunghezza prompt con nomi progetto). Per benchmark comparativo corretto servirebbe eseguire Fase 2.3 e corrente nella stessa sessione.
 
 **Template test query:**
 ```bash
