@@ -223,9 +223,28 @@ def _recursive_token_split(text: str, max_tokens: int) -> list[str]:
         return [text]
     return _recursive_token_split(left, max_tokens) + _recursive_token_split(right, max_tokens)
 
+def _make_parent_chunk_id(text: str) -> str:
+    return hashlib.md5(text.encode()).hexdigest()[:12]
+
+def _assign_parent(chunks: list[dict], parent_text: str) -> list[dict]:
+    """Assegna parent_chunk_id, chunk_index, chunk_count a una lista di figli."""
+    if len(chunks) <= 1:
+        for c in chunks:
+            c["parent_chunk_id"] = None
+            c["chunk_index"] = None
+            c["chunk_count"] = None
+        return chunks
+    pid = _make_parent_chunk_id(parent_text)
+    for i, c in enumerate(chunks):
+        c["parent_chunk_id"] = pid
+        c["chunk_index"] = i
+        c["chunk_count"] = len(chunks)
+    return chunks
+
 def ast_code_chunking(content, filepath):
     """Chunking intelligente: usa Tree-sitter per estrarre funzioni/classi mantenendo il contesto gerarchico.
-    Returns list of dict: {text: str, section_hierarchy: list[str] | None}"""
+    Returns list of dict: {text: str, section_hierarchy: list[str] | None, parent_chunk_id: str | None,
+    chunk_index: int | None, chunk_count: int | None}"""
     if not AST_ENABLED:
         return [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
 
@@ -277,13 +296,14 @@ def ast_code_chunking(content, filepath):
         final_md_chunks = []
         for chunk in chunks:
             if _token_count(chunk) > CHUNK_SIZE:
-                for t in _recursive_token_split(chunk, CHUNK_SIZE):
-                    final_md_chunks.append({"text": t, "section_hierarchy": None})
+                children = [{"text": t, "section_hierarchy": None} for t in _recursive_token_split(chunk, CHUNK_SIZE)]
+                final_md_chunks.extend(_assign_parent(children, chunk))
             else:
-                final_md_chunks.append({"text": chunk, "section_hierarchy": None})
+                final_md_chunks.append({"text": chunk, "section_hierarchy": None, "parent_chunk_id": None, "chunk_index": None, "chunk_count": None})
         return final_md_chunks
     else:
-        return [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
+        children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
+        return _assign_parent(children, content)
 
     try:
         tree = parser.parse(bytes(content, "utf8"))
@@ -335,7 +355,8 @@ def ast_code_chunking(content, filepath):
         traverse(tree.root_node)
 
         if not chunks:
-            return [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
+            children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
+            return _assign_parent(children, content)
 
         # Fondere dinamicamente piccoli frammenti AST consecutivi
         merged_chunks = []
@@ -364,15 +385,19 @@ def ast_code_chunking(content, filepath):
         final_chunks = []
         for chunk in merged_chunks:
             if _token_count(chunk["text"]) > CHUNK_SIZE:
-                for t in _recursive_token_split(chunk["text"], CHUNK_SIZE):
-                    final_chunks.append({"text": t, "section_hierarchy": chunk.get("section_hierarchy")})
+                children = [{"text": t, "section_hierarchy": chunk.get("section_hierarchy")} for t in _recursive_token_split(chunk["text"], CHUNK_SIZE)]
+                final_chunks.extend(_assign_parent(children, chunk["text"]))
             else:
+                chunk["parent_chunk_id"] = None
+                chunk["chunk_index"] = None
+                chunk["chunk_count"] = None
                 final_chunks.append(chunk)
 
         return final_chunks
     except Exception as e:
         logger.warning(f"Errore tree-sitter parsing: {e}")
-        return [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
+        children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
+        return _assign_parent(children, content)
 
 
 # ==============================================================================
@@ -524,6 +549,10 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
                         payload = {"filename": rel_path, "text": chunk["text"], "deps": list(deps), "project": _project_id}
                         if chunk.get("section_hierarchy"):
                             payload["section_hierarchy"] = chunk["section_hierarchy"]
+                        if chunk.get("parent_chunk_id"):
+                            payload["parent_chunk_id"] = chunk["parent_chunk_id"]
+                            payload["chunk_index"] = chunk.get("chunk_index", 0)
+                            payload["chunk_count"] = chunk.get("chunk_count", 1)
                         points.append(PointStruct(
                             id=str(uuid.uuid4()),
                             vector=vector,
@@ -966,15 +995,67 @@ async def search_documents(query, is_project_query=False, project_name=None):
         else:
             best_results = [{"text": r.payload.get("text", ""), "meta": r.payload} for r in results[:top_k]]
 
+        # ── Parent-child ricostruzione ──────────────────────────────────────
+        parent_ids = set()
+        for r in best_results:
+            pid = r["meta"].get("parent_chunk_id")
+            if pid:
+                parent_ids.add(pid)
+
+        parent_siblings = {}
+        if parent_ids:
+            for col in target_cols:
+                try:
+                    sibling_scroll, _ = await state.qdrant.scroll(
+                        collection_name=col,
+                        scroll_filter=Filter(should=[
+                            FieldCondition(key="parent_chunk_id", match=MatchValue(value=pid))
+                            for pid in parent_ids
+                        ]),
+                        limit=100,
+                        with_payload=True
+                    )
+                    for s in sibling_scroll:
+                        pid = s.payload.get("parent_chunk_id")
+                        if pid not in parent_siblings:
+                            parent_siblings[pid] = []
+                        parent_siblings[pid].append(s)
+                except Exception:
+                    pass
+
+            # Ricostruisci il testo del genitore da tutti i frammenti
+            for pid in list(parent_siblings.keys()):
+                siblings = sorted(parent_siblings[pid], key=lambda s: s.payload.get("chunk_index", 0))
+                parent_text = "\n\n".join(s.payload.get("text", "") for s in siblings)
+                parent_siblings[pid] = {
+                    "text": parent_text,
+                    "meta": siblings[0].payload,
+                    "sibling_count": len(siblings)
+                }
+
         primary_docs, deps_to_search = [], set()
+        seen_parents = set()
         for r in best_results:
             filename = r["meta"].get("filename")
+            pid = r["meta"].get("parent_chunk_id")
             project_label = r["meta"].get("_project", "")
             project_prefix = f"[{project_label}] " if project_label else ""
-            hierarchy = r["meta"].get("section_hierarchy")
-            hierarchy_prefix = f"// CONTESTO GERARCHICO: {' -> '.join(hierarchy)}\n" if hierarchy else ""
-            if filename:
-                primary_docs.append(f"📄 File Primario ({project_prefix}{filename}):\n```\n{hierarchy_prefix}{r['text']}\n```")
+
+            if pid and pid in parent_siblings and pid not in seen_parents:
+                seen_parents.add(pid)
+                parent = parent_siblings[pid]
+                hierarchy = parent["meta"].get("section_hierarchy")
+                hierarchy_prefix = f"// CONTESTO GERARCHICO: {' -> '.join(hierarchy)}\n" if hierarchy else ""
+                if filename:
+                    primary_docs.append(
+                        f"📄 File Primario ({project_prefix}{filename}) [Padre: {parent['sibling_count']} frammenti]:\n"
+                        f"```\n{hierarchy_prefix}{parent['text']}\n```"
+                    )
+            elif not pid:
+                hierarchy = r["meta"].get("section_hierarchy")
+                hierarchy_prefix = f"// CONTESTO GERARCHICO: {' -> '.join(hierarchy)}\n" if hierarchy else ""
+                if filename:
+                    primary_docs.append(f"📄 File Primario ({project_prefix}{filename}):\n```\n{hierarchy_prefix}{r['text']}\n```")
             if r["meta"].get("deps"):
                 deps_to_search.update(r["meta"].get("deps"))
 
