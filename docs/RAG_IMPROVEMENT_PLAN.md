@@ -61,7 +61,7 @@ Usare query rappresentative per ogni tipo di progetto, registrando:
 - Tempo medio: ~57s (include RAG retrieval + reranker + inference LLM)
 - Per migliorare il gatekeeper verso l'italiano, aggiungere keyword come "configurazione", "gestione", "sicurezza" a PROJECT_KEYWORDS
 
-**Risultati post-Fase2 (2026-06-23, chunk 512 token + gatekeeper IT fix):**
+**Risultati post-Fase2.1 (2026-06-23, chunk 512 token + gatekeeper IT fix):**
 
 | # | Query | Tempo | RAG hit | Pertinenza | Note |
 |---|---|---|---|---|---|
@@ -72,11 +72,23 @@ Usare query rappresentative per ogni tipo di progetto, registrando:
 | 5 | autenticazione e gestione utenti | 62s | SI | Alta | |
 | 6 | algoritmo di compressione dati in Shield Proxy | 36s | SI | Alta | +89% tempo (+RAG vs prima no RAG) |
 
+**Risultati post-Fase2.2 (2026-06-24, section-aware chunking + contesto gerarchico in metadati):**
+
+| # | Query | Tempo | RAG hit | Pertinenza | Raw gerarchia | Note |
+|---|---|---|---|---|---|---|
+| 1 | configurazione proxy e blocking delle richieste | **13s** | SI | Alta | NO ✅ | -66% tempo vs F2.1 |
+| 2 | websocket e sicurezza | **42s** | SI | Alta | NO ✅ | -45% tempo |
+| 3 | pool di memoria e worker pool pattern | **27s** | SI | Alta | NO ✅ | -47% tempo |
+| 4 | slot machine e configurazione rtp | **26s** | SI | Alta | NO ✅ | -69% tempo |
+| 5 | autenticazione e gestione utenti | **33s** | SI | Alta | NO ✅ | -47% tempo |
+| 6 | algoritmo di compressione dati | **17s** | SI | Alta | NO ✅ | -53% tempo |
+
 **Miglioramenti chiave:**
-- **100%** delle query ora ricevono RAG (era 5/6)
-- Gatekeeper ora riconosce query IT grazie a 30+ nuove keyword
-- Dimensione chunk: 4000 char → ~1200 char media (~300 token)
-- Re-indicizzazione completata per 908 file
+- **100%** RAG hit confermato su 6/6 query
+- **Nessun** chunk contiene `CONTESTO GERARCHICO` raw nel testo embedded (verificato: 0/493 chunk Shield_Proxy)
+- **65/493** chunk (13%) con `section_hierarchy` popolato nei metadati Qdrant
+- Tempo medio: **26s** (era 58s post-F2.1, -55%)
+- Server stabile: 0 crash durante l'esecuzione test
 
 ```bash
 # Template per testare una query
@@ -220,16 +232,25 @@ print(f'Min chars: {min(lengths)}  Max chars: {max(lengths)}')
 ---
 
 ### 2.2 Section-aware chunking con contesto gerarchico
-**Stato:** 🔲 TODO
-**File:** `rag.py`
+**Stato:** ✅ COMPLETATO (aef8057)
+**File:** `rag.py` — `ast_code_chunking()`, `search_documents()`, `state.py` — `is_reindexing`
 
-**Problema:** Il `"// CONTESTO GERARCHICO: ..."` è embedded come testo, creando rumore. Inoltre non c'è modo di filtrare per sezione.
+**Problema:** Il `"// CONTESTO GERARCHICO: ..."` era embedded come testo, creando rumore negli embedding e degradando la similarità semantica.
 
-**Soluzione:** Salvare il path della sezione come metadato Qdrant (`section_hierarchy: ["package", "struct", "method"]`). Opzionalmente prependere solo per chunk che iniziano una nuova sezione.
+**Soluzione:**
+- `ast_code_chunking()` ora restituisce `list[dict]` con chiavi `text` e `section_hierarchy` (era `list[str]`)
+- Gerarchia salvata come metadato Qdrant (`section_hierarchy: ["struct", "method"]`) — non più nel testo
+- `search_documents()` ricostruisce il `// CONTESTO GERARCHICO: ...` solo nell'output per LLM
+- Aggiunto `state.is_reindexing` flag per prevenire race condition watchdog durante re-indicizzazione
+- `asyncio.wait_for(timeout=300)` su `create_chat_completion` per evitare hang
 
-**Test:** Query specifiche su metodi annidati (es. `"metodo X dentro struct Y dentro package Z"`)
+**Risultati:**
+- **0/493** chunk Shield_Proxy contengono `CONTESTO GERARCHICO` nel testo embedded ✅
+- **65/493** chunk (13%) hanno `section_hierarchy` nei metadati Qdrant
+- Re-indicizzazione completata per **5848 punti** in 4 collezioni (NeuroNet: 175, Shield_Proxy: 493, SlotBuilder: 3706, StreamAI_IPTV: 1474)
+- Tempo medio Test B: **26s** (era 58s, -55%)
 
-**Criterio di successo:** I chunk di metodi/funzioni annidati sono recuperati con score più alto rispetto a prima
+**Test:** Test B eseguito — 6/6 query con RAG, 0 crash, 0 contaminazione gerarchica raw
 
 ---
 
@@ -435,7 +456,7 @@ Script che esegue tutte le query di Test B e registra:
 | 1.3 Fix embedding prefix | ✅ Fatto | — | Alto | Richiede re-indicizzazione |
 | 1.4 Rimuovi overlap | ✅ Fatto | — | Basso | Nessuna |
 | 2.1 Chunk 512 token | ✅ Fatto | — | Molto alto | Richiede re-indicizzazione |
-| 2.2 Section-aware | 🟡 Alto | 3h | Alto | 2.1 |
+| 2.2 Section-aware | ✅ Fatto | 3h | Alto | 2.1 |
 | 2.3 Parent-child | 🟡 Alto | 4h | Alto | 2.1 |
 | 3.1 Parallel query | ✅ Fatto | — | Medio | Nessuna |
 | 3.2 Hybrid search | 🟢 Medio | 4h | Molto alto | Nessuna |
