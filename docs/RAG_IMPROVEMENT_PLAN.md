@@ -1,6 +1,6 @@
 # Piano di Miglioramento RAG — NeuroNet
 
-> **Stato attuale:** Fase 2 completata ✅ | **Ultimo aggiornamento:** 2026-06-24
+> **Stato attuale:** Fase 2 completata ✅ — Bug B6–B11 fixati ✅ | **Ultimo aggiornamento:** 2026-06-24
 
 ---
 
@@ -113,17 +113,12 @@ for col in stats['qdrant_collections'][:10]:
 | 2.3 Parent-child | `cd1f06b` | Alto |
 | 3.1 Parallel query | ✅ Già implementato | Medio |
 | 5.3 Env var chunk | ✅ Già implementato | Basso |
-
-### 🔴 Da fixare (bug)
-
-| ID | Problema | Priorità | Stima | Impatto |
-|---|---|---|---|---|
-| B6 | Chunk duplicati tree-sitter | 🔴 Critico | 30m | Alto |
-| B7 | Signature gerarchia troncate | 🟡 Alto | 1h | Medio |
-| B8 | chunk_count non aggiornato | 🟡 Alto | 30m | Medio |
-| B10 | Scroll Qdrant senza timeout | 🟢 Medio | 15m | Basso |
-| B9 | _assign_parent dead code | 🔵 Basso | 30m | Basso |
-| B11 | PREAMBOLO sovrapposto | 🔵 Basso | 30m | Basso |
+| B6 | Deduplicazione chunk tree-sitter | `ed72f2a` | Alto |
+| B7 | Signature gerarchia non troncate | `1311513` | Medio |
+| B8 | chunk_count corretto dopo filtro | `0ebaa18` | Medio |
+| B9 | _assign_parent → _tag_split_children | `0722fbd` | Basso |
+| B10 | Timeout scroll Qdrant | `e9ec8c4` | Basso |
+| B11 | PREAMBOLO senza overlap AST | `e8d845e` | Basso |
 
 ### 🔲 TODO (future fasi)
 
@@ -268,76 +263,70 @@ for col in stats['qdrant_collections'][:10]:
 
 ---
 
-## Bug Fix — Issue da risolvere
+## Bug Fix — Issue risolte (B6–B11)
 
 ### B6 — Chunk duplicati da tree-sitter (AST overlapping nodes)
 
 | | |
 |---|---|
-| **Stato** | 🔴 **DA FIXARE** |
+| **Stato** | ✅ **COMPLETATO** (`ed72f2a`) |
 | **File** | `rag.py` → `ast_code_chunking()`, funzione `traverse()` |
-| **Stima** | 30 min |
 
 - **Problema:** Tree-sitter produce nodi duplicati per certi costrutti. Es. `struct_type` e `type_declaration` catturano lo stesso byte range. `rtp_calibrator.go` mostra `RIGHE 106-136` duplicato nel file.
 - **Effetto:** Contenuto duplicato nei gruppi di prossimità → contesto LLM gonfiato.
-- **Soluzione:** Aggiungere `seen_byte_ranges = set()` in `traverse()` per saltare nodi già processati.
+- **Soluzione:** Aggiunto `seen_byte_ranges = set()` in `traverse()` per saltare nodi già processati.
 
 ### B7 — `get_signature()` tronca il primo carattere delle gerarchie
 
 | | |
 |---|---|
-| **Stato** | 🟡 **DA FIXARE** |
+| **Stato** | ✅ **COMPLETATO** (`1311513`) |
 | **File** | `rag.py` → `ast_code_chunking()` |
-| **Stima** | 1h |
 
 - **Problema:** `"struct MyStruct"` → `"truct MyStruct"`, `"type BlockingWork"` → `"ype BlockingWork"`.
 - **Causa:** `n.start_byte` può puntare dopo la keyword per alcuni linguaggi. Il `split('{')[0]` + `strip()` non gestisce correttamente il padding.
-- **Soluzione:** Usare `n.text.decode()` quando disponibile, o regex robusta per estrarre la firma.
+- **Soluzione:** `n.text.decode()` come metodo primario per estrarre il testo esatto del nodo tree-sitter, fallback a `content[n.start_byte:n.end_byte]`.
 
 ### B8 — `chunk_count` non aggiornato dopo filtro `valid_chunks`
 
 | | |
 |---|---|
-| **Stato** | 🟡 **DA FIXARE** |
+| **Stato** | ✅ **COMPLETATO** (`0ebaa18`) |
 | **File** | `rag.py` → `process_single_file()` |
-| **Stima** | 30 min |
 
 - **Problema:** I chunk con `len(text.strip()) < 50` vengono filtrati in `valid_chunks`, ma `chunk_count` non viene ricalcolato.
 - **Effetto:** Il label `"[Padre: X frammenti]"` risulta inaccurato; la scroll per parent_chunk_id trova meno sibling del previsto.
-- **Soluzione:** Ricalcolare `chunk_count` e `chunk_index` dopo il filtro, raggruppando per `parent_chunk_id`.
+- **Soluzione:** Ricalcolo di `chunk_count` e `chunk_index` dopo il filtro, raggruppando per `parent_chunk_id`.
 
 ### B9 — `_assign_parent()` dead code nel path AST
 
 | | |
 |---|---|
-| **Stato** | 🔵 **DA PULIRE** |
+| **Stato** | ✅ **COMPLETATO** (`0722fbd`) |
 | **File** | `rag.py` → `ast_code_chunking()` |
-| **Stima** | 30 min |
 
 - **Problema:** La funzione helper `_assign_parent()` è usata solo nei fallback non-AST (markdown, eccezioni). La logica di raggruppamento è inline nel path AST → duplicazione.
-- **Soluzione:** Unificare in unico helper; rimuovere `_assign_parent()`.
+- **Soluzione:** Rinominata `_tag_split_children()` con nome che riflette il suo reale scopo (marcare figli di split testuale). AST path mantiene proximity grouping inline (semantica diversa).
 
 ### B10 — Qdrant scroll per parent reconstruction senza timeout
 
 | | |
 |---|---|
-| **Stato** | 🟢 **DA AGGIUNGERE** |
+| **Stato** | ✅ **COMPLETATO** (`e9ec8c4`) |
 | **File** | `rag.py` → `search_documents()` |
-| **Stima** | 15 min |
 
 - **Problema:** La scroll per sibling con stesso `parent_chunk_id` non ha timeout. Qdrant sovraccarico potrebbe ritardare la risposta.
-- **Soluzione:** `asyncio.wait_for()` con fallback ai chunk figli originali.
+- **Soluzione:** `asyncio.wait_for(timeout=5.0)` con fallback ai chunk figli originali e warning loggato.
 
 ### B11 — PREAMBOLO chunk sovrapposto ad altri chunk AST
 
 | | |
 |---|---|
-| **Stato** | 🔵 **DA MIGLIORARE** |
+| **Stato** | ✅ **COMPLETATO** (`e8d845e`) |
 | **File** | `rag.py` → `ast_code_chunking()` |
-| **Stima** | 30 min |
 
 - **Problema:** Il chunk PREAMBOLO (prime 50 righe) è creato indipendentemente ma tree-sitter cattura anche funzioni/struct nelle stesse righe → duplicazione.
-- **Soluzione:** Estrarre PREAMBOLO solo se righe 1-50 non sono coperte da altri chunk.
+- **Soluzione:** `traverse()` eseguita prima, poi PREAMBOLO aggiunto solo se nessun chunk AST inizia entro la riga 50.
 
 ---
 
