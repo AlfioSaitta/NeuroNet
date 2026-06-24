@@ -250,6 +250,155 @@ if TELEGRAM_ENABLED:
             except Exception as e:
                 await query.edit_message_text(f"❌ Errore durante il reset: {e}")
 
+        # ── Istruisci Jarvis (agy flow) ──
+        elif action == 'admin_agy_start':
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧠 Mem0 (Ricordo)", callback_data=get_callback_id('admin_agy_mode', 'mem0'))],
+                [InlineKeyboardButton("📄 RAG (Documento)", callback_data=get_callback_id('admin_agy_mode', 'rag'))],
+                [InlineKeyboardButton("❌ Annulla", callback_data=get_callback_id('admin_agy_cancel', ''))]
+            ])
+            await query.edit_message_text(
+                "🧠 **Istruisci Jarvis**\n\n"
+                "Come vuoi salvare l'informazione?\n\n"
+                "• **Mem0** → ricordo personale (richiamato nel super-prompt, max ~800 char)\n"
+                "• **RAG** → documento indicizzato (ricerca vettoriale, chunks illimitati)",
+                reply_markup=kb, parse_mode="Markdown"
+            )
+
+        elif action == 'admin_agy_cancel':
+            await query.edit_message_text("❌ Operazione annullata.")
+
+        elif action == 'admin_agy_mode':
+            mode = path  # "mem0" or "rag"
+            user_sessions[query.from_user.id] = user_sessions.get(query.from_user.id, {"messages": deque(maxlen=10), "last_active": time.time()})
+            user_sessions[query.from_user.id]["agy_mode"] = mode
+
+            # Recupera lista progetti dal RAG
+            try:
+                projects = await list_rag_projects()
+            except Exception:
+                projects = []
+
+            kb = []
+            for p in projects:
+                kb.append([InlineKeyboardButton(f"📁 {p}", callback_data=get_callback_id('admin_agy_project', p))])
+            kb.append([InlineKeyboardButton("📁 Nessun progetto", callback_data=get_callback_id('admin_agy_project', ''))])
+            kb.append([InlineKeyboardButton("🔙 Indietro", callback_data=get_callback_id('admin_agy_start', ''))])
+
+            mode_label = "Ricordo (Mem0)" if mode == "mem0" else "Documento (RAG)"
+            await query.edit_message_text(
+                f"🧠 **Istruisci Jarvis** → {mode_label}\n\n"
+                "A quale progetto associare l'informazione?",
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
+            )
+
+        elif action == 'admin_agy_project':
+            project = path  # project name or empty
+            user_sessions[query.from_user.id]["agy_project"] = project
+            user_sessions[query.from_user.id]["admin_state"] = "awaiting_agy_content"
+
+            project_label = f"progetto **{project}**" if project else "nessun progetto"
+            mode = user_sessions[query.from_user.id].get("agy_mode", "mem0")
+            mode_label = "ricordo (Mem0)" if mode == "mem0" else "documento (RAG)"
+
+            await query.edit_message_text(
+                f"✍️ **Istruisci Jarvis**\n\n"
+                f"Modalità: {mode_label}\n"
+                f"Progetto: {project_label}\n\n"
+                f"Scrivi ora il contenuto da far imparare a Jarvis.\n"
+                f"{'Più è dettagliato e strutturato, meglio sarà indicizzato.' if mode == 'rag' else 'Sarà ricordato come preferenza personale.'}\n\n"
+                f"_Oppure invia /annulla per tornare indietro._",
+                parse_mode="Markdown"
+            )
+            return
+
+        elif action == 'admin_agy_confirm':
+            session = user_sessions.get(query.from_user.id, {})
+            mode = session.get("agy_mode", "mem0")
+            project = session.get("agy_project", "")
+            content = session.get("agy_content", "")
+
+            if not content:
+                await query.edit_message_text("❌ Nessun contenuto da salvare.")
+                return
+
+            await query.edit_message_text("⏳ Salvataggio in corso...")
+
+            try:
+                if mode == "rag":
+                    # Scrivi file nella directory RAG
+                    from config import DOC_DIR
+                    safe_name = content[:60].strip().lower().replace(' ', '-')
+                    safe_name = ''.join(c for c in safe_name if c.isalnum() or c in '-_')
+                    if not safe_name:
+                        safe_name = "document"
+                    ts = time.strftime("%Y%m%d-%H%M%S")
+                    target_dir = os.path.join(DOC_DIR, project) if project else DOC_DIR
+                    os.makedirs(target_dir, exist_ok=True)
+                    filepath = os.path.join(target_dir, f"{ts}-{safe_name}.md")
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(content)
+
+                    # Salva anche in Mem0 come riferimento
+                    summary = content[:700].rstrip()
+                    if len(content) > 700:
+                        summary += "..."
+                    container_path = f"/app/documents/{project}/" if project else ""
+                    mem = f"<MEMORY>📄 Documento: {container_path}{ts}-{safe_name}.md"
+                    if project:
+                        mem += f" (progetto: {project})"
+                    mem += f"\n{summary}\nFonte completa disponibile nel RAG.</MEMORY>"
+
+                    async with httpx.AsyncClient() as client:
+                        await client.post("http://127.0.0.1:8000/api/chat", json={
+                            "model": "local",
+                            "messages": [{"role": "user", "content": mem}],
+                            "options": {"skip_rag": True, "concise": True},
+                            "stream": False
+                        }, timeout=30.0)
+
+                    await query.edit_message_text(
+                        f"✅ **Documento salvato**\n\n"
+                        f"📄 `{filepath}`\n"
+                        f"🧠 Memoria di riferimento impressa.\n"
+                        f"Il watchdog RAG indicizzerà il file in Qdrant.",
+                        parse_mode="Markdown"
+                    )
+
+                else:  # mem0
+                    mem = f"<MEMORY>{content}</MEMORY>"
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post("http://127.0.0.1:8000/api/chat", json={
+                            "model": "local",
+                            "messages": [{"role": "user", "content": mem}],
+                            "options": {"skip_rag": True, "concise": True},
+                            "stream": False
+                        }, timeout=30.0)
+
+                    result = resp.json()
+                    reply = result.get("message", {}).get("content", "") or result.get("response", "")
+                    out = "✅ **Ricordo salvato in Mem0**"
+                    if reply:
+                        out += f"\n\nJarvis: {reply[:300]}"
+                    await query.edit_message_text(out, parse_mode="Markdown")
+
+            except Exception as e:
+                await query.edit_message_text(f"❌ Errore: {e}")
+
+            # Pulisci stato
+            session["admin_state"] = None
+            session.pop("agy_mode", None)
+            session.pop("agy_project", None)
+            session.pop("agy_content", None)
+
+        elif action == 'admin_agy_reject':
+            session = user_sessions.get(query.from_user.id, {})
+            session["admin_state"] = None
+            session.pop("agy_mode", None)
+            session.pop("agy_project", None)
+            session.pop("agy_content", None)
+            await query.edit_message_text("❌ Operazione annullata.")
+
         elif action == 'userbot_wl_list':
             from telegram_userbot_manager import load_user_config
             cfg = load_user_config(query.from_user.id)
@@ -462,6 +611,7 @@ if TELEGRAM_ENABLED:
                 [InlineKeyboardButton("⏱️ Task Schedulati", callback_data=get_callback_id('admin_cron', ''))],
                 [InlineKeyboardButton("💾 Backup Memoria", callback_data=get_callback_id('admin_backup', '')), InlineKeyboardButton("📂 Restore", callback_data=get_callback_id('admin_restore', ''))],
                 [InlineKeyboardButton("🧹 Reset Sessione", callback_data=get_callback_id('admin_reset_memory', ''))],
+                [InlineKeyboardButton("🧠 Istruisci Jarvis", callback_data=get_callback_id('admin_agy_start', ''))],
                 [InlineKeyboardButton("🧨 Reset Database RAG", callback_data=get_callback_id('admin_reset_db_req', ''))]
             ])
             await msg.reply_text("⚙️ **Pannello di Amministrazione**\nScegli un'operazione:", reply_markup=kb, parse_mode="Markdown")
@@ -623,6 +773,41 @@ if TELEGRAM_ENABLED:
             if user_id not in ADMIN_USERS:
                 session["admin_state"] = None
                 return
+
+            # ── await_agy_content: ricevi il contenuto da salvare ──
+            if session["admin_state"] == "awaiting_agy_content":
+                if user_text.strip().lower() == "/annulla":
+                    session["admin_state"] = None
+                    session.pop("agy_mode", None)
+                    session.pop("agy_project", None)
+                    session.pop("agy_content", None)
+                    await msg.reply_text("❌ Operazione annullata.", reply_markup=get_main_menu(user_id))
+                    return
+
+                session["agy_content"] = user_text.strip()
+                mode = session.get("agy_mode", "mem0")
+                project = session.get("agy_project", "")
+                project_label = f"progetto **{project}**" if project else "nessun progetto"
+                mode_label = "Ricordo (Mem0)" if mode == "mem0" else "Documento (RAG)"
+
+                preview = user_text[:300].rstrip()
+                if len(user_text) > 300:
+                    preview += "..."
+
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Conferma", callback_data=get_callback_id('admin_agy_confirm', '')),
+                     InlineKeyboardButton("❌ Annulla", callback_data=get_callback_id('admin_agy_reject', ''))]
+                ])
+                await msg.reply_text(
+                    f"📝 **Anteprima contenuto:**\n\n"
+                    f"{preview}\n\n"
+                    f"Modalità: {mode_label}\n"
+                    f"Progetto: {project_label}\n\n"
+                    f"Confermi?",
+                    reply_markup=kb, parse_mode="Markdown"
+                )
+                return
+
             from config import ALLOWED_USERS, save_allowed_users
             state_val = session["admin_state"]
             session["admin_state"] = None
