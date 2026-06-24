@@ -315,11 +315,13 @@ def ast_code_chunking(content, filepath):
             chunks.append({"text": f"PREAMBOLO:\n{preamble}", "section_hierarchy": None})
 
         def get_signature(n):
-            # Tenta di estrarre la firma (es. class MyClass extends Parent)
-            b = content[n.start_byte:n.end_byte]
-            lines = b.split('\n')
+            try:
+                raw = n.text.decode()
+            except (AttributeError, UnicodeDecodeError):
+                raw = content[n.start_byte:n.end_byte]
+            lines = raw.split('\n')
             sig = []
-            for line in lines[:3]: # analizza le prime 3 righe per trovare la firma
+            for line in lines[:3]:
                 s = line.strip()
                 sig.append(s)
                 if '{' in s or ':' in s:
