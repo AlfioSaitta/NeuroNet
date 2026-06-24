@@ -34,7 +34,7 @@ if TELEGRAM_ENABLED:
             [KeyboardButton("🌐 Info Ricerca Web"), KeyboardButton("❓ Aiuto / Guida")],
             [KeyboardButton("🤖 Mio Userbot")]
         ]
-        if user_id and user_id in ADMIN_USERS:
+        if user_id is not None and str(user_id) in ADMIN_USERS:
             buttons.append([KeyboardButton("⚙️ Admin"), KeyboardButton("🖥️ Infrastruttura")])
         return ReplyKeyboardMarkup(
             buttons,
@@ -81,7 +81,7 @@ if TELEGRAM_ENABLED:
 
     async def auth_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Middleware di sicurezza globale: blocca qualsiasi update da utenti non autorizzati."""
-        if update.effective_user and update.effective_user.id not in ALLOWED_USERS:
+        if update.effective_user and str(update.effective_user.id) not in ALLOWED_USERS:
             logger.warning(f"Accesso negato da utente non autorizzato: {update.effective_user.id} ({update.effective_user.username})")
             from telegram.ext import ApplicationHandlerStop
             raise ApplicationHandlerStop()
@@ -104,7 +104,7 @@ if TELEGRAM_ENABLED:
             
         action, path = callback_store[cid]
         
-        if action.startswith('admin_') and query.from_user.id not in ADMIN_USERS:
+        if action.startswith('admin_') and str(query.from_user.id) not in ADMIN_USERS:
             await query.edit_message_text("❌ Accesso negato al pannello di amministrazione.")
             return
 

@@ -140,16 +140,17 @@ RAG_CONFIG = {
 # ==============================================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 _allowed_users_env = os.getenv("ALLOWED_USERS", "")
-_env_users = [int(x.strip()) for x in _allowed_users_env.split(",") if x.strip()]
-ADMIN_USERS = _env_users
+_env_users_str = [x.strip() for x in _allowed_users_env.split(",") if x.strip()]
+# Manteniamo ADMIN_USERS come lista di stringhe per compatibilità con str(update.effective_user.id) nel bot
+ADMIN_USERS = _env_users_str
 
-ALLOWED_USERS = set(_env_users)
+ALLOWED_USERS = set(_env_users_str)
 USERS_FILE = os.path.join(os.path.dirname(__file__), "allowed_users.json")
 if os.path.exists(USERS_FILE):
     import json
     try:
         with open(USERS_FILE, "r") as f:
-            ALLOWED_USERS.update(json.load(f))
+            ALLOWED_USERS.update(str(u) for u in json.load(f))
     except Exception as e:
         logger.error(f"Error loading allowed_users.json: {e}")
 ALLOWED_USERS = list(ALLOWED_USERS)
@@ -277,6 +278,20 @@ try:
     USERBOT_ENABLED = True
 except ImportError:
     pass
+
+# ==============================================================================
+# PROVIDER ESTERNI (Gemini, Claude, ecc.)
+# ==============================================================================
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro-exp-03-25")
+EXTERNAL_PROVIDER_STRATEGY = os.getenv("EXTERNAL_PROVIDER_STRATEGY", "fallback_only")
+
+PROVIDER_CONFIG = {
+    "strategy": EXTERNAL_PROVIDER_STRATEGY,
+    "gemini_api_key": GEMINI_API_KEY,
+    "gemini_model": GEMINI_MODEL,
+}
 
 USERBOT_API_ID = os.getenv("TELEGRAM_API_ID", "")
 USERBOT_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
