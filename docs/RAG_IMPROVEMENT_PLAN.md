@@ -60,7 +60,7 @@ Query rappresentative per ogni tipo di progetto, misurando: `# chunk restituiti`
 ### Tabella riepilogativa fasi
 
 | # | Query | Fase 1 (4000 char) | Fase 2.1 (512 tok) | Fase 2.2 (section) | Fase 2.3 (parent-child) | **Dopo reindex** (B6–B11) |
-|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|
 | 1 | proxy e blocking | 99s ⚠️ RAG | 38s ✅ | **13s** ✅ | 27s ✅ | 50s ✅ |
 | 2 | websocket | 70s ❌ NO RAG | 76s ✅ | **42s** ✅ | **13s** ✅ | 82s ✅ |
 | 3 | memory pool | 84s ⚠️ RAG | 51s ✅ | **27s** ✅ | 54s ✅ | 65s ✅ |
