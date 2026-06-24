@@ -226,13 +226,14 @@ def _recursive_token_split(text: str, max_tokens: int) -> list[str]:
 def _make_parent_chunk_id(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()[:12]
 
-def _assign_parent(chunks: list[dict], parent_text: str) -> list[dict]:
-    """Assegna parent_chunk_id, chunk_index, chunk_count a una lista di figli."""
+def _tag_split_children(chunks: list[dict], parent_text: str) -> list[dict]:
+    """Assegna parent_chunk_id, chunk_index, chunk_count a figli di uno split."""
+    if not chunks:
+        return chunks
     if len(chunks) <= 1:
-        for c in chunks:
-            c["parent_chunk_id"] = None
-            c["chunk_index"] = None
-            c["chunk_count"] = None
+        chunks[0]["parent_chunk_id"] = None
+        chunks[0]["chunk_index"] = None
+        chunks[0]["chunk_count"] = None
         return chunks
     pid = _make_parent_chunk_id(parent_text)
     for i, c in enumerate(chunks):
@@ -297,13 +298,13 @@ def ast_code_chunking(content, filepath):
         for chunk in chunks:
             if _token_count(chunk) > CHUNK_SIZE:
                 children = [{"text": t, "section_hierarchy": None} for t in _recursive_token_split(chunk, CHUNK_SIZE)]
-                final_md_chunks.extend(_assign_parent(children, chunk))
+                final_md_chunks.extend(_tag_split_children(children, chunk))
             else:
                 final_md_chunks.append({"text": chunk, "section_hierarchy": None, "parent_chunk_id": None, "chunk_index": None, "chunk_count": None})
         return final_md_chunks
     else:
         children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
-        return _assign_parent(children, content)
+        return _tag_split_children(children, content)
 
     try:
         tree = parser.parse(bytes(content, "utf8"))
@@ -362,7 +363,7 @@ def ast_code_chunking(content, filepath):
 
         if not chunks:
             children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
-            return _assign_parent(children, content)
+            return _tag_split_children(children, content)
 
         # Fondere dinamicamente piccoli frammenti AST consecutivi
         merged_chunks = []
@@ -435,7 +436,7 @@ def ast_code_chunking(content, filepath):
     except Exception as e:
         logger.warning(f"Errore tree-sitter parsing: {e}")
         children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
-        return _assign_parent(children, content)
+        return _tag_split_children(children, content)
 
 
 # ==============================================================================
