@@ -3,10 +3,9 @@ import json
 import logging
 import asyncssh
 import asyncio
+from config import INFRA_FILE
 
 logger = logging.getLogger("chameleon.infra")
-
-INFRA_FILE = "/home/alfio/Projects/ai-ecosystem/mem0-proxy/infrastructure.json"
 
 def load_infra():
     if os.path.exists(INFRA_FILE):

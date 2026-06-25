@@ -6,9 +6,9 @@ import json
 import re
 import asyncio
 
-from config import logger, OLLAMA_MODEL, BOT_NAME, GLOBAL_KEEP_ALIVE, LLM_OPTIONS
+from config import logger, BOT_NAME, LLM_OPTIONS
 from rag import search_documents, generate_project_tree, list_rag_projects, detect_project_in_conversation
-from memory import extract_memories
+from memory import extract_memories, save_to_memory
 from web_search import perform_web_search_and_crawl
 import state
 
@@ -61,7 +61,7 @@ Richiesta utente: "{truncated_msg}"
 Rispondi SOLO con un JSON valido in questo formato esatto, senza altre parole:
 {{"is_project": true}} oppure {{"is_project": false}}
 """
-    from llm_engine import engine
+    from llm_engine import engine, extract_content
     from llama_cpp import LlamaGrammar
     try:
         messages = [{"role": "user", "content": gatekeeper_prompt}]
@@ -75,7 +75,7 @@ boolean ::= "true" | "false"'''
             grammar=grammar_obj
         )
         if "error" not in response:
-            content = response["choices"][0]["message"].get("content", "")
+            content = extract_content(response)
             match = re.search(r'\{.*?\}', content, re.DOTALL)
             if match:
                 try:
@@ -122,7 +122,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if state.memory:
             try:
                 async def _bg_add_concise():
-                    from memory import save_to_memory
                     await save_to_memory(clean_msg, user_id=current_user_id)
                 task = asyncio.create_task(_bg_add_concise())
                 import state as gstate
@@ -194,7 +193,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         # Salva sempre in memoria il messaggio utente (con metadati di progetto se rilevato)
         try:
             async def _bg_add():
-                from memory import save_to_memory
                 await save_to_memory(clean_msg, user_id=current_user_id, project=active_project)
 
             task = asyncio.create_task(_bg_add())
@@ -273,7 +271,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 tag = f" [progetto: {active_project}]" if active_project else ""
                 logger.info(f"🌐 Auto web discovery: ricercato e salvato '{clean_msg[:60]}...'{tag}")
                 async def _bg_save_web():
-                    from memory import save_to_memory
                     summary = f"[Web Knowledge] Query: {clean_msg[:200]}\nFonti: {', '.join(sources[:3])}\nRisultati: {web_search_ctx[:600]}"
                     await save_to_memory(summary, user_id=current_user_id, project=active_project)
                 task = asyncio.create_task(_bg_save_web())

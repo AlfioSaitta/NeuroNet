@@ -13,7 +13,7 @@ from config import (
     logger, USERBOT_ENABLED, USERBOT_API_ID, USERBOT_API_HASH,
     LLM_OPTIONS
 )
-from llm_engine import engine
+from llm_engine import engine, extract_content
 import state
 
 # active_clients: telegram_user_id -> TelegramClient
@@ -94,19 +94,18 @@ async def _handle_incoming_message(event, owner_id):
             
             messages = [{"role": "system", "content": system_prompt}]
             messages.extend(list(session["messages"]))
-            
-            async with state.llm_semaphore:
-                response = await engine.generate_chat(
-                    messages,
-                    tools=None,
-                    options=LLM_OPTIONS,
-                    stream=False
-                )
+
+            response = await engine.generate_chat(
+                messages,
+                tools=None,
+                options=LLM_OPTIONS,
+                stream=False
+            )
 
             if "error" in response:
                 raise RuntimeError(response["error"])
 
-            bot_reply = response["choices"][0]["message"].get("content", "")
+            bot_reply = extract_content(response)
             
         if bot_reply:
             delay = min(4.0, len(bot_reply) / 40.0)

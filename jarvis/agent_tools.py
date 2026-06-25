@@ -184,6 +184,11 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
             if not approved:
                 return f"❌ Comando rifiutato dall'utente."
             
+            ALLOWED_COMMANDS = ["ls", "cat", "head", "tail", "wc", "find", "grep", "pwd", "echo", "date", "whoami", "id", "uname", "df", "du", "ps", "uptime", "which", "file", "stat", "diff", "sort", "cut"]
+            base_cmd = cmd.strip().split()[0] if cmd.strip() else ""
+            if base_cmd not in ALLOWED_COMMANDS:
+                return f"❌ Comando '{cmd}' non consentito. Comandi permessi: {', '.join(ALLOWED_COMMANDS)}"
+            
             import subprocess
             try:
                 result = subprocess.run(cmd, shell=True, cwd=target_dir, capture_output=True, text=True, timeout=60)

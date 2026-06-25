@@ -1,7 +1,7 @@
 import logging
 import asyncio
 import state
-from llm_engine import engine
+from llm_engine import engine, extract_content
 from config import LLM_OPTIONS
 
 logger = logging.getLogger("chameleon.reflection")
@@ -54,18 +54,17 @@ Fatti grezzi:
 Rispondi SOLO con i fatti condensati, formattati in un elenco puntato. Nessuna introduzione."""
         
         messages = [{"role": "user", "content": prompt}]
-        async with state.llm_semaphore:
-            response = await engine.generate_chat(
-                messages,
-                tools=None,
-                options=LLM_OPTIONS,
-                stream=False
-            )
+        response = await engine.generate_chat(
+            messages,
+            tools=None,
+            options=LLM_OPTIONS,
+            stream=False
+        )
 
         if "error" in response:
             raise RuntimeError(response["error"])
 
-        consolidated = response["choices"][0]["message"].get("content", "").strip()
+        consolidated = extract_content(response).strip()
         
         if consolidated:
             # Delete old episodic memories

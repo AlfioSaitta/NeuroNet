@@ -835,16 +835,17 @@ if TELEGRAM_ENABLED:
                     return
                 
                 target_id = int(user_text.strip())
+                target_id_str = str(target_id)
                 if state_val == "awaiting_add":
-                    if target_id not in ALLOWED_USERS:
-                        ALLOWED_USERS.append(target_id)
+                    if target_id_str not in ALLOWED_USERS:
+                        ALLOWED_USERS.append(target_id_str)
                         save_allowed_users()
                         await msg.reply_text(f"✅ Utente `{target_id}` aggiunto con successo.", parse_mode="Markdown")
                     else:
                         await msg.reply_text("⚠️ Utente già presente.")
                 elif state_val == "awaiting_rm":
-                    if target_id in ALLOWED_USERS:
-                        ALLOWED_USERS.remove(target_id)
+                    if target_id_str in ALLOWED_USERS:
+                        ALLOWED_USERS.remove(target_id_str)
                         save_allowed_users()
                         await msg.reply_text(f"✅ Utente `{target_id}` rimosso con successo.", parse_mode="Markdown")
                     else:
@@ -967,16 +968,12 @@ if TELEGRAM_ENABLED:
                 iterations += 1
                 options = dict(LLM_OPTIONS)
 
-                if state.llm_semaphore.locked():
-                    await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ Server sotto carico, in coda per la generazione...", disable_notification=True)
-
-                async with state.llm_semaphore:
-                    response = await engine.generate_chat(
-                        current_messages,
-                        tools=TOOLS_SCHEMA,
-                        options=options,
-                        stream=False
-                    )
+                response = await engine.generate_chat(
+                    current_messages,
+                    tools=TOOLS_SCHEMA,
+                    options=options,
+                    stream=False
+                )
 
                 if "error" in response:
                     raise RuntimeError(response["error"])

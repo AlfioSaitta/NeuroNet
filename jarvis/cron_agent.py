@@ -8,7 +8,7 @@ from apscheduler.triggers.date import DateTrigger
 from datetime import datetime, timedelta
 import pytz
 import state
-from llm_engine import engine
+from llm_engine import engine, extract_content
 from config import logger, LLM_OPTIONS
 
 CRON_FILE = os.path.join(os.path.dirname(__file__), "cron_jobs.json")
@@ -49,18 +49,17 @@ async def execute_cron_job(job_id, prompt, chat_id):
     
     try:
         enriched_messages = await build_omniscient_prompt(messages)
-        async with state.llm_semaphore:
-            response = await engine.generate_chat(
-                enriched_messages,
-                tools=None,
-                options=LLM_OPTIONS,
-                stream=False
-            )
+        response = await engine.generate_chat(
+            enriched_messages,
+            tools=None,
+            options=LLM_OPTIONS,
+            stream=False
+        )
 
         if "error" in response:
             raise RuntimeError(response["error"])
 
-        bot_reply = response["choices"][0]["message"].get("content", "Errore nella generazione schedulata.")
+        bot_reply = extract_content(response, "Errore nella generazione schedulata.")
         
         # Invio a Telegram
         if state.telegram_app and state.telegram_app.bot:

@@ -110,7 +110,8 @@ class GitignoreFilter:
     def __init__(self, doc_dir=DOC_DIR):
         self.specs = {}
         visited_inodes = set()
-        for root, dirs, files in os.walk(doc_dir, followlinks=True):
+        loop = asyncio.get_event_loop()
+        for root, dirs, files in loop.run_in_executor(None, lambda: list(os.walk(doc_dir, followlinks=True))).result():
             # Evita loop da symlink circolari (NeuroNet/data/documents/NeuroNet)
             try:
                 st = os.stat(root)
@@ -825,7 +826,8 @@ async def ingest_local_documents():
     current_files = {}
     visited_inodes = set()
 
-    for r, d, f in os.walk(DOC_DIR, followlinks=True):
+    loop = asyncio.get_running_loop()
+    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=True))):
         try:
             st = os.stat(r)
             inode_key = (st.st_dev, st.st_ino)
@@ -864,7 +866,7 @@ async def ingest_local_documents():
             if os.path.isdir(os.path.join(project_root, "data", "documents")):
                 # Questo progetto ha il mount conflict — walk diretto
                 proj_ignore = GitignoreFilter(project_root)
-                for r, d, f in os.walk(project_root, followlinks=True):
+                for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(project_root, followlinks=True))):
                     try:
                         st = os.stat(r)
                         inode_key = (st.st_dev, st.st_ino)
@@ -962,7 +964,7 @@ async def ingest_local_documents():
         logger.info("✅ Sincronizzazione Graph RAG completata.")
 
     # Genera skeleton architetturali per IDE (Punto 3)
-    generate_workspace_skeletons()
+    await generate_workspace_skeletons()
     
     # Aggiorna cache del tree in background (Fix 9.4)
     await update_project_tree_cache()
@@ -974,13 +976,14 @@ async def ingest_local_documents():
 # PROJECT TREE & SKELETON
 # ==============================================================================
 
-def generate_workspace_skeletons():
+async def generate_workspace_skeletons():
     """Genera e salva uno scheletro del codice per ogni workspace in .ai-skeleton.md"""
     filt = GitignoreFilter(DOC_DIR)
+    loop = asyncio.get_running_loop()
     
     workspaces = {}
     visited_inodes = set()
-    for r, d, f in os.walk(DOC_DIR, followlinks=True):
+    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=True))):
         try:
             st = os.stat(r)
             inode_key = (st.st_dev, st.st_ino)
@@ -1033,17 +1036,18 @@ def generate_workspace_skeletons():
 async def update_project_tree_cache():
     """Aggiorna la cache in background (eseguito in to_thread per non bloccare FastAPI)."""
     try:
-        t = await asyncio.to_thread(generate_project_tree)
+        t = await generate_project_tree()
         state.project_tree_cache = t
     except Exception as e:
         logger.warning(f"Errore aggiornamento project tree cache: {e}")
 
-def generate_project_tree():
+async def generate_project_tree():
     """Genera una rappresentazione testuale dell'albero del progetto indicizzato."""
     filt = GitignoreFilter(DOC_DIR)
+    loop = asyncio.get_running_loop()
     t = "📂 PROGETTO:\n"
     visited_inodes = set()
-    for r, d, f in os.walk(DOC_DIR, followlinks=True):
+    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=True))):
         try:
             st = os.stat(r)
             inode_key = (st.st_dev, st.st_ino)

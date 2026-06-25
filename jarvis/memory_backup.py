@@ -2,10 +2,13 @@ import json
 import logging
 import asyncio
 import state
+from config import MEMORY_BACKUP_FILE
 
 logger = logging.getLogger("chameleon.backup")
 
-async def export_memory_to_json(filepath="/home/alfio/Projects/ai-ecosystem/mem0-proxy/memory_backup.json"):
+async def export_memory_to_json(filepath=None):
+    if filepath is None:
+        filepath = MEMORY_BACKUP_FILE
     if not getattr(state, "memory", None):
         return False, "Mem0 non inizializzato."
         

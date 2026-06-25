@@ -406,5 +406,21 @@ class LlamaEngine:
         )
 
 
+def extract_content(response: dict, default: str = "") -> str:
+    """Estrae il contenuto testuale da una risposta LLM in formato OpenAI."""
+    try:
+        return response["choices"][0]["message"].get("content", default)
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def extract_tool_calls(response: dict) -> list:
+    """Estrae le tool calls da una risposta LLM in formato OpenAI."""
+    try:
+        return response["choices"][0]["message"].get("tool_calls", []) or []
+    except (KeyError, IndexError, TypeError):
+        return []
+
+
 # Inizializziamo l'istanza globale
 engine = LlamaEngine()

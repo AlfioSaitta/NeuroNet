@@ -74,7 +74,6 @@ SEARXNG_HOST = os.getenv("SEARXNG_HOST", "http://searxng:8080").rstrip('/')
 CRAWL4AI_HOST = os.getenv("CRAWL4AI_HOST", "http://crawl4ai:11235").rstrip('/')
 BOT_NAME = os.getenv("BOT_NAME", "Jarvis")
 EXTERNAL_GPU_URL = os.getenv("EXTERNAL_GPU_URL", "")
-GLOBAL_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "15m")
 # LLM Options supporta parametri personalizzati da .env
 # Nota: LLM_NUM_CTX è il nome standard nel .env; LLM_CTX_SIZE è l'alias legacy
 _llm_num_ctx = int(os.getenv("LLM_NUM_CTX") or os.getenv("LLM_CTX_SIZE") or "32768")
@@ -115,6 +114,8 @@ CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "0"))
 MAX_CONCURRENT_EMBEDDINGS = int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", "8"))
 DOC_DIR = "/app/documents"
 DOC_COLLECTION = f"collateral_documents_{VECTOR_DB_VERSION}"
+INFRA_FILE = os.getenv("INFRA_FILE", "/app/mem0_data_v3/infrastructure.json")
+MEMORY_BACKUP_FILE = os.getenv("MEMORY_BACKUP_FILE", "/app/mem0_data_v3/memory_backup.json")
 
 # Cache HuggingFace / FastEmbed / tiktoken
 os.environ["HF_HOME"] = "/app/mem0_data_v3/hf_cache"

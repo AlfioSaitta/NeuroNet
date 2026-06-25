@@ -1142,21 +1142,20 @@ def collect_sys_metrics():
         "cpu_pct": result["cpu_pct"],
         "cpu_temp": result["cpu_temp"]
     })
-    if len(state.sys_history) > state.MAX_SYS_HISTORY:
-        state.sys_history = state.sys_history[-state.MAX_SYS_HISTORY:]
 
     return result
 
 
 async def get_gpu_metrics():
     import subprocess
+    loop = asyncio.get_running_loop()
     result = {"temp": None, "vram_used": None, "vram_total": None, "util": None, "cuda_version": None, "processes": None}
     try:
-        out = subprocess.run(
+        out = await loop.run_in_executor(None, lambda: subprocess.run(
             ["nvidia-smi", "--query-gpu=temperature.gpu,memory.used,memory.total,utilization.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5
-        )
+        ))
         if out.returncode == 0:
             parts = out.stdout.strip().split(", ")
             if len(parts) >= 3:
@@ -1169,22 +1168,22 @@ async def get_gpu_metrics():
         pass
 
     try:
-        out2 = subprocess.run(
+        out2 = await loop.run_in_executor(None, lambda: subprocess.run(
             ["nvidia-smi", "--query-gpu=driver_version",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=3
-        )
+        ))
         if out2.returncode == 0:
             result["cuda_version"] = out2.stdout.strip()
     except Exception:
         pass
 
     try:
-        out3 = subprocess.run(
+        out3 = await loop.run_in_executor(None, lambda: subprocess.run(
             ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=3
-        )
+        ))
         if out3.returncode == 0 and out3.stdout.strip():
             lines = [l.strip() for l in out3.stdout.strip().split('\n') if l.strip()]
             header = f"{'PID':>7}  {'NAME':<30}  {'VRAM':>8}\n" + "-" * 50
@@ -1206,8 +1205,6 @@ async def get_gpu_metrics():
             "vram_total": result["vram_total"],
             "util": result["util"] or 0
         })
-        if len(state.gpu_history) > state.MAX_GPU_HISTORY:
-            state.gpu_history = state.gpu_history[-state.MAX_GPU_HISTORY:]
 
     return result
 
@@ -1244,8 +1241,6 @@ async def get_stats():
             "completion_tokens": max(delta_ct, 0),
             "tokens_per_sec": round(max(delta_ct, 0) / 3, 1) if delta_ct > 0 else 0
         })
-        if len(state.inference_history) > state.MAX_INF_HISTORY:
-            state.inference_history = state.inference_history[-state.MAX_INF_HISTORY:]
 
     state._prev_total_requests = cur_req
     state._prev_prompt_tokens = cur_pt
@@ -1413,10 +1408,10 @@ async def get_stats():
             "total_completion_tokens": total_completion_tokens
         },
         "gpu": gpu,
-        "gpu_history": state.gpu_history[-120:] if state.gpu_history else [],
+        "gpu_history": list(state.gpu_history)[-120:],
         "sys_metrics": sys_m,
-        "sys_history": state.sys_history[-120:] if state.sys_history else [],
-        "inference_history": state.inference_history[-120:] if state.inference_history else [],
+        "sys_history": list(state.sys_history)[-120:],
+        "inference_history": list(state.inference_history)[-120:],
         "qdrant_collections": qdrant_collections,
         "agent_stats": {
             "active_todos": active_todos,

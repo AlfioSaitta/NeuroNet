@@ -47,9 +47,10 @@ from config import (
 )
 import state
 from rag import ingest_local_documents, rag_queue_worker, generate_project_tree, search_documents, semantic_cache_search, semantic_cache_store
-from memory import init_mem0_delayed, extract_memories, save_to_memory
+from memory import init_mem0_delayed, extract_memories, save_to_memory, process_response_tags
 from prompt_builder import build_omniscient_prompt
-from llm_engine import engine
+from llm_engine import engine, extract_content
+from agent_tools import TOOLS_SCHEMA, execute_tool_call
 
 if WATCHDOG_ENABLED:
     from watchdog.observers.polling import PollingObserver as Observer
@@ -115,7 +116,6 @@ async def cleanup_old_collections():
 async def lifespan(app: FastAPI):
     global observer
 
-    from llm_engine import engine
     logger.info("Avvio caricamento modelli Llama-cpp (Qwen + Nomic)...")
     await asyncio.to_thread(engine.load_models)
     logger.info("Modelli Llama caricati in locale (No Ollama).")
@@ -551,7 +551,6 @@ async def git_webhook(request: Request):
 async def ollama_chat(payload: ChatRequest, request: Request):
     state.total_requests += 1
     """Endpoint chat Ollama-nativa simulata con LlamaEngine in locale."""
-    from agent_tools import TOOLS_SCHEMA, execute_tool_call
     from datetime import datetime
     
     body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
@@ -619,7 +618,6 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             response = await engine.generate_chat(body["messages"], tools=body.get("tools"), options=body.get("options"), stream=False)
             choice = response["choices"][0]["message"]
             ollama_resp["message"] = {"role": choice.get("role", "assistant"), "content": choice.get("content", "")}
-        from memory import process_response_tags
         content = ollama_resp["message"].get("content", "")
         cleaned = await process_response_tags(content, user_id=current_user_id)
         ollama_resp["message"]["content"] = cleaned
@@ -654,8 +652,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             # Processa eventuali tag <MEMORY> in background dalla risposta completa
             full_text = "".join(full_chunks)
             if full_text:
-                from memory import process_response_tags
-                asyncio.create_task(process_response_tags(full_text, user_id=current_user_id))
+                        asyncio.create_task(process_response_tags(full_text, user_id=current_user_id))
             
             # Send final done message
             yield json.dumps({
@@ -721,10 +718,9 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
         state.total_prompt_tokens += response.get("usage", {}).get("prompt_tokens", 0)
         state.total_completion_tokens += response.get("usage", {}).get("completion_tokens", 0)
         
-        content = response["choices"][0]["message"].get("content", "")
+        content = extract_content(response)
         
         # Processa i tag PRIMA di salvare in cache, per non memorizzare tag non processati
-        from memory import process_response_tags
         cleaned = await process_response_tags(content, user_id=current_user_id)
         asyncio.create_task(semantic_cache_store(prompt, cleaned))
         
@@ -758,7 +754,6 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
             # Salva prompt utente + processa tag in background
             asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
             if final_content:
-                from memory import process_response_tags
                 cleaned = await process_response_tags(final_content, user_id=current_user_id)
                 asyncio.create_task(semantic_cache_store(prompt, cleaned))
             
@@ -899,7 +894,6 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
         choice = response["choices"][0]["message"]
         content = choice.get("content", "")
-        from memory import process_response_tags
         cleaned = await process_response_tags(content, user_id=current_user_id)
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -944,8 +938,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
             full_text = "".join(full_chunks)
             if full_text:
-                from memory import process_response_tags
-                asyncio.create_task(process_response_tags(full_text, user_id=current_user_id))
+                        asyncio.create_task(process_response_tags(full_text, user_id=current_user_id))
 
             yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4().hex[:12]}', 'object': 'chat.completion.chunk', 'created': int(datetime.utcnow().timestamp()), 'model': body['model'], 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
             yield "data: [DONE]\n\n"

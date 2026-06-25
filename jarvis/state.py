@@ -4,6 +4,7 @@ Inizializzato nel lifespan di main.py.
 """
 
 import asyncio
+from collections import deque
 
 # Client e connessioni (inizializzati in main.py lifespan)
 qdrant = None           # AsyncQdrantClient
@@ -21,9 +22,6 @@ project_tree_cache = ""  # Fix 9.4: Caching per event loop non bloccato
 background_tasks = set()
 file_event_queue = asyncio.Queue()
 
-# Concurrency limits (Fix 9.2)
-llm_semaphore = asyncio.Semaphore(1)
-
 from concurrent.futures import ThreadPoolExecutor
 mem0_executor = ThreadPoolExecutor(max_workers=4)
 
@@ -33,12 +31,9 @@ total_prompt_tokens = 0
 total_completion_tokens = 0
 
 # GPU metrics history for time-series charts (max 300 entries ~15 min at 3s interval)
-gpu_history: list[dict] = []
-sys_history: list[dict] = []
-inference_history: list[dict] = []
-MAX_GPU_HISTORY = 300
-MAX_SYS_HISTORY = 300
-MAX_INF_HISTORY = 300
+gpu_history: deque[dict] = deque(maxlen=300)
+sys_history: deque[dict] = deque(maxlen=300)
+inference_history: deque[dict] = deque(maxlen=300)
 
 # Previous CPU stats for delta calculation
 cpu_prev_idle: float = 0
