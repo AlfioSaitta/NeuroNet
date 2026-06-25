@@ -68,7 +68,6 @@ logging.getLogger("telegram.ext.Updater").addFilter(TelegramNetworkErrorFilter()
 # ==============================================================================
 # URL DEI SERVIZI E OLLAMA
 # ==============================================================================
-OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:3b-instruct-q5_K_M")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "local")
 SEARXNG_HOST = os.getenv("SEARXNG_HOST", "http://searxng:8080").rstrip('/')

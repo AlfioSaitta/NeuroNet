@@ -1,7 +1,8 @@
 import logging
 import asyncio
 import state
-from config import OLLAMA_MODEL, OLLAMA_BASE, LLM_OPTIONS, GLOBAL_KEEP_ALIVE
+from llm_engine import engine
+from config import LLM_OPTIONS
 
 logger = logging.getLogger("chameleon.reflection")
 
@@ -52,17 +53,19 @@ Fatti grezzi:
 
 Rispondi SOLO con i fatti condensati, formattati in un elenco puntato. Nessuna introduzione."""
         
-        payload = {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "keep_alive": GLOBAL_KEEP_ALIVE,
-            "options": LLM_OPTIONS
-        }
+        messages = [{"role": "user", "content": prompt}]
         async with state.llm_semaphore:
-            res = await state.http_client.post(f"{OLLAMA_BASE}/api/generate", json=payload, timeout=300.0)
-        res.raise_for_status()
-        consolidated = res.json().get("response", "").strip()
+            response = await engine.generate_chat(
+                messages,
+                tools=None,
+                options=LLM_OPTIONS,
+                stream=False
+            )
+
+        if "error" in response:
+            raise RuntimeError(response["error"])
+
+        consolidated = response["choices"][0]["message"].get("content", "").strip()
         
         if consolidated:
             # Delete old episodic memories

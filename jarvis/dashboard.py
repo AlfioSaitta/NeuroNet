@@ -5,7 +5,7 @@ import struct
 import asyncio
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, JSONResponse
-from config import OLLAMA_BASE, QDRANT_HOST, ALLOWED_USERS
+from config import QDRANT_HOST, ALLOWED_USERS
 import state
 from llm_engine import engine
 

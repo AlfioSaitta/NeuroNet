@@ -3,10 +3,11 @@ Bot Telegram — Handler per comandi e messaggi via Telegram.
 """
 
 from config import (
-    logger, OLLAMA_BASE, OLLAMA_MODEL, LLM_OPTIONS,
-    GLOBAL_KEEP_ALIVE, ALLOWED_USERS, ADMIN_USERS, TELEGRAM_ENABLED
+    logger, LLM_OPTIONS,
+    ALLOWED_USERS, ADMIN_USERS, TELEGRAM_ENABLED
 )
 from prompt_builder import build_omniscient_prompt
+from llm_engine import engine
 import state
 import time
 import asyncio
@@ -144,7 +145,9 @@ if TELEGRAM_ENABLED:
         elif action == 'admin_dashboard':
             import state
             import os
-            from config import ALLOWED_USERS, OLLAMA_BASE
+            import subprocess
+            from llm_engine import engine
+            from config import ALLOWED_USERS
             try:
                 process = open('/proc/self/statm').read().split()[1]
                 ram_mb = round((int(process) * os.sysconf('SC_PAGE_SIZE')) / (1024 * 1024), 1)
@@ -161,21 +164,30 @@ if TELEGRAM_ENABLED:
             total_chunks = sum(len(f_data.get('chunks', [])) for f_data in state.rag_state.values())
             pending_events = state.file_event_queue.qsize() if hasattr(state, "file_event_queue") and state.file_event_queue else 0
             
-            ollama_models_str = "• Nessun modello in VRAM"
-            total_vram_gb = 0.0
+            models_str_parts = []
+            total_vram_mb = 0
             try:
-                res = await state.http_client.get(f"{OLLAMA_BASE}/api/ps", timeout=3.0)
-                if res.status_code == 200:
-                    models = res.json().get("models", [])
-                    if models:
-                        mlist = []
-                        for m in models:
-                            vram = m.get("size_vram", 0) / 1e9
-                            total_vram_gb += vram
-                            mlist.append(f"• `{m.get('name').replace(':latest', '')}`: {vram:.2f} GB")
-                        ollama_models_str = "\n".join(mlist)
-            except:
-                ollama_models_str = "• Errore connessione Ollama"
+                gpu = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if gpu.returncode == 0:
+                    parts = gpu.stdout.strip().split(", ")
+                    if len(parts) >= 2:
+                        used, total = parts[0], parts[1]
+                        total_vram_mb = int(used)
+                        pct = int(used) / int(total) * 100 if int(total) > 0 else 0
+                        models_str_parts.append(f"• GPU VRAM: `{used} MB / {total} MB ({pct:.0f}%)`")
+            except: pass
+            
+            chat_status = "✅ Caricato" if engine.chat_model else "❌ Non caricato"
+            embed_status = "✅ Caricato" if engine.embed_model else "❌ Non caricato"
+            chat_name = os.path.basename(os.environ.get("LLAMA_MODEL_PATH", "?"))
+            embed_name = os.path.basename(os.environ.get("LLAMA_EMBED_MODEL_PATH", "?"))
+            models_str_parts.append(f"• Chat: `{chat_name}` — {chat_status}")
+            models_str_parts.append(f"• Embed: `{embed_name}` — {embed_status}")
+            models_str = "\n".join(models_str_parts)
             
             msg = (
                 f"📊 **Collateral Matrix Telemetry**\n\n"
@@ -188,8 +200,7 @@ if TELEGRAM_ENABLED:
                 f"• Cron Jobs: `{active_crons}`\n"
                 f"• Task Asincroni (Python): `{len(state.background_tasks)}`\n\n"
                 f"⚡ **Neural Engine (GPU VRAM):**\n"
-                f"• VRAM Totale Allocata: `{total_vram_gb:.2f} GB`\n"
-                f"{ollama_models_str}\n\n"
+                f"{models_str}\n\n"
                 f"🩺 **System:**\n"
                 f"• Mem0 Proxy RAM: `{ram_mb} MB`\n"
                 f"• Utenti Telegram ACL: `{len(ALLOWED_USERS)}`"
@@ -955,26 +966,23 @@ if TELEGRAM_ENABLED:
             while iterations < max_iterations:
                 iterations += 1
                 options = dict(LLM_OPTIONS)
-                if "localhost" in OLLAMA_BASE or "127.0.0.1" in OLLAMA_BASE:
-                    options["skip_rag"] = True
-                payload = {
-                    "model": OLLAMA_MODEL,
-                    "messages": current_messages,
-                    "stream": False,
-                    "keep_alive": GLOBAL_KEEP_ALIVE,
-                    "options": options,
-                    "tools": TOOLS_SCHEMA
-                }
 
                 if state.llm_semaphore.locked():
                     await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ Server sotto carico, in coda per la generazione...", disable_notification=True)
-                    
+
                 async with state.llm_semaphore:
-                    res = await state.http_client.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300.0)
-                res.raise_for_status()
-                
-                response_data = res.json()
-                message_data = response_data.get("message", {})
+                    response = await engine.generate_chat(
+                        current_messages,
+                        tools=TOOLS_SCHEMA,
+                        options=options,
+                        stream=False
+                    )
+
+                if "error" in response:
+                    raise RuntimeError(response["error"])
+
+                choice = response["choices"][0]["message"]
+                message_data = dict(choice)
                 
                 # Aggiungiamo il messaggio dell'assistente alla cronologia per il prossimo loop (necessario per Ollama tools)
                 current_messages.append(message_data)

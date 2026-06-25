@@ -1,0 +1,9 @@
+{
+    "034210": {
+        "desc": "Verifica ultimo push",
+        "priority": "alta",
+        "deadline": "nessuna",
+        "status": "pending",
+        "owner": "global"
+    }
+}

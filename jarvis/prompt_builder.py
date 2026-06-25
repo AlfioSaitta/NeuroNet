@@ -6,7 +6,7 @@ import json
 import re
 import asyncio
 
-from config import logger, OLLAMA_MODEL, BOT_NAME, OLLAMA_BASE, GLOBAL_KEEP_ALIVE, LLM_OPTIONS
+from config import logger, OLLAMA_MODEL, BOT_NAME, GLOBAL_KEEP_ALIVE, LLM_OPTIONS
 from rag import search_documents, generate_project_tree, list_rag_projects, detect_project_in_conversation
 from memory import extract_memories
 from web_search import perform_web_search_and_crawl

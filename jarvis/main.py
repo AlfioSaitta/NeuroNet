@@ -272,7 +272,7 @@ async def lifespan(app: FastAPI):
     if TELEGRAM_ENABLED and TELEGRAM_TOKEN and ALLOWED_USERS:
         try:
             # HTTPXRequest con retry automatico su OSError (DNS/network sporadici)
-            from telegram.error import NetworkError
+            from telegram.error import BadRequest, NetworkError
             _base_req = HTTPXRequest(
                 read_timeout=120.0,
                 write_timeout=120.0,
@@ -287,14 +287,14 @@ async def lifespan(app: FastAPI):
                     try:
                         return await _orig_wrapper(url, method, **kw)
                     except (OSError, NetworkError) as _e:
+                        # BadRequest estende NetworkError in PTB 21.x; non ritentiamo errori applicativi
+                        if isinstance(_e, BadRequest):
+                            raise
                         if _attempt < 4:
                             logger.warning(f"DNS/Network error su Telegram API, retry {_attempt+2}/5: {_e}")
                             await asyncio.sleep(2 ** _attempt + 0.5 * _attempt)
                         else:
                             raise
-                    except Exception as _e:
-                        logger.warning(f"Altro errore in _retry_wrapper (tentativo {_attempt+1}/5): {type(_e).__name__}: {_e}")
-                        raise
 
             _base_req._request_wrapper = _retry_wrapper
             logger.info("📡 Telegram HTTP client con retry DNS (5 tentativi) attivo")

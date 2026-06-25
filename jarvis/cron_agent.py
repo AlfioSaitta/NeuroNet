@@ -8,7 +8,8 @@ from apscheduler.triggers.date import DateTrigger
 from datetime import datetime, timedelta
 import pytz
 import state
-from config import logger, OLLAMA_MODEL, LLM_OPTIONS, OLLAMA_BASE, GLOBAL_KEEP_ALIVE
+from llm_engine import engine
+from config import logger, LLM_OPTIONS
 
 CRON_FILE = os.path.join(os.path.dirname(__file__), "cron_jobs.json")
 scheduler = AsyncIOScheduler(timezone=pytz.utc)
@@ -48,17 +49,18 @@ async def execute_cron_job(job_id, prompt, chat_id):
     
     try:
         enriched_messages = await build_omniscient_prompt(messages)
-        payload = {
-            "model": OLLAMA_MODEL,
-            "messages": enriched_messages,
-            "stream": False,
-            "keep_alive": GLOBAL_KEEP_ALIVE,
-            "options": LLM_OPTIONS
-        }
         async with state.llm_semaphore:
-            res = await state.http_client.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300.0)
-        res.raise_for_status()
-        bot_reply = res.json().get("message", {}).get("content", "Errore nella generazione schedulata.")
+            response = await engine.generate_chat(
+                enriched_messages,
+                tools=None,
+                options=LLM_OPTIONS,
+                stream=False
+            )
+
+        if "error" in response:
+            raise RuntimeError(response["error"])
+
+        bot_reply = response["choices"][0]["message"].get("content", "Errore nella generazione schedulata.")
         
         # Invio a Telegram
         if state.telegram_app and state.telegram_app.bot:

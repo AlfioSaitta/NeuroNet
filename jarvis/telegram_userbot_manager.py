@@ -11,8 +11,9 @@ from telethon import TelegramClient, events
 
 from config import (
     logger, USERBOT_ENABLED, USERBOT_API_ID, USERBOT_API_HASH,
-    OLLAMA_BASE, OLLAMA_MODEL, LLM_OPTIONS, GLOBAL_KEEP_ALIVE
+    LLM_OPTIONS
 )
+from llm_engine import engine
 import state
 
 # active_clients: telegram_user_id -> TelegramClient
@@ -94,18 +95,18 @@ async def _handle_incoming_message(event, owner_id):
             messages = [{"role": "system", "content": system_prompt}]
             messages.extend(list(session["messages"]))
             
-            payload = {
-                "model": OLLAMA_MODEL,
-                "messages": messages,
-                "stream": False,
-                "keep_alive": GLOBAL_KEEP_ALIVE,
-                "options": LLM_OPTIONS
-            }
-            
             async with state.llm_semaphore:
-                res = await state.http_client.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=120.0)
-            res.raise_for_status()
-            bot_reply = res.json().get("message", {}).get("content", "")
+                response = await engine.generate_chat(
+                    messages,
+                    tools=None,
+                    options=LLM_OPTIONS,
+                    stream=False
+                )
+
+            if "error" in response:
+                raise RuntimeError(response["error"])
+
+            bot_reply = response["choices"][0]["message"].get("content", "")
             
         if bot_reply:
             delay = min(4.0, len(bot_reply) / 40.0)

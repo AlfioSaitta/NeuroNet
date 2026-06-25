@@ -361,5 +361,50 @@ class LlamaEngine:
             
             return embeddings
 
+    # ==========================================================================
+    # PROVIDER ROUTER INTEGRATION
+    # ==========================================================================
+
+    def init_provider_router(self):
+        """Inizializza il ProviderRouter per provider esterni (Gemini, ecc.)."""
+        try:
+            from external_providers import init_router
+            from config import PROVIDER_CONFIG
+            router = init_router(PROVIDER_CONFIG)
+            router.set_local_engine(self)
+            self.provider_router = router
+            logger.info(f"ProviderRouter: inizializzato (strategia={PROVIDER_CONFIG.get('strategy')})")
+            return router
+        except Exception as e:
+            logger.warning(f"ProviderRouter: inizializzazione fallita: {e}")
+            self.provider_router = None
+            return None
+
+    async def generate_chat_with_router(
+        self,
+        messages,
+        tools=None,
+        options=None,
+        stream=False,
+        grammar=None,
+        preferred_provider=None,
+        force_cloud=False
+    ):
+        """
+        Genera risposta usando il ProviderRouter.
+        Se il router non è disponibile, usa il normale generate_chat.
+        """
+        if not getattr(self, 'provider_router', None):
+            return await self.generate_chat(messages, tools, options, stream, grammar)
+
+        return await self.provider_router.route_chat(
+            messages,
+            options=options,
+            stream=stream,
+            preferred_provider=preferred_provider,
+            force_cloud=force_cloud
+        )
+
+
 # Inizializziamo l'istanza globale
 engine = LlamaEngine()
