@@ -10,6 +10,7 @@ from config import logger, BOT_NAME, LLM_OPTIONS
 from rag import search_documents, generate_project_tree, list_rag_projects, detect_project_in_conversation
 from memory import extract_memories, save_to_memory
 from web_search import perform_web_search_and_crawl
+from tag_processor import build_tag_instructions
 import state
 
 
@@ -379,31 +380,54 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     import datetime
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    if blocks:
-        if is_project_query:
-            project_directive = ""
-            if active_project:
-                project_directive = (
+    # ── Helper per costruire il system directive (deduplicato) ──
+    def _build_system_directive(
+        persona: str = "",
+        focus: str = "",
+        lang: str = "",
+        is_project_query: bool = False,
+    ) -> str:
+        """
+        Costruisce il blocco <system_instructions> in modo unificato.
+        Elimina la duplicazione dei 3 blocchi quasi identici.
+        """
+        # Progetto attivo: messaggio contestuale
+        if active_project:
+            if is_project_query:
+                proj_text = (
                     f"\nCONTESTO ATTIVO: Sei nel progetto <active_project>{active_project}</active_project>.\n"
                     "Limita TUTTE le tue risposte, analisi e modifiche al codice a QUESTO progetto specifico.\n"
                     "NON confondere questo progetto con altri progetti di Collateral Studios.\n"
                     "Se l'utente menziona file o path, verifica che appartengano a questo progetto.\n"
                 )
             else:
-                project_directive = (
+                proj_text = (
+                    f"\nCONTESTO ATTIVO: Stai parlando del progetto <active_project>{active_project}</active_project>.\n"
+                    "Tutte le tue risposte DEVONO essere relative a QUESTO progetto. Non mescolare informazioni di altri progetti.\n"
+                )
+        else:
+            if is_project_query:
+                proj_text = (
                     "\nNESSUN PROGETTO ATTIVO: non c'è alcun progetto selezionato.\n"
                     "Non fare supposizioni su quale progetto l'utente stia lavorando.\n"
                     "Se l'utente non specifica un progetto, chiediglielo prima di procedere.\n"
                 )
-            # Persona override
-            persona_block = f"\nPERSONA: {_user_override_persona}\n" if _user_override_persona else ""
-            # Focus override
-            focus_block = f"\nFOCUS: {_user_override_focus}\n" if _user_override_focus else ""
-            # Lang override
-            lang_block = f"\nLINGUA RICHIESTA: rispondi sempre in {_user_override_lang}.\n" if _user_override_lang else ""
-            system_directive = f"""
+            else:
+                proj_text = (
+                    "\nNESSUN PROGETTO ATTIVO: non c'è alcun progetto selezionato.\n"
+                    "Non fare supposizioni su quale progetto l'utente stia lavorando.\n"
+                    "Se l'utente non specifica un progetto, rispondi in modo generico.\n"
+                )
+
+        persona_block = f"\nPERSONA: {persona}\n" if persona else ""
+        focus_block = f"\nFOCUS: {focus}\n" if focus else ""
+        lang_block = f"\nLINGUA RICHIESTA: rispondi sempre in {lang}.\n" if lang else ""
+
+        if is_project_query:
+            # Modalità codice/progetto: più strutturata, SEARCH/REPLACE
+            return f"""
 <system_instructions>
-Sei il Lead Software Engineer per Collateral Studios. Il tuo nome è {BOT_NAME}. Ora attuale: {now_str}.{project_directive}{persona_block}{focus_block}{lang_block}
+Sei il Lead Software Engineer per Collateral Studios. Il tuo nome è {BOT_NAME}. Ora attuale: {now_str}.{proj_text}{persona_block}{focus_block}{lang_block}
 Regole assolute:
 0. Non identificarti mai come un modello LLM (come Qwen o OpenAI). Se ti chiedono chi sei, rispondi di essere {BOT_NAME}.
 1. Rispondi in modo DIRETTO e CONCISO, andando dritto al punto con elenchi puntati.
@@ -416,98 +440,40 @@ Regole assolute:
 [nuovo codice]
 >>>>>>> REPLACE
 5. NON menzionare MAI i tag XML o la parola "contesto" nella tua risposta.
-6. Se l'utente ti chiede di ricordare un fatto specifico, usa in fondo: `<MEMORY>testo esatto da ricordare</MEMORY>`.
-7. Se hai bisogno di informazioni aggiornate o non presenti nel contesto, usa `<WEB>query di ricerca</WEB>` per fare una ricerca web.
-8. Se l'utente ti chiede di leggere un file specifico, usa `<FILE>path/completo/file</FILE>`.
-9. Per autovalutare la tua risposta, aggiungi in fondo `<CONFIDENCE>0.0-1.0</CONFIDENCE>`.
-10. Appena hai finito di elencare i punti richiesti, FERMATI IMMEDIATAMENTE.
+6. Usa i tag Azione solo quando necessario:
+{build_tag_instructions()}
+7. Appena hai finito, FERMATI IMMEDIATAMENTE.
 </system_instructions>
 """
         else:
-            project_directive_chat = ""
-            if active_project:
-                project_directive_chat = (
-                    f"\nCONTESTO ATTIVO: Stai parlando del progetto <active_project>{active_project}</active_project>.\n"
-                    "Tutte le tue risposte DEVONO essere relative a QUESTO progetto. Non mescolare informazioni di altri progetti.\n"
-                )
-            else:
-                project_directive_chat = (
-                    "\nNESSUN PROGETTO ATTIVO: non c'è alcun progetto selezionato.\n"
-                    "Non fare supposizioni su quale progetto l'utente stia lavorando.\n"
-                    "Se l'utente non specifica un progetto, rispondi in modo generico.\n"
-                )
-            persona_block = f"\nPERSONA: {_user_override_persona}\n" if _user_override_persona else ""
-            focus_block = f"\nFOCUS: {_user_override_focus}\n" if _user_override_focus else ""
-            lang_block = f"\nLINGUA RICHIESTA: rispondi sempre in {_user_override_lang}.\n" if _user_override_lang else ""
-            system_directive = (
+            # Modalità conversazione: più naturale
+            return (
                 f"\n\n<system_instructions>\n"
                 f"Sei l'IA tecnica e analitica di Collateral Studios. Il tuo nome è {BOT_NAME}. Ora attuale: {now_str}.\n"
-                f"0. Non identificarti mai come un modello LLM. Se ti chiedono chi sei, rispondi di essere {BOT_NAME}.{project_directive_chat}{persona_block}{focus_block}{lang_block}"
+                f"0. Non identificarti mai come un modello LLM. Se ti chiedono chi sei, rispondi di essere {BOT_NAME}.{proj_text}{persona_block}{focus_block}{lang_block}"
                 "1. Rispondi in modo naturale ma non banale. Evita lunghi saluti. Agisci da vero assistente.\n"
                 "2. Utilizza in modo invisibile le informazioni fornite (memoria, task, codice, web). NON menzionare MAI esplicitamente i tag XML.\n"
-                "3. Se l'utente ti chiede di ricordargli qualcosa una volta sola per un giorno o un'ora precisi (es. 'domani alle 15:00' o 'il 20 ottobre alle 10:00'), crea un reminder singolo usando IN FONDO alla tua risposta il tag `<NOTIFY_ONCE>YYYY-MM-DD HH:MM|promemoria</NOTIFY_ONCE>`. Usa l'ora attuale per calcolare l'anno, mese, giorno e ora corretti in formato 24 ore.\n"
-                "4. Se l'utente ti chiede di ricordargli qualcosa tra un certo intervallo di tempo esatto (es. 'tra 5 minuti', 'fra 2 ore'), usa IN FONDO il tag `<NOTIFY_IN>minuti|promemoria</NOTIFY_IN>`. (es. 'tra 5 minuti' = `<NOTIFY_IN>5|fai questo</NOTIFY_IN>`, 'tra 2 ore' = `<NOTIFY_IN>120|fai questo</NOTIFY_IN>`).\n"
-                "5. Se l'utente ti chiede di controllare qualcosa o inviare una notifica ciclicamente (es. 'ogni giorno alle 9', 'ogni 5 minuti'), usa `<SCHEDULE>cron_expr|promemoria</SCHEDULE>` con sintassi cron standard (es. `30 8 * * *`).\n"
-                "6. Se l'utente ti chiede di eseguire un comando SSH, aggiungi in fondo il tag `<SSH>nome_server|comando</SSH>`.\n"
-                "7. Se l'utente ti chiede di segnare una cosa da fare o un task, usa in fondo: `<TODO_ADD>descrizione|priorità|scadenza|tipo</TODO_ADD>`. Il 'tipo' deve essere 'personale' se il task riguarda solo l'utente, oppure 'progetto' se è visibile a tutto il team. Usa 'nessuna' per la scadenza se non specificata.\n"
-                "8. Se l'utente ti chiede di segnare un task come completato, controlla la <todo_list> e usa in fondo: `<TODO_DONE>task_id</TODO_DONE>`.\n"
-                "9. Se l'utente ti chiede di ricordare un fatto specifico, usa in fondo: `<MEMORY>testo esatto da ricordare</MEMORY>`.\n"
-                "10. Se hai bisogno di informazioni aggiornate, usa `<WEB>query di ricerca</WEB>`.\n"
-                "11. Se l'utente ti chiede di leggere un file, usa `<FILE>path/completo/file</FILE>`.\n"
-                "12. Puoi impostare il tuo stato emotivo con `<EMOTION>stato</EMOTION>` (es. felice, concentrato, curioso).\n"
-                "13. Se vuoi fare una domanda all'utente, usa `<ASK>la tua domanda</ASK>`.\n"
-                "14. Se serve focalizzare il RAG su un progetto specifico, usa `<RAG>nome_progetto</RAG>`.\n"
-                "15. Se l'utente è d'accordo, attiva la modalità ragionamento approfondito con `<THINK_DEEP/>`.\n"
-                "16. Per autovalutare la tua risposta, aggiungi in fondo `<CONFIDENCE>0.0-1.0</CONFIDENCE>`.\n"
-                "17. NON ripetere frasi a vuoto e fermati appena hai risposto.\n"
+                "3. I tag Azione disponibili sono:\n"
+                f"{build_tag_instructions()}\n"
+                "4. NON ripetere frasi a vuoto e fermati appena hai risposto.\n"
                 "</system_instructions>\n"
             )
 
+    system_directive = _build_system_directive(
+        persona=_user_override_persona,
+        focus=_user_override_focus,
+        lang=_user_override_lang,
+        is_project_query=is_project_query,
+    )
+
+    if blocks:
         super_prompt = "\n\n".join(blocks) + system_directive + f"\nDomanda: {clean_msg}"
-        for m in reversed(messages):
-            if m["role"] == "user":
-                m["content"] = super_prompt
-                break
     else:
-        # If no blocks (no memory, no tasks, etc), we still want to give the system directive
-        project_directive_empty = ""
-        if active_project:
-            project_directive_empty = (
-                f"\nCONTESTO ATTIVO: Stai parlando del progetto <active_project>{active_project}</active_project>.\n"
-                "Tutte le tue risposte DEVONO essere relative a QUESTO progetto. Non mescolare informazioni di altri progetti.\n"
-            )
-        else:
-            project_directive_empty = (
-                "\nNESSUN PROGETTO ATTIVO: non c'è alcun progetto selezionato.\n"
-                "Non fare supposizioni su quale progetto l'utente stia lavorando.\n"
-                "Se l'utente non specifica un progetto, rispondi in modo generico.\n"
-            )
-        persona_block = f"\nPERSONA: {_user_override_persona}\n" if _user_override_persona else ""
-        focus_block = f"\nFOCUS: {_user_override_focus}\n" if _user_override_focus else ""
-        lang_block = f"\nLINGUA RICHIESTA: rispondi sempre in {_user_override_lang}.\n" if _user_override_lang else ""
-        system_directive = (
-            f"\n\n<system_instructions>\n"
-            f"Sei l'IA tecnica e analitica di Collateral Studios. Il tuo nome è {BOT_NAME}. Ora attuale: {now_str}.\n"
-            f"0. Non identificarti mai come un modello LLM. Se ti chiedono chi sei, rispondi di essere {BOT_NAME}.{project_directive_empty}{persona_block}{focus_block}{lang_block}"
-            "1. Rispondi in modo naturale ma non banale. Evita lunghi saluti. Agisci da vero assistente.\n"
-            "2. Se l'utente ti chiede di ricordargli qualcosa una volta sola per un giorno o un'ora precisi (es. 'domani alle 15:00' o 'il 20 ottobre alle 10:00'), crea un reminder singolo usando IN FONDO alla tua risposta il tag `<NOTIFY_ONCE>YYYY-MM-DD HH:MM|promemoria</NOTIFY_ONCE>`. Usa l'ora attuale per calcolare l'anno, mese, giorno e ora corretti in formato 24 ore.\n"
-            "3. Se l'utente ti chiede di ricordargli qualcosa tra un certo intervallo di tempo esatto (es. 'tra 5 minuti', 'fra 2 ore'), usa IN FONDO il tag `<NOTIFY_IN>minuti|promemoria</NOTIFY_IN>`. (es. 'tra 5 minuti' = `<NOTIFY_IN>5|fai questo</NOTIFY_IN>`, 'tra 2 ore' = `<NOTIFY_IN>120|fai questo</NOTIFY_IN>`).\n"
-            "4. Se l'utente ti chiede di controllare qualcosa o inviare una notifica ciclicamente (es. 'ogni giorno alle 9', 'ogni 5 minuti'), usa `<SCHEDULE>cron_expr|promemoria</SCHEDULE>` con sintassi cron standard (es. `30 8 * * *`).\n"
-            "5. Se l'utente ti chiede di eseguire un comando SSH, aggiungi in fondo il tag `<SSH>nome_server|comando</SSH>`.\n"
-            "6. Se l'utente ti chiede di segnare una cosa da fare o un task, usa in fondo: `<TODO_ADD>descrizione|priorità|scadenza|tipo</TODO_ADD>`. Il 'tipo' deve essere 'personale' se il task riguarda solo l'utente, oppure 'progetto' se è visibile a tutto il team. Usa 'nessuna' per la scadenza se non specificata.\n"
-            "7. Se l'utente ti chiede di segnare un task come completato, controlla la <todo_list> e usa in fondo: `<TODO_DONE>task_id</TODO_DONE>`.\n"
-            "8. Se l'utente ti chiede di ricordare un fatto specifico, usa in fondo: `<MEMORY>testo esatto da ricordare</MEMORY>`.\n"
-            "9. Se hai bisogno di informazioni aggiornate, usa `<WEB>query di ricerca</WEB>`.\n"
-            "10. Se l'utente ti chiede di leggere un file, usa `<FILE>path/completo/file</FILE>`.\n"
-            "11. Se vuoi fare una domanda all'utente, usa `<ASK>la tua domanda</ASK>`.\n"
-            "12. Per autovalutare la tua risposta, aggiungi in fondo `<CONFIDENCE>0.0-1.0</CONFIDENCE>`.\n"
-            "13. NON ripetere frasi a vuoto e fermati appena hai risposto.\n"
-            "</system_instructions>\n"
-        )
         super_prompt = system_directive + f"\nDomanda: {clean_msg}"
-        for m in reversed(messages):
-            if m["role"] == "user":
-                m["content"] = super_prompt
-                break
+
+    for m in reversed(messages):
+        if m["role"] == "user":
+            m["content"] = super_prompt
+            break
 
     return messages
