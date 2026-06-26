@@ -1,5 +1,7 @@
 import asyncio
 import os
+import re
+import json
 import subprocess
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -123,6 +125,13 @@ class LlamaEngine:
             flash_attn = os.environ.get("LLM_FLASH_ATTN", "false").lower() == "true"
             logger.info(f"Caricamento Chat Model: {chat_model_path}")
             logger.info(f"⚙️ n_gpu_layers={n_gpu_layers} n_ctx={n_ctx} n_batch={n_batch} n_ubatch={n_ubatch} flash_attn={flash_attn}")
+            # chat_format: auto dal profilo modello, sovrascrivibile via LLM_CHAT_FORMAT
+            from config import MODEL_PROFILE as _init_profile
+            _chat_format = os.environ.get("LLM_CHAT_FORMAT")
+            if not _chat_format:
+                _chat_format = _init_profile.chat_format
+            logger.info(f"⚙️ chat_format={_chat_format} (family={_init_profile.family})")
+
             self.chat_model = Llama(
                 model_path=chat_model_path,
                 n_gpu_layers=n_gpu_layers,
@@ -132,10 +141,37 @@ class LlamaEngine:
                 n_threads=6,
                 flash_attn=flash_attn,
                 use_mmap=True,
-                chat_format=None,
+                chat_format=_chat_format,
                 verbose=False
             )
             log_vram_usage("Dopo caricamento Chat Model")
+
+            # ── Estrazione metadati GGUF e aggiornamento MODEL_PROFILE ──
+            try:
+                _metadata = {}
+                if hasattr(self.chat_model, 'metadata') and self.chat_model.metadata:
+                    _metadata = dict(self.chat_model.metadata)
+                if hasattr(self.chat_model, 'model_metadata') and self.chat_model.model_metadata:
+                    _metadata = dict(self.chat_model.model_metadata)
+
+                if _metadata:
+                    from model_profiles import detect_from_metadata
+                    from config import MODEL_PROFILE as _old_profile
+                    _new_profile = detect_from_metadata(_metadata, _old_profile)
+                    # Aggiorna globalmente config.MODEL_PROFILE
+                    import config as _cfg
+                    _cfg.MODEL_PROFILE = _new_profile
+                    # Aggiorna LLM_THINKING_MODE se non sovrascritto da env var
+                    if not os.environ.get("LLM_THINKING_MODE"):
+                        _cfg.LLM_THINKING_MODE = _new_profile.thinking_support
+                    logger.info(f"🧠 Modello rilevato: {_new_profile.model_name} "
+                                f"({_new_profile.family}/{_new_profile.variant}) "
+                                f"chat_format={_new_profile.chat_format} | "
+                                f"thinking={'✅' if _new_profile.thinking_support else '❌'}")
+                else:
+                    logger.info("ℹ️  Nessun metadato GGUF disponibile, uso profilo da filename")
+            except Exception as _meta_err:
+                logger.warning(f"⚠️ Estrazione metadati modello fallita: {_meta_err}")
         else:
             logger.warning(f"File {chat_model_path} non trovato!")
 
@@ -260,9 +296,11 @@ class LlamaEngine:
 
         loop = asyncio.get_running_loop()
 
-        # Cap ragionevole: evita 68-minuti di generazione a 0.5 tok/s
+        # Cap ragionevole: evita generazioni eccessivamente lunghe.
+        # Il default 2048 garantisce che i tag di coda (MEMORY, CONFIDENCE, ecc.)
+        # non vengano troncati prima della chiusura.
         # Sovrascrivibile via LLM_MAX_TOKENS env var nel .env
-        _max_tokens_cap = int(os.environ.get("LLM_MAX_TOKENS", "512"))
+        _max_tokens_cap = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
         max_tokens = min(max_tokens, _max_tokens_cap)
 
         if stream:
@@ -289,7 +327,7 @@ class LlamaEngine:
                         timeout=300
                         )
                     except asyncio.TimeoutError:
-                        logger.error("LLM streaming timed out after 120s")
+                        logger.error("LLM streaming timed out after 300s")
                         yield {"error": "LLM inference timed out"}
                         return
                     def get_next(gen):
@@ -328,11 +366,11 @@ class LlamaEngine:
                                 grammar=grammar
                             )
                         ),
-                        timeout=120
+                        timeout=300
                     )
                     return response
                 except asyncio.TimeoutError:
-                    logger.error(f"LLM inference timed out after 120s (max_tokens={max_tokens})")
+                    logger.error(f"LLM inference timed out after 300s (max_tokens={max_tokens})")
                     return {"error": "LLM inference timed out", "choices": [{"message": {"role": "assistant", "content": "Mi dispiace, la generazione della risposta ha superato il tempo limite. Prova con una domanda più specifica."}}]}  # noqa
 
     async def get_embeddings(self, texts, priority=10):
@@ -420,6 +458,100 @@ def extract_tool_calls(response: dict) -> list:
         return response["choices"][0]["message"].get("tool_calls", []) or []
     except (KeyError, IndexError, TypeError):
         return []
+
+
+def parse_qwen_tool_calls(text: str) -> list[dict]:
+    """
+    Parsa chiamate a funzione in formato nativo Qwen dal testo della risposta.
+    
+    La Qwen con chat_format=None emette i tool call come testo invece di
+    usarli nel campo strutturato tool_calls della API. Questa funzione
+    rileva il pattern <|tool_call|>...<|tool_call|> e lo converte in
+    formato tool_call standard.
+    
+    Formati supportati:
+      <|tool_call|>call:function_name{param:"value"}<|tool_call|>
+      <|tool_call|>{"name":"fn","arguments":{...}}<|tool_call|>
+      <|tool_call|>call:function(param="value")<|tool_call|>
+    """
+    if not text:
+        return []
+    
+    pattern = re.compile(
+        r'<\|tool_call\|>(.*?)<\|tool_call\|>',
+        re.DOTALL | re.IGNORECASE
+    )
+    
+    tool_calls = []
+    for match in pattern.finditer(text):
+        raw = match.group(1).strip()
+        try:
+            # Prova prima JSON format: {"name":"fn","arguments":{...}}
+            if raw.startswith("{"):
+                parsed = json.loads(raw)
+                tc = {
+                    "id": f"call_{len(tool_calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": parsed.get("name", ""),
+                        "arguments": json.dumps(parsed.get("arguments", {}))
+                    }
+                }
+                tool_calls.append(tc)
+                continue
+            
+            # Formato call:function_name{...} o call:function_name(...)
+            if raw.startswith("call:"):
+                fn_part = raw[5:].strip()
+                # Estrai nome funzione (fino a primo { o ()
+                paren_idx = -1
+                brace_idx = -1
+                if "(" in fn_part:
+                    paren_idx = fn_part.index("(")
+                if "{" in fn_part:
+                    brace_idx = fn_part.index("{")
+                
+                split_idx = min(
+                    [i for i in (paren_idx, brace_idx) if i >= 0],
+                    default=len(fn_part)
+                )
+                
+                fn_name = fn_part[:split_idx].strip()
+                
+                # Estrai argomenti se presenti
+                args = {}
+                if paren_idx >= 0:
+                    args_str = fn_part[paren_idx+1:fn_part.rindex(")")] if ")" in fn_part else fn_part[paren_idx+1:]
+                    # Parsa key=value o key="value"
+                    for arg in args_str.split(","):
+                        if "=" in arg:
+                            k, v = arg.split("=", 1)
+                            args[k.strip()] = v.strip().strip('"\'')
+                elif brace_idx >= 0:
+                    args_str = fn_part[brace_idx+1:fn_part.rindex("}")] if "}" in fn_part else fn_part[brace_idx+1:]
+                    # Prova JSON parse
+                    try:
+                        args = json.loads("{" + args_str + "}")
+                    except json.JSONDecodeError:
+                        # Fallback: key:value parsing
+                        for arg in args_str.split(","):
+                            if ":" in arg:
+                                k, v = arg.split(":", 1)
+                                args[k.strip().strip('"\'')] = v.strip().strip('"\'')
+                
+                tc = {
+                    "id": f"call_{len(tool_calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": fn_name,
+                        "arguments": json.dumps(args)
+                    }
+                }
+                tool_calls.append(tc)
+        except Exception:
+            continue
+    
+    return tool_calls
 
 
 # Inizializziamo l'istanza globale

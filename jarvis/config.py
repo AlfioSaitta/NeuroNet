@@ -89,11 +89,12 @@ LLM_OPTIONS = {
 }
 # Rilevamento automatico famiglia modello dal GGUF.
 # Usato per thinking mode, temperatura, contesto massimo e compatibilità RAG.
-from model_profiles import detect_model_family, supports_thinking as _profile_supports_thinking
+from model_profiles import detect_model_family
 MODEL_PROFILE = detect_model_family()
 logger.info(f"🤖 Modello rilevato: {MODEL_PROFILE.family} ({MODEL_PROFILE.description}) | "
             f"thinking={'✅' if MODEL_PROFILE.thinking_support else '❌'} | "
             f"unsloth={'✅' if MODEL_PROFILE.unsloth_optimized else '❌'} | "
+            f"chat_format={MODEL_PROFILE.chat_format} | "
             f"ctx max={MODEL_PROFILE.max_ctx}")
 
 # Thinking Mode: default basato sul modello caricato, sovrascrivibile via .env
