@@ -165,7 +165,7 @@ def save_allowed_users():
 
 
 # ==============================================================================
-# OPENCODE / MCP CONFIG
+# MCP CONFIG
 # ==============================================================================
 MCP_ENABLED = os.getenv("MCP_ENABLED", "true").lower() in ("1", "true", "yes")
 MCP_CONFIG_PATHS_JSON = os.getenv("MCP_CONFIG_PATHS", "")  # comma-separated extra paths

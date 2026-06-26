@@ -4,7 +4,7 @@ MCP Client — Model Context Protocol client per Jarvis.
 Supporta:
 - Local MCP servers (stdio JSON-RPC subprocess)
 - Remote MCP servers (HTTP POST JSON-RPC)
-- .mcp.json config loading (OpenCode/Claude Code format)
+- .mcp.json config loading (Claude Code format)
 - Tool discovery + execution
 - Skill-embedded MCP servers
 """
@@ -353,8 +353,7 @@ class McpManager:
     """Manages multiple MCP server connections.
 
     Supports:
-    - Loading from .mcp.json (OpenCode/Claude Code format)
-    - Loading from opencode.json (OpenCode native format)
+    - Loading from .mcp.json (Claude Code format)
     - Programmatic registration
     - Tool discovery across all servers
     """
@@ -390,7 +389,7 @@ class McpManager:
     # ── Loading from config ──
 
     async def load_mcp_json(self, config_path: str) -> int:
-        """Load MCP servers from a .mcp.json file (OpenCode/Claude Code format).
+        """Load MCP servers from a .mcp.json file (Claude Code format).
 
         .mcp.json format:
         {
@@ -435,10 +434,10 @@ class McpManager:
 
         return count
 
-    async def load_opencode_mcp_config(self, config_path: str) -> int:
-        """Load MCP servers from opencode.json format.
+    async def load_generic_mcp_config(self, config_path: str) -> int:
+        """Load MCP servers from a generic JSON config file.
 
-        opencode.json format:
+        Expected format:
         {
           "mcp": {
             "server-name": {
@@ -465,7 +464,7 @@ class McpManager:
             with open(config_path, "r") as f:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.warning(f"MCP: cannot load opencode config {config_path}: {e}")
+            logger.warning(f"MCP: cannot load config {config_path}: {e}")
             return 0
 
         mcp_config = data.get("mcp", {})
@@ -600,13 +599,10 @@ async def init_mcp_from_config(config_paths: List[str] = None) -> int:
 
     Searches for:
     - .mcp.json (Claude Code format)
-    - opencode.json (OpenCode native format)
 
     Also scans standard paths:
     - {project_root}/.mcp.json
-    - ~/.config/opencode/.mcp.json
-    - {project_root}/opencode.json
-    - {project_root}/opencode.jsonc
+    - ~/.config/jarvis/mcp.json
     """
     import glob as glob_mod
     manager = get_mcp_manager()
@@ -618,9 +614,8 @@ async def init_mcp_from_config(config_paths: List[str] = None) -> int:
 
         config_paths = [
             os.path.join(project_root, ".mcp.json"),
-            os.path.join(os.path.expanduser("~"), ".config", "opencode", ".mcp.json"),
-            os.path.join(project_root, "opencode.json"),
-            os.path.join(project_root, "opencode.jsonc"),
+            os.path.join(os.path.expanduser("~"), ".config", "jarvis", "mcp.json"),
+            os.path.join(os.path.expanduser("~"), ".mcp.json"),
         ]
 
     total = 0
@@ -628,7 +623,7 @@ async def init_mcp_from_config(config_paths: List[str] = None) -> int:
         if path.endswith(".mcp.json"):
             total += await manager.load_mcp_json(path)
         elif path.endswith((".json", ".jsonc")):
-            total += await manager.load_opencode_mcp_config(path)
+            total += await manager.load_generic_mcp_config(path)
 
     if total > 0:
         await manager.initialize_all()
