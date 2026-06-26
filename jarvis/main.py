@@ -630,14 +630,14 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             if isinstance(gen, dict) and "error" in gen:
                 yield json.dumps({"error": gen["error"]}).encode() + b"\n"
                 return
-                
+
             full_chunks = []
             async for chunk in gen:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
                     delta = chunk["choices"][0].get("delta", {})
                     content = delta.get("content", "")
                     full_chunks.append(content)
-                    
+
                     ollama_chunk = {
                         "model": body["model"],
                         "created_at": datetime.utcnow().isoformat() + "Z",
@@ -648,17 +648,17 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                         "done": False
                     }
                     yield json.dumps(ollama_chunk).encode() + b"\n"
-            
-            # Processa eventuali tag <MEMORY> in background dalla risposta completa
+
+            # Processa TUTTI i tag dalla risposta completa (MEMORY, SCHEDULE, SSH, ecc.)
             full_text = "".join(full_chunks)
             if full_text:
-                        asyncio.create_task(process_response_tags(full_text, user_id=current_user_id))
-            
-            # Send final done message
+                full_text = await process_response_tags(full_text, user_id=current_user_id)
+
+            # Send final done message con testo pulito dai tag
             yield json.dumps({
                 "model": body["model"],
                 "created_at": datetime.utcnow().isoformat() + "Z",
-                "message": {"role": "assistant", "content": ""},
+                "message": {"role": "assistant", "content": full_text},
                 "done": True
             }).encode() + b"\n"
 
@@ -753,6 +753,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
             
             # Salva prompt utente + processa tag in background
             asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
+            cleaned = ""
             if final_content:
                 cleaned = await process_response_tags(final_content, user_id=current_user_id)
                 asyncio.create_task(semantic_cache_store(prompt, cleaned))
@@ -760,7 +761,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
             yield json.dumps({
                 "model": body["model"],
                 "created_at": datetime.utcnow().isoformat() + "Z",
-                "response": "",
+                "response": cleaned,
                 "done": True
             }).encode() + b"\n"
 
@@ -938,9 +939,10 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
             full_text = "".join(full_chunks)
             if full_text:
-                        asyncio.create_task(process_response_tags(full_text, user_id=current_user_id))
+                full_text = await process_response_tags(full_text, user_id=current_user_id)
 
-            yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4().hex[:12]}', 'object': 'chat.completion.chunk', 'created': int(datetime.utcnow().timestamp()), 'model': body['model'], 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+            # Invia il testo pulito dai tag nell'ultimo chunk
+            yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4().hex[:12]}', 'object': 'chat.completion.chunk', 'created': int(datetime.utcnow().timestamp()), 'model': body['model'], 'choices': [{'index': 0, 'delta': {'content': full_text}, 'finish_reason': 'stop'}]})}\n\n"
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(openai_stream_gen(), media_type="text/event-stream")
