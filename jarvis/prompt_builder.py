@@ -150,6 +150,31 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     web_ctx, clean_msg = await perform_web_search_and_crawl(latest_msg)
     mem_ctx, rag_ctx = "", ""
 
+    # Super-prompt tag preprocessing (dall'input utente) — va QUI prima di qualsiasi uso
+    _user_override_persona = ""
+    _user_override_focus = ""
+    _user_override_lang = ""
+    _user_override_mem_count = 0
+    _super_tag_re = re.compile(r"<(PERSONA|FOCUS|LANG|MEMORY_COUNT)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+    for match in _super_tag_re.finditer(latest_msg):
+        tag_name = match.group(1).upper()
+        _ = match.group(2)  # attrs (unused but captured)
+        tag_content = match.group(3).strip()
+        if tag_name == "PERSONA":
+            _user_override_persona = tag_content
+        elif tag_name == "FOCUS":
+            _user_override_focus = tag_content
+        elif tag_name == "LANG":
+            _user_override_lang = tag_content
+        elif tag_name == "MEMORY_COUNT":
+            try:
+                _user_override_mem_count = max(0, int(tag_content))
+            except ValueError:
+                pass
+    # Rimuove i super-prompt tag dal messaggio prima di inoltrarlo al LLM
+    if _super_tag_re.search(latest_msg):
+        latest_msg = _super_tag_re.sub("", latest_msg).strip()
+
     # Rilevamento progetto: cerca in tutta la conversazione (dal più recente), una sola query Qdrant
     active_project = await detect_project_in_conversation(user_messages)
     
@@ -353,32 +378,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
 
     import datetime
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    # ── Super-prompt tag preprocessing (dall'input utente) ──
-    # Estrae tag di controllo dal messaggio utente prima di costruire il prompt
-    _user_override_persona = ""
-    _user_override_focus = ""
-    _user_override_lang = ""
-    _user_override_mem_count = 0
-    _super_tag_re = re.compile(r"<(PERSONA|FOCUS|LANG|MEMORY_COUNT)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
-    for match in _super_tag_re.finditer(latest_msg):
-        tag_name = match.group(1).upper()
-        tag_attrs = match.group(2)
-        tag_content = match.group(3).strip()
-        if tag_name == "PERSONA":
-            _user_override_persona = tag_content
-        elif tag_name == "FOCUS":
-            _user_override_focus = tag_content
-        elif tag_name == "LANG":
-            _user_override_lang = tag_content
-        elif tag_name == "MEMORY_COUNT":
-            try:
-                _user_override_mem_count = max(0, int(tag_content))
-            except ValueError:
-                pass
-    # Rimuove i super-prompt tag dal messaggio prima di inoltrarlo al LLM
-    if _super_tag_re.search(latest_msg):
-        latest_msg = _super_tag_re.sub("", latest_msg).strip()
 
     if blocks:
         if is_project_query:
