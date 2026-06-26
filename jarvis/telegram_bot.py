@@ -11,6 +11,7 @@ from llm_engine import engine
 import state
 import time
 import asyncio
+import re
 from collections import deque
 import tempfile
 import os
@@ -985,7 +986,25 @@ if TELEGRAM_ENABLED:
                 current_messages.append(message_data)
                 session["messages"].append(message_data)
                 
-                tool_calls = message_data.get("tool_calls", [])
+                tool_calls = message_data.get("tool_calls", []) or []
+                
+                # Fallback: Qwen con chat_format=None emette tool call come testo
+                # invece che nel campo strutturato tool_calls della API
+                if not tool_calls:
+                    from llm_engine import parse_qwen_tool_calls
+                    content = message_data.get("content", "")
+                    tool_calls = parse_qwen_tool_calls(content)
+                    if tool_calls:
+                        # Rimuovi i tag tool_call dal contenuto
+                        import re as _re
+                        clean_content = _re.sub(
+                            r'<\|tool_call\|>.*?<\|tool_call\|>',
+                            '', content, flags=_re.DOTALL
+                        ).strip()
+                        message_data["content"] = clean_content
+                        # Aggiorna anche la cronologia
+                        current_messages[-1]["content"] = clean_content
+                        session["messages"][-1]["content"] = clean_content
                 
                 if not tool_calls:
                     bot_reply = message_data.get("content", "")
@@ -1008,8 +1027,10 @@ if TELEGRAM_ENABLED:
                     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🔧 {tool_res}", disable_notification=True)
 
             # — Delegato a tag_processor.py: parsing centralizzato di TUTTI i tag —
-            from tag_processor import process_all_tags, TagContext, strip_thinking_blocks
+            from tag_processor import process_all_tags, TagContext, strip_thinking_blocks, telegram_safe_format, telegram_prepare_markdown, close_orphaned_tags
             
+            # Pre-processing: chiudi tag orfani (es. <MEMORY> troncato senza </MEMORY>)
+            bot_reply = close_orphaned_tags(bot_reply)
             bot_reply = strip_thinking_blocks(bot_reply)
             tag_ctx = TagContext(
                 user_id=user_id,
@@ -1019,13 +1040,38 @@ if TELEGRAM_ENABLED:
             for msg in feedback:
                 parsed_reply += f"\n\n{msg}"
 
+            # — Preparazione markdown comune: UNA VOLTA sul testo completo —
+            parsed_reply = telegram_prepare_markdown(parsed_reply)
+
             # Note: session["messages"] has already been updated dynamically during the tool loop
 
             # Generazione vocale TTS se input era vocale
             if is_voice:
                 def tts_sync(text, path):
-                    # Rimuoviamo i markdown per il TTS
-                    clean_text = text.replace("*", "").replace("`", "").replace("_", "")
+                    # Rimuoviamo TUTTI i simboli markdown per il TTS
+                    clean_text = text
+                    # Rimuovi blocchi codice
+                    clean_text = re.sub(r'```[\s\S]*?```', '', clean_text)
+                    # Rimuovi formattazione inline
+                    clean_text = re.sub(r'\*\*(.+?)\*\*', r'\1', clean_text)
+                    clean_text = re.sub(r'\*(.+?)\*', r'\1', clean_text)
+                    clean_text = re.sub(r'_(.+?)_', r'\1', clean_text)
+                    clean_text = re.sub(r'`(.+?)`', r'\1', clean_text)
+                    clean_text = re.sub(r'~~(.+?)~~', r'\1', clean_text)
+                    clean_text = re.sub(r'\|\|(.+?)\|\|', r'\1', clean_text)
+                    # Rimuovi link: [text](url) → text
+                    clean_text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', clean_text)
+                    # Rimuovi heading markers
+                    clean_text = re.sub(r'^#{1,6}\s+', '', clean_text, flags=re.MULTILINE)
+                    # Rimuovi bullet e numerazione
+                    clean_text = re.sub(r'^[\*\-\+]\s+', '', clean_text, flags=re.MULTILINE)
+                    clean_text = re.sub(r'^\d+\.\s+', '', clean_text, flags=re.MULTILINE)
+                    # Rimuovi horizontal rules
+                    clean_text = re.sub(r'^[-*_]{3,}\s*$', '', clean_text, flags=re.MULTILINE)
+                    # Thematic breaks
+                    clean_text = clean_text.replace('|', ', ')
+                    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
+                    clean_text = clean_text.strip()
                     tts = gTTS(text=clean_text, lang='it')
                     tts.save(path)
                     
@@ -1037,25 +1083,81 @@ if TELEGRAM_ENABLED:
                     await context.bot.send_voice(chat_id=update.effective_chat.id, voice=audio_file)
                 os.remove(tts_path)
 
-            # Funzione chunking sicura su newline per il testo (inviamo sempre anche il testo)
-            def chunk_message(text, chunk_size=4000):
+            # Funzione chunking sicura: non spezza blocchi markdown a metà
+            def chunk_message_safe(text, chunk_size=4000):
+                """
+                Divide il testo in chunk che rispettano i confini dei blocchi markdown.
+                Non spezza mai:
+                  - *bold* o _italic_ a metà
+                  - `code` o ```code blocks``` a metà
+                  - [text](url) a metà
+                  - Liste o heading a metà
+                """
                 chunks = []
                 while len(text) > chunk_size:
-                    split_at = text.rfind('\n', 0, chunk_size)
-                    if split_at == -1:
-                        split_at = chunk_size
+                    # Trova il punto di split guardando indietro da chunk_size
+                    # Cerca preferenzialmente: doppio newline, poi newline singolo, poi spazio
+                    split_at = -1
+                    
+                    # 1. Cerca doppio newline (fine paragrafo)
+                    dbl_nl = text.rfind('\n\n', 0, chunk_size)
+                    if dbl_nl > chunk_size // 2:
+                        split_at = dbl_nl + 2
+                    else:
+                        # 2. Cerca newline singolo (ma non dentro blockquote, lista, heading)
+                        for candidate in range(min(chunk_size, len(text)), 0, -1):
+                            if text[candidate] == '\n':
+                                # Verifica che non sia dentro un blocco markdown
+                                before = text[max(0, candidate - 3):candidate]
+                                if not any(before.startswith(p) for p in ('---', '===', '```')):
+                                    split_at = candidate + 1
+                                    break
+                    
+                    # 3. Fallback: spazio
+                    if split_at <= 0 or split_at > chunk_size:
+                        split_at = text.rfind(' ', 0, chunk_size)
+                        if split_at > 0:
+                            split_at += 1
+                        else:
+                            split_at = chunk_size
+                    
                     chunks.append(text[:split_at])
                     text = text[split_at:].lstrip()
+                
                 if text:
                     chunks.append(text)
                 return chunks
 
-            for chunk in chunk_message(parsed_reply):
+            # Tentativo multiplo di parse_mode: prima MarkdownV2, poi Markdown, poi plain text
+            for chunk in chunk_message_safe(parsed_reply):
+                sent = False
+                # Tentativo 1: MarkdownV2 (più moderno, supporta strikethrough/spoiler)
                 try:
-                    await msg.reply_text(chunk, parse_mode="Markdown")
-                except Exception as e:
-                    logger.warning(f"Errore parsing Markdown su Telegram: {e}. Fallback plain text.")
-                    await msg.reply_text(chunk)
+                    chunk_v2 = telegram_safe_format(chunk, use_markdown_v2=True)
+                    await msg.reply_text(chunk_v2, parse_mode="MarkdownV2")
+                    sent = True
+                except Exception:
+                    pass
+                
+                if not sent:
+                    # Tentativo 2: Markdown legacy
+                    try:
+                        chunk_legacy = telegram_safe_format(chunk, use_markdown_v2=False)
+                        await msg.reply_text(chunk_legacy, parse_mode="Markdown")
+                        sent = True
+                    except Exception as e:
+                        logger.warning(f"Errore parsing Markdown su Telegram: {e}.")
+                
+                if not sent:
+                    # Tentativo 3: Plain text (strip all markdown)
+                    plain = re.sub(r'\*\*(.+?)\*\*', r'\1', chunk)
+                    plain = re.sub(r'\*(.+?)\*', r'\1', plain)
+                    plain = re.sub(r'_(.+?)_', r'\1', plain)
+                    plain = re.sub(r'`(.+?)`', r'\1', plain)
+                    plain = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', plain)
+                    plain = re.sub(r'~~(.+?)~~', r'\1', plain)
+                    plain = re.sub(r'---+\s*', '', plain)
+                    await msg.reply_text(plain)
 
         except Exception as e:
             logger.error(f"Errore Telegram [{type(e).__module__}.{type(e).__name__}]: {e}")
