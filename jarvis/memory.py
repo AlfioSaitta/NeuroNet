@@ -1,9 +1,11 @@
 """
 Gestione della memoria episodica — Mem0 init e helper per estrazione ricordi.
+
+La logica di parsing dei tag è stata delegata a tag_processor.py.
+Questo modulo si occupa solo di: init Mem0, salvataggio, estrazione ricordi.
 """
 
 import asyncio
-import re
 from functools import partial
 from mem0 import Memory
 
@@ -73,27 +75,20 @@ async def save_to_memory(text, user_id="alfio_dev", project=None):
         return False
 
 
-_STRIP_TAGS_RE = re.compile(r"</?(?:MEMORY|SCHEDULE|NOTIFY_ONCE|NOTIFYONCE|NOTIFY_IN|NOTIFYIN|SSH|TODO_ADD|TODO_DONE)>", re.IGNORECASE)
-_MEMORY_TAG_RE = re.compile(r"<MEMORY>(.*?)</MEMORY>", re.DOTALL | re.IGNORECASE)
-
-
-def strip_action_tags(text):
-    """Rimuove tutti i tag d'azione XML dal testo (MEMORY, SCHEDULE, TODO, etc.)"""
-    return _STRIP_TAGS_RE.sub("", text).strip()
-
-
 async def process_response_tags(response_text, user_id="alfio_dev", project=None):
-    """Post-processa la risposta del LLM: salva i tag <MEMORY> in Mem0,
-    rimuove tutti i tag d'azione, restituisce il testo pulito."""
+    """
+    Post-processa la risposta del LLM: delega a tag_processor.process_all_tags().
+    Mantiene la stessa firma per retrocompatibilità con main.py e altri chiamanti.
+    """
     if not response_text:
         return ""
 
-    # Salva in Mem0 tutti i tag <MEMORY>
-    for match in _MEMORY_TAG_RE.finditer(response_text):
-        text = match.group(1).strip()
-        if text:
-            await save_to_memory(text, user_id, project=project)
-            logger.info(f"🧠 MEMORY tag impresso{ ' ['+project+']' if project else '' }: {text[:100]}")
+    from tag_processor import process_all_tags, TagContext
+    ctx = TagContext(user_id=user_id, project=project)
+    cleaned, feedback = await process_all_tags(response_text, ctx)
 
-    # Rimuovi tutti i tag d'azione
-    return strip_action_tags(response_text)
+    if feedback:
+        for msg in feedback:
+            logger.info(f"📢 Tag feedback: {msg}")
+
+    return cleaned

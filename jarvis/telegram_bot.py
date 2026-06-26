@@ -1007,117 +1007,17 @@ if TELEGRAM_ENABLED:
                     # Mandiamo un feedback live su Telegram per far vedere che sta lavorando
                     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🔧 {tool_res}", disable_notification=True)
 
-            import re
+            # — Delegato a tag_processor.py: parsing centralizzato di TUTTI i tag —
+            from tag_processor import process_all_tags, TagContext, strip_thinking_blocks
             
-            parsed_reply = re.sub(r"<SCHEDULE>.*?</SCHEDULE>", "", bot_reply, flags=re.DOTALL)
-            parsed_reply = re.sub(r"<NOTIFY_ONCE>.*?</NOTIFY_ONCE>", "", parsed_reply, flags=re.DOTALL)
-            parsed_reply = re.sub(r"<NOTIFYONCE>.*?</NOTIFYONCE>", "", parsed_reply, flags=re.DOTALL)
-            parsed_reply = re.sub(r"<NOTIFY_IN>.*?</NOTIFY_IN>", "", parsed_reply, flags=re.DOTALL)
-            parsed_reply = re.sub(r"<NOTIFYIN>.*?</NOTIFYIN>", "", parsed_reply, flags=re.DOTALL)
-            parsed_reply = re.sub(r"<SSH>.*?</SSH>", "", parsed_reply, flags=re.DOTALL)
-            parsed_reply = re.sub(r"<TODO_ADD>.*?</TODO_ADD>", "", parsed_reply, flags=re.DOTALL)
-            parsed_reply = re.sub(r"<TODO_DONE>.*?</TODO_DONE>", "", parsed_reply, flags=re.DOTALL)
-            parsed_reply = re.sub(r"<MEMORY>.*?</MEMORY>", "", parsed_reply, flags=re.DOTALL).strip()
-            
-            # --- Parsing SCHEDULE ---
-            schedule_matches = re.findall(r"<SCHEDULE>(.*?)</SCHEDULE>", bot_reply, re.DOTALL)
-            for match in schedule_matches:
-                try:
-                    cron_expr, prompt_task = match.split("|", 1)
-                    from cron_agent import add_cron_job
-                    success, jid = add_cron_job(cron_expr.strip(), prompt_task.strip(), update.effective_chat.id)
-                    if success:
-                        parsed_reply += f"\n\n⏱️ **Notifica Schedulata**: `{cron_expr.strip()}`"
-                    else:
-                        parsed_reply += f"\n\n❌ **Errore Schedulazione**: {jid}"
-                except Exception as e:
-                    logger.error(f"Errore parsing SCHEDULE: {e}")
-
-            # --- Parsing NOTIFY_ONCE ---
-            notify_once_matches = re.findall(r"<NOTIFY_ONCE>(.*?)</NOTIFY_ONCE>", bot_reply, re.DOTALL)
-            notify_once_matches += re.findall(r"<NOTIFYONCE>(.*?)</NOTIFYONCE>", bot_reply, re.DOTALL)
-            for match in notify_once_matches:
-                try:
-                    date_str, prompt_task = match.split("|", 1)
-                    from cron_agent import add_date_job
-                    success, jid = add_date_job(date_str.strip(), prompt_task.strip(), update.effective_chat.id)
-                    if success:
-                        parsed_reply += f"\n\n🔔 **Promemoria Impostato per**: `{date_str.strip()}`"
-                    else:
-                        parsed_reply += f"\n\n⚠️ **Errore Data**: {jid}"
-                except Exception as e:
-                    logger.error(f"Errore parsing NOTIFY_ONCE: {e}")
-
-            # --- Parsing NOTIFY_IN ---
-            notify_in_matches = re.findall(r"<NOTIFY_IN>(.*?)</NOTIFY_IN>", bot_reply, re.DOTALL)
-            notify_in_matches += re.findall(r"<NOTIFYIN>(.*?)</NOTIFYIN>", bot_reply, re.DOTALL)
-            for match in notify_in_matches:
-                try:
-                    minutes_str, prompt_task = match.split("|", 1)
-                    from cron_agent import add_relative_job
-                    success, jid, computed_date = add_relative_job(int(minutes_str.strip()), prompt_task.strip(), update.effective_chat.id)
-                    if success:
-                        parsed_reply += f"\n\n🔔 **Promemoria tra {minutes_str.strip()} minuti** (alle `{computed_date}`)"
-                    else:
-                        parsed_reply += f"\n\n⚠️ **Errore Timer**: {jid}"
-                except Exception as e:
-                    logger.error(f"Errore parsing NOTIFY_IN: {e}")
-            
-            # --- Parsing SSH ---
-            ssh_matches = re.findall(r"<SSH>(.*?)</SSH>", bot_reply, re.DOTALL)
-            for match in ssh_matches:
-                try:
-                    server_name, command = match.split("|", 1)
-                    parsed_reply += f"\n\n⚙️ **Esecuzione SSH su `{server_name.strip()}` in corso...**"
-                    
-                    async def run_and_reply(srv, cmd, chat_id):
-                        from infrastructure import run_on_server
-                        out = await run_on_server(srv, cmd)
-                        if state.telegram_app and state.telegram_app.bot:
-                            await state.telegram_app.bot.send_message(chat_id=chat_id, text=f"```bash\n{out}\n```", parse_mode="Markdown")
-                    
-                    asyncio.create_task(run_and_reply(server_name.strip(), command.strip(), update.effective_chat.id))
-                except Exception as e:
-                    logger.error(f"Errore parsing SSH: {e}")
-
-            # --- Parsing TODO_ADD ---
-            todo_add_matches = re.findall(r"<TODO_ADD>(.*?)</TODO_ADD>", bot_reply, re.DOTALL)
-            for match in todo_add_matches:
-                try:
-                    parts = match.split("|")
-                    desc = parts[0].strip()
-                    prio = parts[1].strip() if len(parts) > 1 else "media"
-                    dead = parts[2].strip() if len(parts) > 2 else "nessuna"
-                    task_type = parts[3].strip().lower() if len(parts) > 3 else "personale"
-                    from task_manager import add_todo
-                    tid = add_todo(desc, prio, dead, task_type, user_id)
-                    parsed_reply += f"\n\n📝 **Task Aggiunto ({task_type})**: [{tid}] _{desc}_ (Prio: {prio}, Scad: {dead})"
-                except Exception as e:
-                    logger.error(f"Errore parsing TODO_ADD: {e}")
-
-            # --- Parsing TODO_DONE ---
-            todo_done_matches = re.findall(r"<TODO_DONE>(.*?)</TODO_DONE>", bot_reply, re.DOTALL)
-            for match in todo_done_matches:
-                try:
-                    tid = match.strip()
-                    from task_manager import mark_done
-                    success = mark_done(tid, user_id)
-                    if success:
-                        parsed_reply += f"\n\n✅ **Task Completato**: [{tid}]"
-                    else:
-                        parsed_reply += f"\n\n⚠️ **Errore**: Task [{tid}] non trovato o non hai i permessi per completarlo."
-                except Exception as e:
-                    logger.error(f"Errore parsing TODO_DONE: {e}")
-
-            # --- Parsing MEMORY (imprinting) ---
-            memory_matches = re.findall(r"<MEMORY>(.*?)</MEMORY>", bot_reply, re.DOTALL)
-            for match in memory_matches:
-                text = match.strip()
-                if text:
-                    ok = await save_to_memory(text, user_id=user_id)
-                    if ok:
-                        parsed_reply += f"\n\n🧠 **Ricordo impresso**: {text[:100]}{'…' if len(text) > 100 else ''}"
-                        logger.info(f"🧠 MEMORY imprint: {text[:100]}")
+            bot_reply = strip_thinking_blocks(bot_reply)
+            tag_ctx = TagContext(
+                user_id=user_id,
+                chat_id=update.effective_chat.id,
+            )
+            parsed_reply, feedback = await process_all_tags(bot_reply, tag_ctx)
+            for msg in feedback:
+                parsed_reply += f"\n\n{msg}"
 
             # Note: session["messages"] has already been updated dynamically during the tool loop
 
