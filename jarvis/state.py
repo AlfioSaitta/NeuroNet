@@ -47,6 +47,13 @@ last_project_context: dict[str, dict[str, str]] = {}
 # Flag per prevenire watchdog events durante re-indexing
 is_reindexing: bool = False
 
+# — Tag Processor state (gestito da tag_processor.py) —
+last_emotion: str = ""              # Ultima emozione impostata da <EMOTION>
+deepthink_mode: bool = False         # Modalità ragionamento approfondito (<THINK_DEEP/>)
+last_confidence: float = 0.0         # Ultimo punteggio confidenza (<CONFIDENCE>)
+pending_questions: list[str] = []    # Domande in attesa dal LLM (<ASK>)
+forced_rag_project: str | None = None  # Progetto RAG forzato (<RAG>)
+
 
 def get_last_project(user_id: str, conversation_id: str = "default") -> str | None:
     """Restituisce l'ultimo progetto attivo per una conversazione."""

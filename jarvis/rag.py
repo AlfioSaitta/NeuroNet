@@ -110,8 +110,7 @@ class GitignoreFilter:
     def __init__(self, doc_dir=DOC_DIR):
         self.specs = {}
         visited_inodes = set()
-        loop = asyncio.get_event_loop()
-        for root, dirs, files in loop.run_in_executor(None, lambda: list(os.walk(doc_dir, followlinks=True))).result():
+        for root, dirs, files in os.walk(doc_dir, followlinks=True):
             # Evita loop da symlink circolari (NeuroNet/data/documents/NeuroNet)
             try:
                 st = os.stat(root)
@@ -1670,6 +1669,25 @@ async def semantic_cache_store(prompt: str, response: str):
                 )]
             )
     except Exception as e: logger.warning(f"Errore silenziato: {e}")
+
+async def semantic_cache_clear():
+    """Cancella tutta la cache semantica ricreando la collezione."""
+    try:
+        col_name = f"semantic_cache_{VECTOR_DB_VERSION}"
+        try:
+            await state.qdrant.delete_collection(col_name)
+        except Exception:
+            pass  # Non esiste ancora
+        from config import EMBEDDING_DIMS
+        await state.qdrant.create_collection(
+            collection_name=col_name,
+            vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
+        )
+        logger.info(f"🗑️ Cache semantica resettata: {col_name}")
+        return True
+    except Exception as e:
+        logger.warning(f"Errore semantic_cache_clear: {e}")
+        return False
 
 
 # ==============================================================================
