@@ -75,17 +75,29 @@ async def save_to_memory(text, user_id="alfio_dev", project=None):
         return False
 
 
-async def process_response_tags(response_text, user_id="alfio_dev", project=None):
+async def process_response_tags(response_text, user_id="alfio_dev", project=None, model_family=None):
     """
     Post-processa la risposta del LLM: delega a tag_processor.process_all_tags().
     Mantiene la stessa firma per retrocompatibilità con main.py e altri chiamanti.
+    
+    Args:
+        model_family: Famiglia modello per filtrare thinking patterns.
+                      None = auto-detect da MODEL_PROFILE, "all" = legacy (tutti i pattern)
     """
     if not response_text:
         return ""
 
+    # Auto-detect model_family se non specificato
+    if model_family is None:
+        try:
+            from config import MODEL_PROFILE
+            model_family = MODEL_PROFILE.family
+        except Exception:
+            model_family = "all"
+
     from tag_processor import process_all_tags, TagContext
     ctx = TagContext(user_id=user_id, project=project)
-    cleaned, feedback = await process_all_tags(response_text, ctx)
+    cleaned, feedback = await process_all_tags(response_text, ctx, model_family=model_family)
 
     if feedback:
         for msg in feedback:

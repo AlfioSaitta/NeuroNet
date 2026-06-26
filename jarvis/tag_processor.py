@@ -22,51 +22,85 @@ from typing import Optional, Callable, Awaitable
 # ──────────────────────────────────────────────
 # Ogni entry: (regex_pattern, replacement)
 # Applicati in ordine prima dei tag action.
-THINKING_PATTERNS: list[tuple[str, str]] = [
+#
+# Ora con FAMILY_MAP per filtrare pattern per famiglia modello.
+# Se model_family è noto (da MODEL_PROFILE), si applicano solo
+# i pattern rilevanti, riducendo falsi positivi.
+THINKING_PATTERNS: list[tuple[str, str, str]] = [
+    # (pattern, replacement, model_family_tag)
+    # model_family_tag: "all" = sempre, altrimenti famiglia specifica (qwen, gemma, deepseek, llama, mistral, phi, command-r)
+    # NOTA: usare SEMPRE raw strings (r"...") per evitare che | venga interpretato
+    # come alternanza regex invece di pipe letterale.
+    
+    # ── Qwen / QwQ ──
+    # Qwen: <|im_start|>...<|im_end|> blocks (chatml leftover)
+    (r'<\|im_start\|>.*?<\|im_end\|>', "", "qwen"),
+    # Qwen: <|im_start|> or <|im_end|> isolated
+    (r'<\|im_start\|>|<\|im_end\|>', "", "qwen"),
+    # Qwen thinking: <|think|>...</think> or <|think|>...<|/think|>
+    (r'(?s)<\|think\|>.*?(?:</?think>|<\|think\|>)\s*', "", "qwen"),
+    # Qwen tool_call tags
+    (r'(?s)<\|tool_call\|>.*?<\|tool_call\|>\s*', "", "qwen"),
+    
+    # ── DeepSeek ──
+    # DeepSeek: <|think|>...</end> or <|think|>...<|end|>
+    (r'(?s)<\|think\|>.*?(?:</?end>?|<\|end\|>)\s*', "", "deepseek"),
+    # DeepSeek R1: <|reflect|>...</|reflect|> and <|plan|>...</|plan|>
+    (r'(?s)<\|reflect\|>.*?</\|reflect\|>\s*', "", "deepseek"),
+    (r'(?s)<\|plan\|>.*?</\|plan\|>\s*', "", "deepseek"),
+    # DeepSeek: ```thought ... ```
+    (r'(?s)```thought\s*.*?```\s*', "", "deepseek"),
+    
+    # ── Gemma ──
     # Gemma 4: <|channel>thought\n...\n<channel|>
-    (r'<\|channel>thought\s*.*?<channel\|>\s*', ''),
-    # Generic channel leftovers
-    (r'<\|?channel\|?>', ''),
-    # DeepSeek / Gemma: <|think|>...</end> or <|think|>...<|end|>
-    (r'(?s)<\|think\|>.*?(?:</?end>?|<\|end\|>)\s*', ''),
-    # DeepSeek R1:  <|reflect|>...</|reflect|> and  <|plan|>...</|plan|>
-    (r'(?s)<\|reflect\|>.*?</\|reflect\|>\s*', ''),
-    (r'(?s)<\|plan\|>.*?</\|plan\|>\s*', ''),
+    (r'<\|channel>thought\s*.*?<channel\|>\s*', "", "gemma"),
+    (r'<\|?channel\|?>', "", "gemma"),
+    # Gemma: <|think|>...</end> or <|think|>...<|end|>
+    (r'(?s)<\|think\|>.*?(?:</?end>?|<\|end\|>)\s*', "", "gemma"),
+    
+    # ── Mistral / Codestral ──
+    (r'(?s)\[THINK\].*?\[/THINK\]\s*', "", "mistral"),
+    (r'(?s)```reasoning\s*.*?```\s*', "", "mistral"),
+    
+    # ── Command R+ (Cohere) ──
+    (r'(?s)<results>.*?</results>\s*', "", "command-r"),
+    
+    # ── Phi ──
+    (r'(?s)```think\s*.*?```\s*', "", "phi"),
+    
+    # ── Applicati SEMPRE (cross-model) ──
+    # Residual ChatML tags (safety net per chat_format=None)
+    (r'<\|im_start\|>.*?<\|im_end\|>', "", "all"),
+    (r'<\|im_start\|>|<\|im_end\|>', "", "all"),
     # Solar Pro: [ANALYSIS]...[/ANALYSIS]
-    (r'(?s)\[ANALYSIS\].*?\[/ANALYSIS\]\s*', ''),
-    # ChatML: <|im_start|>...<|im_end|> blocks
-    (r'<\|im_start\|>.*?<\|im_end\|>', ''),
-    # ChatML: leftover single tags
-    (r'<\|im_start\|>|<\|im_end\|>', ''),
-    # Harmony: <|start|>...<|end|> blocks (OpenAI GPT-5 style)
-    (r'(?s)<\|start\|>.*?<\|end\|>\s*', ''),
-    # Mistral / Codestral: [THINK]...[/THINK]
-    (r'(?s)\[THINK\].*?\[/THINK\]\s*', ''),
-    # Mistral:  artifact blocks (Mistral Large 2 style)
-    (r'(?s)```reasoning\s*.*?```\s*', ''),
-    # Cohere Command R+: <results>...</results> internal reasoning
-    (r'(?s)<results>.*?</results>\s*', ''),
-    # Phi-4:  ...  blocks
-    (r'(?s)```think\s*.*?```\s*', ''),
-    # QwQ / DeepSeek:  ...  (step-by-step reasoning)
-    (r'(?s)```thought\s*.*?```\s*', ''),
+    (r'(?s)\[ANALYSIS\].*?\[/ANALYSIS\]\s*', "", "all"),
+    # Harmony: <|start|>...<|end|> blocks
+    (r'(?s)<\|start\|>.*?<\|end\|>\s*', "", "all"),
     # Text prefixes: "thought:", "thinking:", "reasoning:", "reflection:", "analysis:"
-    (r'(?i)^\s*(?:thought|thinking|reasoning|reflection|analysis):.*?\n\s*', ''),
-    # Step-by-step numbered reasoning prefixes: "Step 1:", "Step 2:", etc.
-    (r'(?i)^\s*step\s+\d+[:.].*?\n\s*', ''),
-    # Residual newlines from stripping
-    (r'\n{3,}', '\n\n'),
+    (r'(?i)^\s*(?:thought|thinking|reasoning|reflection|analysis):.*?\n\s*', "", "all"),
+    # Step-by-step numbered reasoning prefixes
+    (r'(?i)^\s*step\s+\d+[:.].*?\n\s*', "", "all"),
+    # Residual newlines
+    (r'\n{3,}', "\n\n", "all"),
 ]
 
-# Compiled cache
-_THINKING_RE: list[tuple[re.Pattern, str]] = [
-    (re.compile(p, re.DOTALL), r) for p, r in THINKING_PATTERNS
+# Compiled cache: pre-compila tutti i pattern
+_THINKING_RE: list[tuple[re.Pattern, str, str]] = [
+    (re.compile(p, re.DOTALL), r, f) for p, r, f in THINKING_PATTERNS
 ]
 
 
-def strip_thinking_blocks(text: str) -> str:
-    """Rimuove dal testo tutti i blocchi di reasoning/thinking dei vari modelli."""
-    for pattern, replacement in _THINKING_RE:
+def strip_thinking_blocks(text: str, model_family: str = "all") -> str:
+    """
+    Rimuove dal testo i blocchi di reasoning/thinking.
+    
+    Se model_family è specificato (es. "qwen", "gemma"), applica solo
+    i pattern rilevanti per quella famiglia + quelli "all".
+    Con "all" (default) applica TUTTI i pattern (comportamento legacy).
+    """
+    for pattern, replacement, tag in _THINKING_RE:
+        if model_family != "all" and tag != "all" and tag != model_family:
+            continue
         text = pattern.sub(replacement, text)
     return text.strip()
 
@@ -549,6 +583,7 @@ def strip_all_tags(text: str) -> str:
 async def process_all_tags(
     text: str,
     context: Optional[TagContext] = None,
+    model_family: str = "all",
 ) -> tuple[str, list[str]]:
     """
     Funzione principale: processa TUTTI i tag nel testo.
@@ -564,6 +599,8 @@ async def process_all_tags(
     Args:
         text: Testo grezzo della risposta LLM
         context: Contesto opzionale (user_id, project, chat_id)
+        model_family: Famiglia modello per filtrare thinking patterns
+                      ("all" = tutti, "qwen", "gemma", "deepseek", ...)
 
     Returns:
         (cleaned_text, feedback_messages)
@@ -577,8 +614,8 @@ async def process_all_tags(
     # Step 0: Chiudi tag orfani (es. <MEMORY> senza </MEMORY> per troncamento)
     text = close_orphaned_tags(text)
 
-    # Step 1: Pulisci blocchi di thinking/reasoning
-    text = strip_thinking_blocks(text)
+    # Step 1: Pulisci blocchi di thinking/reasoning (ora model-aware)
+    text = strip_thinking_blocks(text, model_family=model_family)
 
     # Step 2: Estrai e processa tutti i tag
     feedback: list[str] = []
@@ -621,6 +658,7 @@ async def process_and_clean(
     user_id: str = "alfio_dev",
     project: Optional[str] = None,
     chat_id: Optional[int] = None,
+    model_family: str = "all",
 ) -> str:
     """
     Versione semplificata: processa tag, restituisce solo il testo pulito.
@@ -628,7 +666,7 @@ async def process_and_clean(
     Utile per chiamate API che non vogliono gestire feedback espliciti.
     """
     ctx = TagContext(user_id=user_id, project=project, chat_id=chat_id)
-    cleaned, feedback = await process_all_tags(text, ctx)
+    cleaned, feedback = await process_all_tags(text, ctx, model_family=model_family)
     if feedback:
         from config import logger
         for msg in feedback:

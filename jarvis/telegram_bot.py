@@ -988,12 +988,19 @@ if TELEGRAM_ENABLED:
                 
                 tool_calls = message_data.get("tool_calls", []) or []
                 
-                # Fallback: Qwen con chat_format=None emette tool call come testo
-                # invece che nel campo strutturato tool_calls della API
+                # Fallback: modelli raw (chat_format=None) emettono tool call come
+                # testo invece di tool_calls strutturati. Rileviamo dinamicamente
+                # dal MODEL_PROFILE aggiornato dopo il caricamento GGUF.
                 if not tool_calls:
-                    from llm_engine import parse_qwen_tool_calls
-                    content = message_data.get("content", "")
-                    tool_calls = parse_qwen_tool_calls(content)
+                    from config import MODEL_PROFILE
+                    _needs_raw_parse = (
+                        MODEL_PROFILE.chat_format is None
+                        or MODEL_PROFILE.family in ("qwen", "qwq")
+                    )
+                    if _needs_raw_parse:
+                        from llm_engine import parse_qwen_tool_calls
+                        content = message_data.get("content", "")
+                        tool_calls = parse_qwen_tool_calls(content)
                     if tool_calls:
                         # Rimuovi i tag tool_call dal contenuto
                         import re as _re
@@ -1027,16 +1034,17 @@ if TELEGRAM_ENABLED:
                     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🔧 {tool_res}", disable_notification=True)
 
             # — Delegato a tag_processor.py: parsing centralizzato di TUTTI i tag —
-            from tag_processor import process_all_tags, TagContext, strip_thinking_blocks, telegram_safe_format, telegram_prepare_markdown, close_orphaned_tags
+            from tag_processor import process_all_tags, TagContext, telegram_safe_format, telegram_prepare_markdown
+            from config import MODEL_PROFILE as _mdl
             
-            # Pre-processing: chiudi tag orfani (es. <MEMORY> troncato senza </MEMORY>)
-            bot_reply = close_orphaned_tags(bot_reply)
-            bot_reply = strip_thinking_blocks(bot_reply)
             tag_ctx = TagContext(
                 user_id=user_id,
                 chat_id=update.effective_chat.id,
             )
-            parsed_reply, feedback = await process_all_tags(bot_reply, tag_ctx)
+            # process_all_tags() gestisce già internamente:
+            #   - close_orphaned_tags
+            #   - strip_thinking_blocks (con model_family)
+            parsed_reply, feedback = await process_all_tags(bot_reply, tag_ctx, model_family=_mdl.family)
             for msg in feedback:
                 parsed_reply += f"\n\n{msg}"
 

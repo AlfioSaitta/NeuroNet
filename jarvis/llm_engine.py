@@ -210,13 +210,17 @@ class LlamaEngine:
         # --- Thinking Mode (Gemma/DeepSeek/QwQ) ---
         # Verifica dal model profile se il modello caricato supporta <|think|>
         from config import LLM_THINKING_MODE, MODEL_PROFILE
+        _thinking_tag = "<|think|>"
+        # Se il chat_format è gemma, usa [Thinking] invece di <|think|>
+        if MODEL_PROFILE.chat_format == "gemma":
+            _thinking_tag = "[Thinking]"
         if LLM_THINKING_MODE and MODEL_PROFILE.thinking_support and messages:
             processed_messages = []
             for msg in messages:
                 if isinstance(msg, dict) and msg.get("role") == "system":
                     content = msg.get("content", "")
-                    if not content.startswith("<|think|>"):
-                        msg = {**msg, "content": "<|think|>\n" + content}
+                    if _thinking_tag not in content:
+                        msg = {**msg, "content": f"{_thinking_tag}\n" + content}
                 processed_messages.append(msg)
             messages = processed_messages
         # ----------------------------
@@ -270,6 +274,7 @@ class LlamaEngine:
                 
                 if stream:
                     async def external_async_generator():
+                        _role_sent = False
                         async with httpx.AsyncClient(timeout=120.0) as client:
                             async with client.stream("POST", f"{EXTERNAL_GPU_URL.rstrip('/')}/api/chat", json=payload) as response:
                                 response.raise_for_status()
@@ -277,7 +282,11 @@ class LlamaEngine:
                                     if line:
                                         try:
                                             data = json.loads(line)
-                                            yield {"choices": [{"delta": {"content": data.get("response", "")}}]}
+                                            delta = {"role": "assistant", "content": data.get("response", "")} if not _role_sent else {"content": data.get("response", "")}
+                                            _role_sent = True
+                                            done = data.get("done", False)
+                                            chunk = {"choices": [{"delta": delta, "finish_reason": "stop" if done else None}]}
+                                            yield chunk
                                         except Exception:
                                             pass
                     return external_async_generator()
@@ -468,6 +477,10 @@ def parse_qwen_tool_calls(text: str) -> list[dict]:
     usarli nel campo strutturato tool_calls della API. Questa funzione
     rileva il pattern <|tool_call|>...<|tool_call|> e lo converte in
     formato tool_call standard.
+    
+    IMPORTANTE: Se il chat_format è configurato correttamente (es. "chatml"),
+    llama-cpp-python gestisce tool_calls strutturati automaticamente e
+    questo fallback non serve. Attivato solo per modelli raw (chat_format=None).
     
     Formati supportati:
       <|tool_call|>call:function_name{param:"value"}<|tool_call|>

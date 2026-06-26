@@ -652,7 +652,10 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             # Processa TUTTI i tag dalla risposta completa (MEMORY, SCHEDULE, SSH, ecc.)
             full_text = "".join(full_chunks)
             if full_text:
-                full_text = await process_response_tags(full_text, user_id=current_user_id)
+                cleaned = await process_response_tags(full_text, user_id=current_user_id)
+                if not cleaned:
+                    cleaned = full_text  # fallback: mantieni originale se la pulizia svuota tutto
+                full_text = cleaned
 
             # Send final done message con testo pulito dai tag
             yield json.dumps({
@@ -753,9 +756,11 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
             
             # Salva prompt utente + processa tag in background
             asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
-            cleaned = ""
+            cleaned = final_content
             if final_content:
                 cleaned = await process_response_tags(final_content, user_id=current_user_id)
+                if not cleaned:
+                    cleaned = final_content  # fallback: mantieni originale se la pulizia svuota
                 asyncio.create_task(semantic_cache_store(prompt, cleaned))
             
             yield json.dumps({
@@ -874,6 +879,12 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
         options["num_predict"] = body["max_tokens"]
     if body.get("top_p") is not None:
         options["top_p"] = body["top_p"]
+    if body.get("stop") is not None:
+        stop_seq = body["stop"]
+        if isinstance(stop_seq, list):
+            options["stop"] = stop_seq
+        elif isinstance(stop_seq, str):
+            options["stop"] = [stop_seq]
 
     ollama_messages = [{"role": m["role"], "content": m["content"]} for m in raw_messages]
 
@@ -896,6 +907,9 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
         choice = response["choices"][0]["message"]
         content = choice.get("content", "")
         cleaned = await process_response_tags(content, user_id=current_user_id)
+        # Se process_response_tags rimuove tutto, mantieni il contenuto originale
+        if not cleaned and content:
+            cleaned = content
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion",
@@ -921,28 +935,33 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                 return
 
             full_chunks = []
+            role_sent = False
             async for chunk in gen:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
                     delta = chunk["choices"][0].get("delta", {})
                     content = delta.get("content", "")
-                    if not content:
-                        continue
-                    full_chunks.append(content)
-                    openai_chunk = {
-                        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                        "object": "chat.completion.chunk",
-                        "created": int(datetime.utcnow().timestamp()),
-                        "model": body["model"],
-                        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}]
-                    }
-                    yield f"data: {json.dumps(openai_chunk)}\n\n"
+                    finish_reason = chunk["choices"][0].get("finish_reason")
 
+                    if not role_sent:
+                        # Primo chunk: annuncia ruolo assistant + eventuale contenuto iniziale
+                        role_sent = True
+                        yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4().hex[:12]}', 'object': 'chat.completion.chunk', 'created': int(datetime.utcnow().timestamp()), 'model': body['model'], 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': content}, 'finish_reason': None}]})}\n\n"
+                    else:
+                        # Chunks intermedi: solo contenuto
+                        delta_dict = {"content": content} if content else {}
+                        yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4().hex[:12]}', 'object': 'chat.completion.chunk', 'created': int(datetime.utcnow().timestamp()), 'model': body['model'], 'choices': [{'index': 0, 'delta': delta_dict, 'finish_reason': finish_reason}]})}\n\n"
+
+                    if content:
+                        full_chunks.append(content)
+
+                    if finish_reason:
+                        break
+
+            # Processa i tag d'azione (MEMORY, SSH, SCHEDULE, ecc.) silenziosamente
             full_text = "".join(full_chunks)
             if full_text:
-                full_text = await process_response_tags(full_text, user_id=current_user_id)
+                await process_response_tags(full_text, user_id=current_user_id)
 
-            # Invia il testo pulito dai tag nell'ultimo chunk
-            yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4().hex[:12]}', 'object': 'chat.completion.chunk', 'created': int(datetime.utcnow().timestamp()), 'model': body['model'], 'choices': [{'index': 0, 'delta': {'content': full_text}, 'finish_reason': 'stop'}]})}\n\n"
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(openai_stream_gen(), media_type="text/event-stream")
