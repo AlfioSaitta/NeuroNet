@@ -10,7 +10,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Scrive o sovrascrive un file fisico all'interno del progetto dell'utente. Usa questo tool per editare il codice.",
+            "description": "Scrive o sovrascrive un file fisico all'interno del progetto dell'utente. Usa questo tool per editare il codice. Richiede autorizzazione.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -25,7 +25,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "delete_file",
-            "description": "Elimina un file fisico dal progetto dell'utente.",
+            "description": "Elimina un file fisico dal progetto dell'utente. Richiede autorizzazione.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -39,7 +39,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Legge il contenuto completo di un file fisico per analizzarlo.",
+            "description": "Legge il contenuto completo di un file fisico per analizzarlo. NON richiede autorizzazione.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -53,7 +53,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "replace_in_file",
-            "description": "Sostituisce un blocco di testo esatto all'interno di un file fisico. Ideale per fare modifiche mirate a file senza sovrascriverli per intero.",
+            "description": "Sostituisce un blocco di testo esatto all'interno di un file fisico. Ideale per fare modifiche mirate a file senza sovrascriverli per intero. Richiede autorizzazione.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -68,13 +68,27 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "list_directory",
+            "description": "Elenca i file e le cartelle in una directory del progetto. NON richiede autorizzazione. Usa questo tool quando l'utente chiede di vedere/elencare/esplorare i file in una cartella, o quando dice 'esegui' dopo che hai suggerito di listare una directory. I file di codice (.py, .go, .ts, .tsx, .js, .rs, .java, .c, .cpp, .sql, .yaml, .md, .json, .txt, .html, .css) vengono mostrati per primi.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Percorso relativo al progetto (es. '' per la root del progetto, 'SlotBuilder/' per una sotto-directory)"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_shell_command",
-            "description": "Esegue un comando bash nel container (es. git diff, git commit, ls, grep). L'LLM PUÒ usarlo per ispezionare il progetto o fare commit/push.",
+            "description": "Esegue un comando bash nel container. Per comandi DISTRUTTIVI (git commit, git push, rm, mv, touch, mkdir, write) richiede autorizzazione. Per comandi READ-ONLY (ls, find, cat, head, tail, grep, diff, pwd, stat, which, file, sort, cut, wc, du, df, uptime, echo, date, whoami, id, uname, ps) NON richiede autorizzazione. Usalo per ispezionare il progetto (ls, find, grep, cat), per informazioni di sistema, o quando l'utente dice 'esegui' dopo aver chiesto un comando.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Il comando bash da eseguire."},
-                    "directory": {"type": "string", "description": "La cartella di lavoro in cui eseguire il comando (es. cartella/)."}
+                    "directory": {"type": "string", "description": "La cartella di lavoro in cui eseguire il comando (es. SlotBuilder/). Default: root del progetto."}
                 },
                 "required": ["command"]
             }
@@ -175,19 +189,61 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
                     return "⚠️ ERRORE: target_text non trovato nel file. Forse l'indentazione o i ritorni a capo non combaciano esattamente. Usa read_file per assicurarti del contenuto esatto."
             return "⚠️ File non trovato."
 
+        elif name == "list_directory":
+            rel_path = args.get("path", "")
+            target_dir = resolve_path(rel_path) if rel_path else DOC_DIR
+            
+            if not os.path.isdir(target_dir):
+                return f"⚠️ Directory non trovata: {rel_path or '(root)'}"
+            
+            items = sorted(os.listdir(target_dir))
+            dirs = []
+            files_code = []
+            files_other = []
+            for item in items:
+                if item.startswith('.'):
+                    continue
+                full = os.path.join(target_dir, item)
+                if os.path.isdir(full):
+                    dirs.append(f"📁 {item}/")
+                elif any(item.endswith(ext) for ext in ('.py', '.go', '.ts', '.tsx', '.js', '.jsx', '.rs', '.java', '.c', '.cpp', '.h', '.hpp', '.sql', '.yaml', '.yml', '.md', '.json', '.txt', '.html', '.css', '.sh', '.toml')):
+                    files_code.append(f"📄 {item}")
+                else:
+                    files_other.append(f"📄 {item}")
+            
+            lines = [f"📂 *{rel_path or 'Root'}* ({len(dirs)} dirs, {len(files_code)} code files, {len(files_other)} altri):"]
+            if dirs:
+                lines.append("\n📁 **Cartelle:**")
+                lines.extend(dirs)
+            if files_code:
+                lines.append("\n📄 **File di codice:**")
+                lines.extend(files_code)
+            if files_other:
+                lines.append("\n📄 **Altri file:**")
+                lines.extend(files_other)
+            if not dirs and not files_code and not files_other:
+                lines.append("\n_Cartella vuota._")
+            
+            return "\n".join(lines)
+            
         elif name == "run_shell_command":
             cmd = args["command"]
             rel_dir = args.get("directory", "")
             target_dir = resolve_path(rel_dir) if rel_dir else DOC_DIR
             
-            approved = await ask_confirmation(bot, chat_id, f"Esecuzione bash in {target_dir}:\n$ {cmd}")
-            if not approved:
-                return f"❌ Comando rifiutato dall'utente."
-            
-            ALLOWED_COMMANDS = ["ls", "cat", "head", "tail", "wc", "find", "grep", "pwd", "echo", "date", "whoami", "id", "uname", "df", "du", "ps", "uptime", "which", "file", "stat", "diff", "sort", "cut"]
+            READONLY_COMMANDS = ["ls", "find", "cat", "head", "tail", "grep", "pwd", "echo", "date", "whoami", "id", "uname", "df", "du", "ps", "uptime", "which", "file", "stat", "diff", "sort", "cut", "wc", "printenv"]
             base_cmd = cmd.strip().split()[0] if cmd.strip() else ""
+            ALLOWED_COMMANDS = READONLY_COMMANDS + ["git", "mkdir", "touch", "rm", "mv", "cp", "chmod", "chown"]
+            
             if base_cmd not in ALLOWED_COMMANDS:
                 return f"❌ Comando '{cmd}' non consentito. Comandi permessi: {', '.join(ALLOWED_COMMANDS)}"
+            
+            # Salta conferma per comandi read-only (esecuzione immediata)
+            needs_confirmation = base_cmd not in READONLY_COMMANDS
+            if needs_confirmation:
+                approved = await ask_confirmation(bot, chat_id, f"Esecuzione bash in {target_dir}:\n$ {cmd}")
+                if not approved:
+                    return f"❌ Comando rifiutato dall'utente."
             
             import subprocess
             try:
