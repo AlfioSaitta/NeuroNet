@@ -350,7 +350,7 @@ async def lifespan(app: FastAPI):
     if MCP_ENABLED and MCP_AUTO_INIT:
         try:
             from mcp_client import init_mcp_from_config, get_mcp_manager
-            # Scan default config paths (.mcp.json, opencode.json, etc.)
+            # Scan default config paths (.mcp.json, etc.)
             total = await init_mcp_from_config()
             if total > 0:
                 logger.info(f"🔌 MCP: {total} servers initialized from config files")
@@ -358,9 +358,8 @@ async def lifespan(app: FastAPI):
                 # Register skill-embedded MCP servers
                 if MCP_ENABLED:
                     try:
-                        from skills_manager import update_skill_mcp_servers
-                        from config import DOC_DIR
-                        reg_count = update_skill_mcp_servers(project_root=DOC_DIR)
+                        from skills_manager import register_skill_mcp_servers
+                        reg_count = register_skill_mcp_servers()
                         if reg_count > 0:
                             logger.info(f"🔌 MCP: {reg_count} skill-embedded servers registered")
                             # Re-init to pick up new servers
@@ -876,7 +875,7 @@ async def ollama_version():
     return {"version": "0.1.27"}
 
 # ==============================================================================
-# OPENAI-COMPATIBLE ENDPOINTS (per OpenCode e altri tool)
+# OPENAI-COMPATIBLE ENDPOINTS
 # ==============================================================================
 
 class OpenAIMessage(BaseModel):
@@ -898,7 +897,7 @@ async def openai_models():
         "object": "list",
         "data": [
             {
-                "id": "qwen2.5-coder:latest",
+                "id": OLLAMA_MODEL,
                 "object": "model",
                 "created": 1710000000,
                 "owned_by": "ollama"
@@ -965,7 +964,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion",
             "created": int(datetime.utcnow().timestamp()),
-            "model": body["model"],
+            "model": OLLAMA_MODEL,
             "choices": [
                 {
                     "index": 0,
@@ -985,6 +984,10 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                 yield f"data: {json.dumps({'error': gen['error']})}\n\n"
                 return
 
+            # Single response-scoped ID + timestamp (OpenAI spec: all chunks share the same id)
+            response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+            response_created = int(datetime.utcnow().timestamp())
+
             full_chunks = []
             role_sent = False
             async for chunk in gen:
@@ -994,13 +997,16 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                     finish_reason = chunk["choices"][0].get("finish_reason")
 
                     if not role_sent:
-                        # Primo chunk: annuncia ruolo assistant + eventuale contenuto iniziale
+                        # Primo chunk: annuncia solo il ruolo (mai content vuoto — confonde AI SDK v6)
                         role_sent = True
-                        yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4().hex[:12]}', 'object': 'chat.completion.chunk', 'created': int(datetime.utcnow().timestamp()), 'model': body['model'], 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': content}, 'finish_reason': None}]})}\n\n"
+                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
+                        # Se il chunk corrente ha già del contenuto, emettilo subito come secondo chunk
+                        if content:
+                            yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': {'content': content}, 'finish_reason': None}]})}\n\n"
                     else:
-                        # Chunks intermedi: solo contenuto
+                         # Chunks intermedi: solo contenuto
                         delta_dict = {"content": content} if content else {}
-                        yield f"data: {json.dumps({'id': f'chatcmpl-{uuid.uuid4().hex[:12]}', 'object': 'chat.completion.chunk', 'created': int(datetime.utcnow().timestamp()), 'model': body['model'], 'choices': [{'index': 0, 'delta': delta_dict, 'finish_reason': finish_reason}]})}\n\n"
+                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': delta_dict, 'finish_reason': finish_reason}]})}\n\n"
 
                     if content:
                         full_chunks.append(content)
@@ -1022,9 +1028,9 @@ async def ollama_tags():
     return {
         "models": [
             {
-                "name": "qwen2.5-coder:latest",
-                "model": "qwen2.5-coder:latest",
-                "details": {"families": ["qwen2"]}
+                "name": OLLAMA_MODEL,
+                "model": OLLAMA_MODEL,
+                "details": {"families": ["gemma"]}
             },
             {
                 "name": "nomic-embed-text:latest",
@@ -1044,11 +1050,11 @@ async def ollama_ps():
     return {
         "models": [
             {
-                "name": "qwen2.5-coder:latest",
-                "model": "qwen2.5-coder:latest",
+                "name": OLLAMA_MODEL,
+                "model": OLLAMA_MODEL,
                 "size": 2438740416,
                 "size_vram": 2438740416,
-                "details": {"families": ["qwen2"]}
+                "details": {"families": ["gemma"]}
             },
             {
                 "name": "nomic-embed-text:latest",
