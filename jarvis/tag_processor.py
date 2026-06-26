@@ -29,6 +29,9 @@ THINKING_PATTERNS: list[tuple[str, str]] = [
     (r'<\|?channel\|?>', ''),
     # DeepSeek / Gemma: <|think|>...</end> or <|think|>...<|end|>
     (r'(?s)<\|think\|>.*?(?:</?end>?|<\|end\|>)\s*', ''),
+    # DeepSeek R1:  <|reflect|>...</|reflect|> and  <|plan|>...</|plan|>
+    (r'(?s)<\|reflect\|>.*?</\|reflect\|>\s*', ''),
+    (r'(?s)<\|plan\|>.*?</\|plan\|>\s*', ''),
     # Solar Pro: [ANALYSIS]...[/ANALYSIS]
     (r'(?s)\[ANALYSIS\].*?\[/ANALYSIS\]\s*', ''),
     # ChatML: <|im_start|>...<|im_end|> blocks
@@ -37,8 +40,20 @@ THINKING_PATTERNS: list[tuple[str, str]] = [
     (r'<\|im_start\|>|<\|im_end\|>', ''),
     # Harmony: <|start|>...<|end|> blocks (OpenAI GPT-5 style)
     (r'(?s)<\|start\|>.*?<\|end\|>\s*', ''),
-    # Text prefixes: "thought:", "thinking:", "reasoning:"
-    (r'(?i)^\s*(?:thought|thinking|reasoning):.*?\n\s*', ''),
+    # Mistral / Codestral: [THINK]...[/THINK]
+    (r'(?s)\[THINK\].*?\[/THINK\]\s*', ''),
+    # Mistral:  artifact blocks (Mistral Large 2 style)
+    (r'(?s)```reasoning\s*.*?```\s*', ''),
+    # Cohere Command R+: <results>...</results> internal reasoning
+    (r'(?s)<results>.*?</results>\s*', ''),
+    # Phi-4:  ...  blocks
+    (r'(?s)```think\s*.*?```\s*', ''),
+    # QwQ / DeepSeek:  ...  (step-by-step reasoning)
+    (r'(?s)```thought\s*.*?```\s*', ''),
+    # Text prefixes: "thought:", "thinking:", "reasoning:", "reflection:", "analysis:"
+    (r'(?i)^\s*(?:thought|thinking|reasoning|reflection|analysis):.*?\n\s*', ''),
+    # Step-by-step numbered reasoning prefixes: "Step 1:", "Step 2:", etc.
+    (r'(?i)^\s*step\s+\d+[:.].*?\n\s*', ''),
     # Residual newlines from stripping
     (r'\n{3,}', '\n\n'),
 ]
@@ -559,6 +574,9 @@ async def process_all_tags(
     if context is None:
         context = TagContext()
 
+    # Step 0: Chiudi tag orfani (es. <MEMORY> senza </MEMORY> per troncamento)
+    text = close_orphaned_tags(text)
+
     # Step 1: Pulisci blocchi di thinking/reasoning
     text = strip_thinking_blocks(text)
 
@@ -624,6 +642,333 @@ def register_tag(tag: TagDef) -> None:
     # Ricostruisce la strip regex
     global _STRIP_ALL_RE
     _STRIP_ALL_RE = _build_strip_regex()
+
+
+def close_orphaned_tags(text: str) -> str:
+    """
+    Pre-processing: rileva tag aperti ma non chiusi alla FINE del testo
+    e li chiude automaticamente, permettendo a process_all_tags() di
+    processarli correttamente.
+
+    Esempio:
+      Input: "...ecco le info<MEMORY>fatto importante"
+      Output: "...ecco le info<MEMORY>fatto importante</MEMORY>"
+
+    Gestisce anche tag con contenuto che include < (es. codice dentro tag):
+      Input: "...<MEMORY>il codice if a < b: ..."
+      Output: "...<MEMORY>il codice if a < b: ...</MEMORY>"
+
+    Funziona su:
+      - Tag in coda al testo (troncamento da max_tokens)
+      - Tag nel mezzo del testo che sono rimasti aperti
+    """
+    tag_names = [
+        t.name for t in _TAG_REGISTRY.values()
+        if not t.is_self_closing
+    ]
+    if not tag_names:
+        return text
+
+    text = text.rstrip()
+    
+    for name in sorted(tag_names, key=len, reverse=True):
+        # Pattern più robusto: cerca <TAG>... che non ha </TAG> dopo
+        # Usa un approccio stack-based per gestire tag annidati
+        pattern_open = re.compile(rf"<{name}\s*>", re.IGNORECASE)
+        pattern_close = re.compile(rf"</{name}\s*>", re.IGNORECASE)
+        
+        opens = list(pattern_open.finditer(text))
+        closes = list(pattern_close.finditer(text))
+        
+        if len(opens) > len(closes):
+            # Ci sono tag aperti non chiusi
+            if not text.rstrip().endswith(f"</{name}>"):
+                text += f"</{name}>"
+                
+            # Per sicurezza, chiudi anche tag annidati non bilanciati
+            # (es. <MEMORY><SCHEDULE>...</MEMORY> senza </SCHEDULE>)
+            for inner_name in tag_names:
+                if inner_name == name:
+                    continue
+                inner_open = len(list(re.compile(rf"<{inner_name}\s*>", re.IGNORECASE).finditer(text)))
+                inner_close = len(list(re.compile(rf"</{inner_name}\s*>", re.IGNORECASE).finditer(text)))
+                if inner_open > inner_close:
+                    text += f"</{inner_name}>"
+
+    return text
+
+
+def strip_orphaned_tags(text: str) -> str:
+    """
+    Rimuove tag d'azione rimasti aperti/orfani (es. <MEMORY> senza </MEMORY>).
+    RECUPERA il contenuto del tag invece di buttarlo via.
+
+    Strategia migliorata con stack:
+    1. Tag completi (<TAG>...</TAG>) → estrae il contenuto, rimuove i tag
+    2. Tag opening orfani (<TAG>... senza chiusura) → rimuove il tag, tiene il contenuto
+    3. Tag closing orfani (</TAG> senza apertura) → rimuove
+    4. Gestisce annidamenti: <TAG1><TAG2>...</TAG2>...</TAG1>
+    """
+    tag_names = sorted(
+        [t.name for t in _TAG_REGISTRY.values()
+         if not t.is_self_closing and t.visibility in ("hidden", "action")],
+        key=len, reverse=True  # Più lunghi prima per match corretto
+    )
+    if not tag_names:
+        return text
+
+    # 1. Approccio stack-based per rimuovere tag bilanciati
+    #    Processa ricorsivamente finché non ci sono più tag completi
+    prev_text = ""
+    while prev_text != text:
+        prev_text = text
+        for name in tag_names:
+            complete = re.compile(
+                rf"<{name}\s*>(.*?)</{name}\s*>", re.DOTALL | re.IGNORECASE
+            )
+            text = complete.sub(r"\1", text)
+
+    # 2. Rimuovi tag opening orfani rimasti
+    for name in tag_names:
+        orphan_open = re.compile(rf"<{name}\s*>", re.IGNORECASE)
+        text = orphan_open.sub("", text)
+
+    # 3. Rimuovi tag closing orfani rimasti
+    for name in tag_names:
+        orphan_close = re.compile(rf"</{name}\s*>", re.IGNORECASE)
+        text = orphan_close.sub("", text)
+
+    return text.strip()
+
+
+def telegram_prepare_markdown(text: str) -> str:
+    """
+    Preparazione markdown comune: conversioni che NON dipendono dalla versione Telegram.
+    Da chiamare UNA VOLTA sul testo completo prima dello splitting in chunk.
+
+    Gestisce:
+      - Pulisce tag orfani
+      - ### heading  → *heading* (grassetto)
+      - **bold**     → *bold*
+      - * a inizio riga → •  (bullet, se non è grassetto/italic valido)
+      - ~~strikethrough~~ rimosso (non supportato in legacy)
+      - ||spoiler|| rimosso (non supportato in legacy)
+    """
+    # 0. Pulisci tag orfani
+    text = close_orphaned_tags(text)
+    text = strip_orphaned_tags(text)
+
+    # 1. Proteggi blocchi di codice (non vanno trasformati)
+    code_blocks: dict[str, str] = {}
+    def _protect_code(m: re.Match) -> str:
+        placeholder = f"__CODEBLOCK_{len(code_blocks)}__"
+        code_blocks[placeholder] = m.group(0)
+        return placeholder
+    text = re.sub(r'```[\s\S]*?```', _protect_code, text)
+    text = re.sub(r'(?<!`)`(?!`)([^`\n]+?)`(?!`)', _protect_code, text)
+
+    # 2. ### heading / ## heading / # heading → *heading*
+    text = re.sub(
+        r'^#{1,3}\s+(.+?)\s*$',
+        lambda m: f'*{m.group(1).strip()}*',
+        text,
+        flags=re.MULTILINE
+    )
+
+    # 3. **bold** → *bold* (standard markdown → Telegram compatibile)
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+
+    # 4. ~~strikethrough~~ → rimuovi (non supportato in Telegram)
+    text = re.sub(r'~~(.+?)~~', r'\1', text)
+
+    # 5. ||spoiler|| → rimuovi (non supportato in Telegram base)
+    text = re.sub(r'\|\|(.+?)\|\|', r'\1', text)
+
+    # 6. * a inizio riga seguito da spazio → • (bullet)
+    lines = text.split('\n')
+    fixed = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith('* '):
+            ast_count = stripped.count('*')
+            rest = stripped[2:]
+            if ast_count == 2 and stripped.rstrip().endswith('*') and not stripped[2:].rstrip().endswith('*'):
+                fixed.append(line)
+            else:
+                prefix = line[:len(line) - len(stripped)]
+                fixed.append(prefix + '• ' + rest)
+        else:
+            fixed.append(line)
+    text = '\n'.join(fixed)
+
+    # 7. Ripristina blocchi di codice
+    for placeholder, original in code_blocks.items():
+        text = text.replace(placeholder, original)
+
+    return text.strip()
+
+
+def telegram_safe_format(text: str, use_markdown_v2: bool = False) -> str:
+    """
+    Converte testo preparato in formato compatibile con Telegram.
+    DA USARE su ogni chunk PRIMA di inviare.
+
+    use_markdown_v2=True  → escape per parse_mode='MarkdownV2'
+    use_markdown_v2=False → escape minimale per parse_mode='Markdown'
+    """
+    if not text:
+        return text
+
+    # Proteggi blocchi di codice dall'escaping
+    code_blocks: dict[str, str] = {}
+    def _protect_code(m: re.Match) -> str:
+        placeholder = f"__CB_{len(code_blocks)}__"
+        code_blocks[placeholder] = m.group(0)
+        return placeholder
+    text = re.sub(r'```[\s\S]*?```', _protect_code, text)
+    text = re.sub(r'(?<!`)`(?!`)([^`\n]+?)`(?!`)', _protect_code, text)
+
+    if use_markdown_v2:
+        text = _escape_telegram_v2(text)
+    else:
+        text = _escape_telegram_legacy(text)
+
+    for placeholder, original in code_blocks.items():
+        text = text.replace(placeholder, original)
+
+    return text.strip()
+
+
+def _escape_telegram_v2(text: str) -> str:
+    """
+    Escape caratteri speciali per Telegram MarkdownV2.
+    Vanno escapati: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    
+    MA non dentro costrutti markdown validi (già protetti).
+    """
+    # Caratteri speciali MarkdownV2 che vanno escapati con \
+    special_chars = r'_*[]()~`>#+-=|{}.!'
+    
+    # Regex: matcha ogni carattere speciale che NON è già dentro un costrutto markdown
+    # Protegge: *bold* _italic_ `code` [text](url) ~strike~ ||spoiler||
+    def _needs_escape(m: re.Match) -> str:
+        ch = m.group(0)
+        pos = m.start()
+        before = text[max(0, pos - 50):pos]
+        after = text[pos:pos + 50]
+        
+        # Non escape se dentro un costrutto markdown probabilmente valido
+        escaped = '\\' + ch
+        return escaped
+    
+    result = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in special_chars:
+            # Controlla se il carattere è parte di un costrutto markdown valido
+            if _is_inside_markdown_construct(text, i):
+                result.append(ch)
+            else:
+                result.append('\\' + ch)
+        else:
+            result.append(ch)
+        i += 1
+    
+    return ''.join(result)
+
+
+def _escape_telegram_legacy(text: str) -> str:
+    """
+    Escape minimale per Telegram Markdown legacy.
+    Solo i caratteri che causano problemi noti:
+      - `_` a inizio parola o dopo spazio può rompere italic
+      - `*` a inizio riga può rompere bold
+      - Backtick non chiuso
+    """
+    # Proteggi _ che non fanno parte di _italic_ valido
+    # Pattern: _ non bilanciato o _ in mezzo a parola
+    text = re.sub(r'(?<!\w)_(?!\w)', r'\\_', text)  # _ solitario tra non-word
+    text = re.sub(r'(?<=\s)_(?=\s)', r'\\_', text)   # _ isolato tra spazi
+    text = re.sub(r'_(?=\d)', r'\\_', text)            # _ prima di numero (evita italic)
+    return text
+
+
+def _is_inside_markdown_construct(text: str, pos: int) -> bool:
+    """
+    Determina se il carattere alla posizione `pos` è dentro un costrutto markdown valido.
+    Controlla:
+      - *...* (bold/italic)
+      - _..._ (italic)
+      - `...` (code)
+      - ~~...~~ (strikethrough)
+      - ||...|| (spoiler)
+      - [text](url)
+    """
+    if pos <= 0 or pos >= len(text) - 1:
+        return False
+    
+    ch = text[pos]
+    
+    # Per * e _, controlla se sono parte di una coppia bilanciata
+    if ch in ('*', '_'):
+        # Controlla se è un delimitatore di una coppia markdown
+        # Pattern: *testo* o _testo_ - cerca la chiusura corrispondente
+        before = text[:pos]
+        after = text[pos + 1:]
+        
+        # Controlla se siamo in mezzo a *...* o _..._
+        open_count = before.count(ch)
+        close_count = after.count(ch)
+        
+        # Se c'è un numero dispari di delimitatori prima e dopo,
+        # probabilmente siamo dentro un costrutto markdown
+        if open_count > 0 and close_count > 0:
+            # Verifica che i delimitatori non siano troppi (es. ****)
+            if open_count % 2 == 1 and close_count % 2 == 1:
+                return True
+    
+    # Per `, controlla se fa parte di code inline
+    if ch == '`':
+        before = text[:pos]
+        after = text[pos + 1:]
+        if '`' in before and '`' in after:
+            return True
+    
+    # Per ~, controlla se fa parte di ~~strikethrough~~
+    if ch == '~':
+        before = text[:pos]
+        after = text[pos + 1:]
+        # ~~...~~
+        if pos + 1 < len(text) and text[pos + 1] == '~':
+            return True
+        if pos > 0 and text[pos - 1] == '~':
+            return True
+    
+    # Per |, controlla se fa parte di ||spoiler||
+    if ch == '|':
+        if pos + 1 < len(text) and text[pos + 1] == '|':
+            return True
+        if pos > 0 and text[pos - 1] == '|':
+            return True
+    
+    # Per [ ] ( ), controlla se fanno parte di [text](url)
+    if ch in ('[', ']'):
+        # Semplice: se c'è una parentesi quadra bilanciata
+        if ch == '[' and ']' in text[pos:]:
+            return True
+        if ch == ']' and '[' in text[:pos]:
+            return True
+    
+    if ch == '(':
+        if ')' in text[pos:]:
+            return True
+    
+    if ch == ')':
+        if '(' in text[:pos]:
+            return True
+    
+    return False
 
 
 def build_tag_instructions() -> str:
