@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "websearch": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/mcp-web-search"],
+      "env": {}
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {}
+    }
+  }
+}

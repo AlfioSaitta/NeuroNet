@@ -165,6 +165,14 @@ def save_allowed_users():
 
 
 # ==============================================================================
+# OPENCODE / MCP CONFIG
+# ==============================================================================
+MCP_ENABLED = os.getenv("MCP_ENABLED", "true").lower() in ("1", "true", "yes")
+MCP_CONFIG_PATHS_JSON = os.getenv("MCP_CONFIG_PATHS", "")  # comma-separated extra paths
+MCP_AUTO_INIT = os.getenv("MCP_AUTO_INIT", "true").lower() in ("1", "true", "yes")
+MCP_SKILL_EMBEDDED = os.getenv("MCP_SKILL_EMBEDDED", "true").lower() in ("1", "true", "yes")
+
+# ==============================================================================
 # IMPOSTAZIONI DI SISTEMA (Hardcoded Estratti)
 # ==============================================================================
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen3-embedding-0.6b")

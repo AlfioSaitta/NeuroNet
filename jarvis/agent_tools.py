@@ -1,11 +1,18 @@
 """
 Agent Tools — Tool-calling per Jarvis LLM Agent.
+Compatible with OpenCode tool ecosystem.
 
 Ogni tool ha:
   - Nome chiaro e description con trigger per instruction following
   - Parametri ben tipizzati
   - Conferma solo per azioni DISTRUTTIVE (scrittura, eliminazione, git push/commit)
   - Read-only tools NON richiedono conferma (esecuzione immediata)
+
+Integrazione OpenCode:
+  - MCP tool discovery + execution (via mcp_client.py)
+  - SKILL.md loading + execution (via skills_manager.py)
+  - Available skills XML block per instruction following
+  - .mcp.json / opencode.json config loading
 """
 
 import os
@@ -13,9 +20,69 @@ import re
 import json
 import logging
 import subprocess
+from typing import Optional
 from config import DOC_DIR
 
 logger = logging.getLogger(__name__)
+
+# ── OpenCode integration modules (lazy-loaded) ──
+_mcp_manager: Optional[object] = None
+_skills_manager: Optional[object] = None
+
+
+def _get_mcp_tools() -> list:
+    """Lazy-load MCP tools from mcp_client."""
+    global _mcp_manager
+    if _mcp_manager is None:
+        try:
+            from mcp_client import get_mcp_manager
+            _mcp_manager = get_mcp_manager()
+        except ImportError:
+            return []
+    return []
+
+
+def _get_skill_tools() -> list:
+    """Lazy-load skill tools from skills_manager."""
+    try:
+        from skills_manager import get_skill_openai_tools, get_skill_descriptions
+        from config import DOC_DIR
+        return get_skill_openai_tools(project_root=DOC_DIR)
+    except ImportError:
+        return []
+
+
+def _get_skill_descriptions_xml() -> str:
+    """Get available skills as XML block for system prompt."""
+    try:
+        from skills_manager import get_skill_descriptions
+        from config import DOC_DIR
+        # Try multiple roots like the import-time loader does
+        roots = [DOC_DIR]
+        try:
+            _cwd = os.getcwd()
+            if _cwd not in roots:
+                roots.append(_cwd)
+            _d = _cwd
+            for _ in range(10):
+                if os.path.isdir(os.path.join(_d, ".git")):
+                    if _d not in roots:
+                        roots.append(_d)
+                    break
+                _parent = os.path.dirname(_d)
+                if _parent == _d:
+                    break
+                _d = _parent
+        except Exception:
+            pass
+        result = ""
+        for _root in roots:
+            result = get_skill_descriptions(project_root=_root)
+            if result:
+                return result
+        return ""
+    except ImportError:
+        return ""
 
 # ──────────────────────────────────────────────
 # TOOL SCHEMAS (registro per LLM)
@@ -829,12 +896,69 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
 
         # ── DYNAMIC SKILLS ──
 
+        # ═══════════════════════════════════════
+        # SKILLS (OpenCode-compatible)
+        # ═══════════════════════════════════════
+
+        elif name == "load_skill":
+            # OpenCode skill() equivalent: loads a SKILL.md and returns its content
+            skill_name = args.get("name", "")
+            if not skill_name:
+                return "⚠️ Specificare un nome skill (name param)."
+            try:
+                from skills_manager import load_skill
+                from config import DOC_DIR
+                content = await load_skill(skill_name, project_root=DOC_DIR)
+                if content:
+                    return content
+                return f"⚠️ Skill '{skill_name}' non trovata. Usa il tool skill_discover per vedere quelle disponibili."
+            except ImportError:
+                return "⚠️ Skills manager non disponibile."
+
+        elif name == "skill_discover":
+            # List available skills
+            try:
+                from skills_manager import get_skill_descriptions
+                from config import DOC_DIR
+                xml = get_skill_descriptions(project_root=DOC_DIR)
+                if xml:
+                    return f"📖 **Skill disponibili**\n\n{xml}"
+                return "📖 Nessuna skill configurata."
+            except ImportError:
+                return "⚠️ Skills manager non disponibile."
+
         elif name.startswith("skill_"):
-            from skills_manager import execute_dynamic_skill
-            approved = await ask_confirmation(bot, chat_id, f"Esecuzione Skill: {name}\n{args}")
-            if not approved:
-                return "❌ Skill rifiutata dall'utente."
-            return await execute_dynamic_skill(name, args)
+            # Legacy YAML skill execution (backward compatible)
+            # First check if it's an OpenCode SKILL.md (load-only)
+            try:
+                from skills_manager import load_skill, execute_dynamic_skill
+                from config import DOC_DIR
+
+                # Try loading as SKILL.md first
+                content = await load_skill(name, project_root=DOC_DIR)
+                if content:
+                    return content
+
+                # Fall back to legacy YAML execution
+                approved = await ask_confirmation(bot, chat_id, f"Esecuzione Skill: {name}\n{args}")
+                if not approved:
+                    return "❌ Skill rifiutata dall'utente."
+                return await execute_dynamic_skill(name, args)
+            except ImportError:
+                return "⚠️ Skills manager non disponibile."
+
+        # ═══════════════════════════════════════
+        # MCP TOOLS (OpenCode-compatible)
+        # ═══════════════════════════════════════
+
+        elif name.startswith("mcp_"):
+            # Route to MCP manager for execution
+            try:
+                from mcp_client import get_mcp_manager
+                manager = get_mcp_manager()
+                return await manager.execute_tool(name, args)
+            except ImportError:
+                return "⚠️ MCP client non disponibile."
 
         else:
             return f"⚠️ Tool `{name}` sconosciuto."
@@ -844,9 +968,132 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
         return f"❌ Errore durante l'esecuzione di `{name}`: {str(e)}"
 
 
-# Inietta dinamicamente le Skill YAML dalla cartella skills/
+# ──────────────────────────────────────────────
+# Dynamically inject OpenCode-compatible tools
+# ──────────────────────────────────────────────
+# These extend TOOLS_SCHEMA at import time:
+# 1. skill_* tools from SKILL.md / legacy YAML
+# 2. mcp_* tools from MCP servers
+# 3. load_skill + skill_discover utility tools
+
+# Inject load_skill and skill_discover tools
+TOOLS_SCHEMA.append({
+    "type": "function",
+    "function": {
+        "name": "load_skill",
+        "description": "[OPENCODE] Carica una skill (SKILL.md) e ne restituisce il contenuto come contesto per il LLM. Equivalente al tool skill() di OpenCode. Non esegue comandi, carica solo istruzioni.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Nome della skill da caricare (es. 'git-release', 'code-review'). Vedi skill_discover per la lista."}
+            },
+            "required": ["name"]
+        }
+    }
+})
+TOOLS_SCHEMA.append({
+    "type": "function",
+    "function": {
+        "name": "skill_discover",
+        "description": "[OPENCODE] Elenca tutte le skill disponibili con descrizione. Equivalente a vedere la lista <available_skills> in OpenCode.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+})
+
+# Inject skill tools from skills_manager
+# Try multiple project root candidates:
+# 1. DOC_DIR (Docker container path)
+# 2. Current working directory
+# 3. Git worktree root (walk up from cwd)
 try:
-    from skills_manager import get_skills_schemas
-    TOOLS_SCHEMA.extend(get_skills_schemas())
+    from skills_manager import get_skill_openai_tools
+    from config import DOC_DIR
+
+    _skill_roots = [DOC_DIR]
+    try:
+        _cwd = os.getcwd()
+        if _cwd not in _skill_roots:
+            _skill_roots.append(_cwd)
+        # Walk up to find .git root
+        _d = _cwd
+        for _ in range(10):
+            if os.path.isdir(os.path.join(_d, ".git")):
+                if _d not in _skill_roots:
+                    _skill_roots.append(_d)
+                break
+            _parent = os.path.dirname(_d)
+            if _parent == _d:
+                break
+            _d = _parent
+    except Exception:
+        pass
+
+    skill_tools = []
+    for _root in _skill_roots:
+        try:
+            skill_tools = get_skill_openai_tools(project_root=_root)
+            if skill_tools:
+                logger.info(f"Skill tools found at project_root={_root}: {len(skill_tools)}")
+                break
+        except Exception:
+            continue
+
+    TOOLS_SCHEMA.extend(skill_tools)
+    if skill_tools:
+        logger.info(f"Iniettati {len(skill_tools)} skill tool(s) in TOOLS_SCHEMA")
 except ImportError:
     pass
+
+# Inject MCP tools from mcp_client (discovered at import time)
+try:
+    from mcp_client import get_mcp_manager
+    mcp_mgr = get_mcp_manager()
+    # Don't block on network — tools are discovered lazily
+    # MCP tools will be injected on first use via _refresh_mcp_tools()
+except ImportError:
+    pass
+
+
+def _refresh_mcp_tools() -> int:
+    """Refresh MCP tools in TOOLS_SCHEMA. Call after MCP servers are initialized."""
+    # Remove old MCP tools
+    global TOOLS_SCHEMA
+    TOOLS_SCHEMA = [t for t in TOOLS_SCHEMA if not t["function"]["name"].startswith("mcp_")]
+
+    # Discover and add current MCP tools
+    count = 0
+    try:
+        from mcp_client import get_mcp_manager
+        import asyncio
+        # We can't await here, so we schedule discovery
+        # Tools will be available on next message
+        logger.info("MCP tools discovery scheduled (async)")
+    except ImportError:
+        pass
+
+    return count
+
+
+async def refresh_mcp_tools_async() -> int:
+    """Async version: discover MCP tools and inject into TOOLS_SCHEMA."""
+    global TOOLS_SCHEMA
+    # Remove old MCP tools
+    TOOLS_SCHEMA = [t for t in TOOLS_SCHEMA if not t["function"]["name"].startswith("mcp_")]
+
+    count = 0
+    try:
+        from mcp_client import get_mcp_manager
+        manager = get_mcp_manager()
+        mcp_tools = await manager.discover_all_tools()
+        TOOLS_SCHEMA.extend(mcp_tools)
+        count = len(mcp_tools)
+        if count:
+            logger.info(f"MCP: {count} tools injectati in TOOLS_SCHEMA")
+    except ImportError:
+        pass
+
+    return count

@@ -43,7 +43,8 @@ from config import (
     DOC_COLLECTION,
     TELEGRAM_TOKEN, ALLOWED_USERS, MEM0_CONFIG, STATE_FILE,
     TELEGRAM_ENABLED, WATCHDOG_ENABLED, VECTOR_DB_VERSION,
-    API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, EMBEDDING_DIMS, EXTERNAL_PROJECTS
+    API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, EMBEDDING_DIMS, EXTERNAL_PROJECTS,
+    MCP_ENABLED, MCP_AUTO_INIT
 )
 import state
 from rag import ingest_local_documents, rag_queue_worker, generate_project_tree, search_documents, semantic_cache_search, semantic_cache_store
@@ -343,6 +344,46 @@ async def lifespan(app: FastAPI):
         import traceback
         logger.error(f"Errore inizializzazione cron scheduler: {e}\n{traceback.format_exc()}")
 
+    # ═══════════════════════════════════════════
+    # MCP (Model Context Protocol) Initialization
+    # ═══════════════════════════════════════════
+    if MCP_ENABLED and MCP_AUTO_INIT:
+        try:
+            from mcp_client import init_mcp_from_config, get_mcp_manager
+            # Scan default config paths (.mcp.json, opencode.json, etc.)
+            total = await init_mcp_from_config()
+            if total > 0:
+                logger.info(f"🔌 MCP: {total} servers initialized from config files")
+
+                # Register skill-embedded MCP servers
+                if MCP_ENABLED:
+                    try:
+                        from skills_manager import update_skill_mcp_servers
+                        from config import DOC_DIR
+                        reg_count = update_skill_mcp_servers(project_root=DOC_DIR)
+                        if reg_count > 0:
+                            logger.info(f"🔌 MCP: {reg_count} skill-embedded servers registered")
+                            # Re-init to pick up new servers
+                            await get_mcp_manager().initialize_all()
+                    except ImportError:
+                        pass
+
+                # Refresh MCP tools in TOOLS_SCHEMA
+                from agent_tools import refresh_mcp_tools_async
+                mcp_count = await refresh_mcp_tools_async()
+                if mcp_count > 0:
+                    logger.info(f"🔌 MCP: {mcp_count} tools injected into TOOLS_SCHEMA")
+
+                # Log all registered servers
+                mgr = get_mcp_manager()
+                for srv_name in mgr.list_servers():
+                    logger.info(f"  ├─ MCP Server: {srv_name}")
+
+        except ImportError as e:
+            logger.debug(f"MCP client not available (non-critical): {e}")
+        except Exception as e:
+            logger.warning(f"MCP initialization: {e}")
+
     yield
 
     # Shutdown
@@ -361,6 +402,16 @@ async def lifespan(app: FastAPI):
         await stop_all_userbots()
     except NameError:
         pass
+
+    # MCP shutdown
+    if MCP_ENABLED:
+        try:
+            from mcp_client import get_mcp_manager
+            mgr = get_mcp_manager()
+            await mgr.close_all()
+            logger.info("🔌 MCP: all servers shut down")
+        except ImportError:
+            pass
 
     await state.qdrant.close()
     await state.http_client.aclose()
