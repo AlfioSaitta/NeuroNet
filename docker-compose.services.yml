@@ -1,6 +1,18 @@
 # =====================================================================
-# ECOSISTEMA AI LOCALE ENTERPRISE - COLLATERAL STUDIOS (DATA CENTRIC)
+# ECOSISTEMA AI LOCALE - SOLO SERVIZI (nessun Jarvis)
 # =====================================================================
+# Qdrant, SearXNG, Crawl4AI in Docker. Jarvis eseguito direttamente sull'host.
+# 
+# Avvio: docker compose -f docker-compose.services.yml up -d
+#
+# Configurazione .env per esecuzione host:
+#   QDRANT_HOST=localhost
+#   SEARXNG_HOST=http://localhost:8081
+#   CRAWL4AI_HOST=http://localhost:11235
+#   DATA_DIR=./data/jarvis_mem0
+#   DOCUMENTS_DIR=./data/documents
+#   MODELS_DIR=./models
+#   HOST_FS_PREFIX=
 
 networks:
   ai_network:
@@ -8,11 +20,6 @@ networks:
     name: ai_network
 
 services:
-
-
-  # -------------------------------------------------------------------
-  # 3. PROXY & ARCHIVIO VETTORIALE EPISODICO (Mem0 + Qdrant DB)
-  # -------------------------------------------------------------------
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant_db
@@ -51,39 +58,5 @@ services:
       - "11235:11235"
     environment:
       - MAX_CONCURRENT_TASKS=3
-    networks:
-      - ai_network
-
-  jarvis:
-    build:
-      context: ./jarvis
-      dockerfile: Dockerfile
-    container_name: jarvis
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
-    env_file:
-      - .env
-    environment:
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-      - TZ=Europe/Rome
-      - POSTHOG_DISABLED=1
-      - MEM0_TELEMETRY_ENABLED=false
-      - PYTHONWARNINGS=ignore::DeprecationWarning
-    volumes:
-      - ./jarvis:/app
-      - ./data/jarvis_mem0:/app/mem0_data_v3
-      - ./data/documents:/app/documents
-      - /:/host_fs
-      - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
-    depends_on:
-      - qdrant
-      - searxng
-      - crawl4ai
     networks:
       - ai_network

@@ -5,7 +5,7 @@ import struct
 import asyncio
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, JSONResponse
-from config import QDRANT_HOST, ALLOWED_USERS
+from config import QDRANT_HOST, ALLOWED_USERS, VECTOR_DB_VERSION
 import state
 from llm_engine import engine
 
@@ -324,6 +324,7 @@ HTML_CONTENT = r"""
             </ul>
             <div style="display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.05);">
                 <button class="btn" onclick="restartIngestion()" style="font-size:0.65rem;padding:3px 8px;">⟳ Restart Ingestion</button>
+                <button class="btn" onclick="openMemoryGraphModal()" style="font-size:0.65rem;padding:3px 8px;background:rgba(179,136,255,0.15);border-color:rgba(179,136,255,0.3);color:#b388ff;">✧ Memory Graph</button>
             </div>
         </div>
     </div>
@@ -564,11 +565,13 @@ HTML_CONTENT = r"""
             '.json': '#292929', '.txt': '#888888', '.yaml': '#6CB4EE', '.yml': '#6CB4EE',
             '.go': '#00ADD8', '.rs': '#DEA584', '.cpp': '#F34B7D', '.c': '#555555',
             '.java': '#ED8B00', '.sql': '#E38C00',
+            'entity': '#b388ff', 'memory': '#00e5ff',
         };
         const EXT_NAMES = { '.py': 'Python', '.js': 'JavaScript', '.ts': 'TypeScript', '.tsx': 'TSX',
             '.jsx': 'JSX', '.md': 'Markdown', '.html': 'HTML', '.css': 'CSS',
             '.json': 'JSON', '.yaml': 'YAML', '.yml': 'YAML', '.go': 'Go',
             '.rs': 'Rust', '.cpp': 'C++', '.c': 'C', '.java': 'Java', '.sql': 'SQL',
+            'entity': 'Entity', 'memory': 'Memory',
         };
 
         async function openGraphModal(collectionName) {
@@ -748,6 +751,127 @@ HTML_CONTENT = r"""
             }
             document.getElementById('graph-container').innerHTML = '';
             isModalOpen = false;
+        }
+
+        async function openMemoryGraphModal() {
+            isModalOpen = true;
+            document.getElementById('graph-modal').style.display = "block";
+            document.getElementById('modal-title').innerText = 'Loading Memory Graph...';
+            document.getElementById('node-info').style.display = "none";
+            document.getElementById('graph-container').innerHTML = '';
+            document.getElementById('filter-container').style.display = "none";
+            document.getElementById('node-search').value = '';
+
+            allNodes = [];
+            allLinks = [];
+
+            try {
+                const res = await fetch('/api/dashboard/graph/memory');
+                const data = await res.json();
+
+                const points = data.points || [];
+                const links = data.links || [];
+
+                if (points.length === 0) {
+                    document.getElementById('modal-title').innerText = 'Memory Graph — no entity links yet. Run /api/graph/reindex first.';
+                    return;
+                }
+
+                const msg = data.memory_count ? ` (${data.entity_count} entities ↔ ${data.memory_count} memories)` : '';
+                document.getElementById('modal-title').innerText = `Memory Entity Graph${msg} (${points.length} nodes, ${links.length} links)`;
+
+                allNodes = points;
+                allLinks = links;
+
+                // Build legend
+                const legendEl = document.getElementById('graph-legend');
+                legendEl.style.display = 'flex';
+                legendEl.innerHTML = `
+                    <div class="legend-row"><span class="legend-dot" style="background:#b388ff"></span> Entity</div>
+                    <div class="legend-row"><span class="legend-dot" style="background:#00e5ff"></span> Memory</div>
+                `;
+
+                // Compute degree
+                const degree = {};
+                allLinks.forEach(l => {
+                    const sId = l.source?.id || l.source;
+                    const tId = l.target?.id || l.target;
+                    degree[sId] = (degree[sId] || 0) + 1;
+                    degree[tId] = (degree[tId] || 0) + 1;
+                });
+                const maxDeg = Math.max(1, ...Object.values(degree));
+
+                Graph = ForceGraph()(document.getElementById('graph-container'))
+                    .backgroundColor('transparent')
+                    .nodeRelSize(node => node.group === 'entity' ? 10 : 5)
+                    .nodeVal(node => 2 + (degree[node.id] || 0) / maxDeg * 6)
+                    .linkDirectionalParticles(2)
+                    .linkDirectionalParticleSpeed(d => 0.006)
+                    .linkDirectionalParticleWidth(2)
+                    .linkColor(() => 'rgba(0, 255, 204, 0.3)')
+                    .linkWidth(1)
+                    .nodeColor(node => node.group === 'entity' ? '#b388ff' : '#00e5ff')
+                    .nodeLabel(node => node.group === 'entity'
+                        ? `Entity: ${node.payload.entity_name} (${degree[node.id] || 0} connections)`
+                        : `Memory (${degree[node.id] || 0} connections)`)
+                    .onNodeClick(node => {
+                        currentSelectedNode = node;
+                        Graph.nodeColor(Graph.nodeColor());
+
+                        const infoBox = document.getElementById('node-info');
+                        const contentBox = document.getElementById('node-content');
+                        infoBox.style.display = "block";
+
+                        let htmlContent = `<div class="property-row"><div class="property-label">Type</div><div class="property-value">${node.group === 'entity' ? '🔮 Entity' : '🧠 Memory'}</div></div>`;
+
+                        function escapeHtml(unsafe) {
+                            return String(unsafe)
+                                .replace(/&/g, "&amp;")
+                                .replace(/</g, "&lt;")
+                                .replace(/>/g, "&gt;")
+                                .replace(/"/g, "&quot;")
+                                .replace(/'/g, "&#039;");
+                        }
+
+                        if (node.group === 'entity') {
+                            htmlContent += `<div class="property-row"><div class="property-label">Entity Name</div><div class="property-value">${escapeHtml(node.payload.entity_name)}</div></div>`;
+                            htmlContent += `<div class="property-row"><div class="property-label">Connected Memories</div><div class="property-value">${node.payload.connected_memories || 0}</div></div>`;
+                            if (node.payload.entity_type) {
+                                htmlContent += `<div class="property-row"><div class="property-label">Entity Type</div><div class="property-value">${escapeHtml(node.payload.entity_type)}</div></div>`;
+                            }
+                        } else {
+                            const memText = node.payload.memory || '';
+                            htmlContent += `<div class="property-row"><div class="property-label">Memory Excerpt</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(memText)}</code></pre></div></div>`;
+                            if (node.payload.entity_count) {
+                                htmlContent += `<div class="property-row"><div class="property-label">Connected Entities</div><div class="property-value">${node.payload.entity_count}</div></div>`;
+                            }
+                        }
+
+                        htmlContent += `<div class="property-row"><div class="property-label">Node ID</div><div class="property-value" style="font-size:0.7rem;color:var(--text-muted);">${escapeHtml(node.id)}</div></div>`;
+                        contentBox.innerHTML = htmlContent;
+
+                        contentBox.querySelectorAll('pre code').forEach((block) => {
+                            hljs.highlightElement(block);
+                        });
+                    })
+                    .onNodeHover(node => {
+                        document.getElementById('graph-container').style.cursor = node ? 'pointer' : null;
+                    })
+                    .onBackgroundClick(() => {
+                        currentSelectedNode = null;
+                        Graph.nodeColor(Graph.nodeColor());
+                        document.getElementById('node-info').style.display = "none";
+                    })
+                    .graphData({ nodes: allNodes, links: allLinks });
+
+                setTimeout(() => {
+                    Graph.zoomToFit(400, 50);
+                }, 600);
+
+            } catch(e) {
+                console.error(e);
+                document.getElementById('modal-title').innerText = "Error Loading Memory Graph";
+            }
         }
 
         let tempChart, vramChart, utilChart, ramChart, cpuChart, cpuTempChart, tokPerSecChart;
@@ -1436,86 +1560,262 @@ async def get_stats():
 @dashboard_router.get("/api/dashboard/qdrant/{collection}/vectors")
 async def get_qdrant_vectors(collection: str):
     import numpy as np
-    from collections import defaultdict
     points_data = []
     links_data = []
     added_pairs = set()
     try:
+        # Paginate: Qdrant scroll returns up to `limit` points per call
+        all_raw_points = []
+        offset = None
+        scroll_limit = 2000  # use a higher limit, Qdrant default max is ~10K
+        while True:
+            body = {"limit": min(scroll_limit, 1000), "with_payload": True, "with_vector": True}
+            if offset is not None:
+                body["offset"] = offset
+
+            res_pts = await state.http_client.post(
+                f"http://{QDRANT_HOST}:6333/collections/{collection}/points/scroll",
+                json=body, timeout=8.0
+            )
+            if res_pts.status_code != 200:
+                break
+
+            result = res_pts.json().get("result", {})
+            batch = result.get("points", [])
+            all_raw_points.extend(batch)
+
+            # Check if there are more points
+            next_offset = result.get("next_page_offset")
+            if next_offset is None or not batch:
+                break
+            offset = next_offset
+
+            if len(all_raw_points) >= 2000:  # safety limit
+                break
+
+        vectors = []
+        for p in all_raw_points:
+            vec = p.get("vector")
+            if vec is not None:
+                # Handle named vectors: {"": [0.1, 0.2, ...], "bm25": {...}} → flat array
+                if isinstance(vec, dict):
+                    # Mem0 stores dense embedding under empty key "", and optional
+                    # sparse BM25 under "bm25". Take only the dense embedding.
+                    vec = vec.get("", None)
+                    if vec is None:
+                        continue
+                vectors.append(vec)
+                del p["vector"]
+            points_data.append(p)
+
+        if vectors:
+            vec_mat = np.array(vectors, dtype=np.float32)
+            norms = np.linalg.norm(vec_mat, axis=1, keepdims=True)
+            norms[norms == 0] = 1
+            vec_mat_norm = vec_mat / norms
+            sim_matrix = np.dot(vec_mat_norm, vec_mat_norm.T)
+
+            # Map point index -> filename for diversity filtering
+            filenames = []
+            for p in points_data:
+                fn = (p.get("payload") or {}).get("filename", "") or ""
+                filenames.append(fn)
+
+            TOP_K = 10
+            n_pts = len(vectors)
+
+            for i in range(n_pts):
+                row = sim_matrix[i].copy()
+                row[i] = -1  # exclude self
+                if n_pts <= TOP_K + 1:
+                    top_indices = np.argsort(row)[::-1]
+                else:
+                    top_indices = np.argpartition(row, -TOP_K)[-TOP_K:]
+                    top_indices = top_indices[np.argsort(row[top_indices])[::-1]]
+
+                added = 0
+                same_file_count = 0
+                seen_files = set()
+                for j in top_indices:
+                    sim = float(row[j])
+                    if sim < 0.35:
+                        continue
+
+                    pair_key = (min(i, j), max(i, j))
+                    if pair_key in added_pairs:
+                        continue
+
+                    same_file = filenames[i] and filenames[j] and filenames[i] == filenames[j]
+
+                    if same_file:
+                        if same_file_count >= 2:
+                            continue
+                        same_file_count += 1
+                    elif filenames[j]:
+                        seen_files.add(filenames[j])
+                        if len(seen_files) > 6:
+                            continue
+
+                    if added >= 8:
+                        break
+
+                    added_pairs.add(pair_key)
+                    links_data.append({
+                        "source": points_data[i]["id"],
+                        "target": points_data[j]["id"],
+                        "similarity": sim
+                    })
+                    added += 1
+
+    except Exception as e:
+        logger.warning(f"Graph error for {collection}: {e}")
+        return JSONResponse({
+            "points": points_data or [],
+            "links": [],
+            "note": f"Errore elaborazione grafo: {e}"
+        })
+
+    return JSONResponse({"points": points_data, "links": links_data})
+
+
+MEMORY_COLLECTION = f"collateral_memories_{VECTOR_DB_VERSION}"
+ENTITY_COLLECTION = f"{MEMORY_COLLECTION}_entities"
+
+
+@dashboard_router.get("/api/dashboard/graph/memory")
+async def get_memory_graph(user_id: str = "alfio_dev"):
+    """Grafo bipartito: nodi entità ↔ nodi memoria dall'entity store di Mem0.
+
+    Scansiona la entity store (``collateral_memories_v3_entities``) e la
+    collection delle memorie (``collateral_memories_v3``), poi costruisce
+    un grafo dove:
+      - I nodi entità (colore viola) sono le entità estratte via spaCy
+      - I nodi memoria (colore ciano) sono i ricordi episodici
+      - I link connettono ogni entità alle memorie che la contengono
+        (basati su ``linked_memory_ids`` nell'entity store)
+    """
+    nodes = []
+    links = []
+    memory_lookup = {}  # memory_id → memory text
+    entity_lookup = {}  # entity_name → metadata
+
+    # 1) Fetch memories from the memory collection
+    try:
         res_pts = await state.http_client.post(
-            f"http://{QDRANT_HOST}:6333/collections/{collection}/points/scroll",
-            json={"limit": 500, "with_payload": True, "with_vector": True},
+            f"http://{QDRANT_HOST}:6333/collections/{MEMORY_COLLECTION}/points/scroll",
+            json={"limit": 1000, "with_payload": True, "with_vector": False,
+                  "filter": {"must": [{"key": "user_id", "match": {"value": user_id}}]}},
             timeout=5.0
         )
         if res_pts.status_code == 200:
-            raw_points = res_pts.json().get("result", {}).get("points", [])
+            points = res_pts.json().get("result", {}).get("points", [])
+            for p in points:
+                pid = p.get("id", "")
+                payload = p.get("payload", {}) or {}
+                mem_text = payload.get("memory", "") or ""
+                memory_lookup[pid] = mem_text
+    except Exception as e:
+        pass
 
-            vectors = []
-            for p in raw_points:
-                vec = p.get("vector")
-                if vec is not None:
-                    vectors.append(vec)
-                    del p["vector"]
-                points_data.append(p)
-
-            if vectors:
-                vec_mat = np.array(vectors)
-                norms = np.linalg.norm(vec_mat, axis=1, keepdims=True)
-                norms[norms == 0] = 1
-                vec_mat_norm = vec_mat / norms
-                sim_matrix = np.dot(vec_mat_norm, vec_mat_norm.T)
-
-                # Map point index -> filename for diversity filtering
-                filenames = []
-                for p in points_data:
-                    fn = (p.get("payload") or {}).get("filename", "") or ""
-                    filenames.append(fn)
-
-                for i in range(len(vectors)):
-                    candidates = []
-                    for j in range(len(vectors)):
-                        if i == j:
-                            continue
-                        sim = float(sim_matrix[i][j])
-                        if sim > 0.45:
-                            same_file = filenames[i] and filenames[j] and filenames[i] == filenames[j]
-                            candidates.append((j, sim, same_file))
-
-                    # Sort by similarity descending
-                    candidates.sort(key=lambda x: -x[1])
-
-                    # Pick links with file diversity: up to 2 same-file, up to 8 total
-                    added = 0
-                    same_file_count = 0
-                    seen_files = set()
-                    for j, sim, same_file in candidates:
-                        pair_key = (min(i, j), max(i, j))
-                        if pair_key in added_pairs:
-                            continue
-
-                        if same_file:
-                            if same_file_count >= 2:
-                                continue
-                            same_file_count += 1
-                        elif filenames[j]:
-                            seen_files.add(filenames[j])
-                            if len(seen_files) > 6:
-                                continue
-
-                        if added >= 10:
-                            break
-
-                        added_pairs.add(pair_key)
-                        links_data.append({
-                            "source": points_data[i]["id"],
-                            "target": points_data[j]["id"],
-                            "similarity": sim
-                        })
-                        added += 1
-
+    # 2) Fetch entities from the entity store
+    try:
+        res_ent = await state.http_client.post(
+            f"http://{QDRANT_HOST}:6333/collections/{ENTITY_COLLECTION}/points/scroll",
+            json={"limit": 1000, "with_payload": True, "with_vector": False},
+            timeout=5.0
+        )
+        if res_ent.status_code == 200:
+            points = res_ent.json().get("result", {}).get("points", [])
+            for p in points:
+                payload = p.get("payload", {}) or {}
+                ent_name = payload.get("entity_name", "") or ""
+                linked = payload.get("linked_memory_ids") or []
+                ent_type = payload.get("entity_type", "unknown")
+                if not ent_name:
+                    continue
+                entity_lookup[ent_name] = {
+                    "linked_memory_ids": linked,
+                    "entity_type": ent_type,
+                }
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-    return JSONResponse({"points": points_data, "links": links_data})
+    # 3) Build graph nodes & links
+    added_entity_ids = set()
+
+    for ent_name, ent_meta in entity_lookup.items():
+        linked_ids = ent_meta["linked_memory_ids"]
+        if not linked_ids:
+            continue
+
+        # Filter linked IDs to only those that exist in memory_lookup
+        valid_linked = [lid for lid in linked_ids if lid in memory_lookup]
+        if not valid_linked:
+            continue
+
+        # Entity node ID (prefixed to avoid collisions)
+        ent_node_id = f"ent_{ent_name}"
+        added_entity_ids.add(ent_node_id)
+
+        # Count how many memories this entity connects to
+        connected_count = len(valid_linked)
+
+        nodes.append({
+            "id": ent_node_id,
+            "payload": {
+                "entity_name": ent_name,
+                "entity_type": ent_meta["entity_type"],
+                "connected_memories": connected_count,
+            },
+            "ext": "entity",
+            "group": "entity",
+        })
+
+        # Links: entity → each linked memory
+        for mem_id in valid_linked:
+            mem_text = memory_lookup.get(mem_id, "")
+            # Truncate for display
+            mem_excerpt = mem_text[:120] + "…" if len(mem_text) > 120 else mem_text
+            links.append({
+                "source": ent_node_id,
+                "target": mem_id,
+                "similarity": 0.9,  # fixed high weight for entity links
+            })
+
+    # 4) Add memory nodes that are connected to at least one entity
+    connected_memory_ids = set()
+    for link in links:
+        connected_memory_ids.add(link["target"])
+
+    for mem_id, mem_text in memory_lookup.items():
+        if mem_id not in connected_memory_ids:
+            continue
+        mem_excerpt = mem_text[:150] + "…" if len(mem_text) > 150 else mem_text
+        nodes.append({
+            "id": mem_id,
+            "payload": {
+                "memory": mem_excerpt,
+                "entity_count": sum(
+                    1 for lnk in links if lnk["target"] == mem_id
+                ),
+            },
+            "ext": "memory",
+            "group": "memory",
+        })
+
+    if not nodes:
+        return JSONResponse({
+            "points": [],
+            "links": [],
+            "message": "Nessuna entità collegata trovata. Usa prima /api/graph/reindex per creare i link.",
+        })
+
+    return JSONResponse({
+        "points": nodes,
+        "links": links,
+        "entity_count": len([n for n in nodes if n.get("group") == "entity"]),
+        "memory_count": len([n for n in nodes if n.get("group") == "memory"]),
+    })
 
 
 # ==============================================================================

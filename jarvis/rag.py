@@ -22,7 +22,7 @@ from config import (
     WATCHDOG_BATCH_DELAY, SEMANTIC_CACHE_THRESHOLD,
     C, CPP, JAVA, RUST, SQL, YAML,
     PATHSPEC_ENABLED, WATCHDOG_ENABLED, EMBEDDING_DIMS,
-    EXTERNAL_PROJECTS
+    EXTERNAL_PROJECTS, DATA_DIR, HOST_FS_PREFIX
 )
 import state
 
@@ -79,7 +79,7 @@ if _use_qwen3_reranker:
 if not _use_qwen3_reranker:
     try:
         from flashrank import Ranker, RerankRequest
-        _flash = Ranker(model_name=FLASHRANK_MODEL, cache_dir="/app/mem0_data_v3/flashrank_cache")
+        _flash = Ranker(model_name=FLASHRANK_MODEL, cache_dir=os.path.join(DATA_DIR, "flashrank_cache"))
 
         def _reranker(query, passages):
             req = RerankRequest(query=query, passages=passages)
@@ -860,7 +860,7 @@ async def ingest_local_documents():
             host_path, folder_name = pair.split(':', 1)
             host_path = host_path.strip()
             folder_name = folder_name.strip()
-            project_root = os.path.join("/host_fs", host_path.lstrip('/'))
+            project_root = os.path.join(HOST_FS_PREFIX, host_path.lstrip('/')) if HOST_FS_PREFIX else host_path
             # Verifica se data/documents/ del progetto coincide con DOC_DIR
             if os.path.isdir(os.path.join(project_root, "data", "documents")):
                 # Questo progetto ha il mount conflict — walk diretto

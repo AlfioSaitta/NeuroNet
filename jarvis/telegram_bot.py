@@ -4,7 +4,7 @@ Bot Telegram — Handler per comandi e messaggi via Telegram.
 
 from config import (
     logger, LLM_OPTIONS,
-    ALLOWED_USERS, ADMIN_USERS, TELEGRAM_ENABLED
+    ALLOWED_USERS, ADMIN_USERS, TELEGRAM_ENABLED, DOC_DIR
 )
 from prompt_builder import build_omniscient_prompt
 from llm_engine import engine
@@ -355,7 +355,7 @@ if TELEGRAM_ENABLED:
                     summary = content[:700].rstrip()
                     if len(content) > 700:
                         summary += "..."
-                    container_path = f"/app/documents/{project}/" if project else ""
+                    container_path = os.path.join(DOC_DIR, f"{project}/") if project else ""
                     mem = f"<MEMORY>📄 Documento: {container_path}{ts}-{safe_name}.md"
                     if project:
                         mem += f" (progetto: {project})"

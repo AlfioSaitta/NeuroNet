@@ -40,7 +40,7 @@ from qdrant_client.models import VectorParams, Distance
 
 from config import (
     logger, OLLAMA_MODEL, QDRANT_HOST,
-    DOC_COLLECTION,
+    DOC_COLLECTION, DOC_DIR, HOST_FS_PREFIX,
     TELEGRAM_TOKEN, ALLOWED_USERS, MEM0_CONFIG, STATE_FILE,
     TELEGRAM_ENABLED, WATCHDOG_ENABLED, VECTOR_DB_VERSION,
     API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, EMBEDDING_DIMS, EXTERNAL_PROJECTS,
@@ -48,7 +48,7 @@ from config import (
 )
 import state
 from rag import ingest_local_documents, rag_queue_worker, generate_project_tree, search_documents, semantic_cache_search, semantic_cache_store
-from memory import init_mem0_delayed, extract_memories, save_to_memory, process_response_tags
+from memory import init_mem0_delayed, extract_memories, save_to_memory, process_response_tags, reindex_graph_connections
 from prompt_builder import build_omniscient_prompt
 from llm_engine import engine, extract_content
 from agent_tools import TOOLS_SCHEMA, execute_tool_call
@@ -161,10 +161,10 @@ async def lifespan(app: FastAPI):
     # ==========================================================================
     path_mapping = {}
     
-    # Rimuovi vecchi symlink dinamici da /app/documents/ (evita loop ricorsivi)
-    if os.path.exists("/app/documents"):
-        for item in os.listdir("/app/documents"):
-            item_path = os.path.join("/app/documents", item)
+    # Rimuovi vecchi symlink dinamici da DOC_DIR (evita loop ricorsivi)
+    if os.path.exists(DOC_DIR):
+        for item in os.listdir(DOC_DIR):
+            item_path = os.path.join(DOC_DIR, item)
             if os.path.islink(item_path):
                 os.remove(item_path)
     
@@ -176,14 +176,15 @@ async def lifespan(app: FastAPI):
                 host_path = host_path.strip()
                 folder_name = folder_name.strip()
                 
-                # Traduci il path host nel path montato nel container (/host_fs)
-                container_path = os.path.join("/host_fs", host_path.lstrip('/'))
-                symlink_path = os.path.join("/app/documents", folder_name)
+                # In Docker: HOST_FS_PREFIX=/host_fs → /host_fs/home/alfio/...
+                # Su host:   HOST_FS_PREFIX="" → /home/alfio/... (path diretto)
+                real_path = os.path.join(HOST_FS_PREFIX, host_path.lstrip('/')) if HOST_FS_PREFIX else host_path
+                symlink_path = os.path.join(DOC_DIR, folder_name)
                 
-                if os.path.exists(container_path):
+                if os.path.exists(real_path):
                     try:
-                        os.symlink(container_path, symlink_path)
-                        path_mapping[container_path] = symlink_path
+                        os.symlink(real_path, symlink_path)
+                        path_mapping[real_path] = symlink_path
                         logger.info(f"🔗 Mount dinamico RAG creato: {folder_name} -> {host_path}")
                     except Exception as e:
                         logger.warning(f"Impossibile creare mount per {folder_name}: {e}")
@@ -191,10 +192,10 @@ async def lifespan(app: FastAPI):
                     logger.warning(f"Mount ignorato: il percorso host '{host_path}' non esiste sul filesystem root.")
         
         # Dopo aver creato i symlink, rimuovi eventuali loop ricorsivi nidificati
-        # (es. NeuroNet/data/documents/NeuroNet → /app/documents == data/documents/
+        # (es. NeuroNet/data/documents/NeuroNet → DOC_DIR == data/documents/
         #  crea loop infinito in os.walk e DirectorySnapshot)
         # NOTA: per il progetto NeuroNet (ai-ecosystem), data/documents/ è un Docker
-        # volume montato a /app/documents/. Il symlink /app/documents/NeuroNet ha lo
+        # volume montato a DOC_DIR. Il symlink DOC_DIR/NeuroNet ha lo
         # STESSO inode di NeuroNet/data/documents/NeuroNet (stesso file). Rimuoviamo
         # TUTTI i symlink ricorsivi per evitare loop in DirectorySnapshot (watchdog).
         # NeuroNet verrà indicizzato in ingest_local_documents tramite percorso diretto.
@@ -203,14 +204,14 @@ async def lifespan(app: FastAPI):
             if ':' in pair:
                 host_path, _ = pair.split(':', 1)
                 host_path = host_path.strip()
-                container_path = os.path.join("/host_fs", host_path.lstrip('/'))
-                nested_doc_dir = os.path.join(container_path, "data", "documents")
+                real_path = os.path.join(HOST_FS_PREFIX, host_path.lstrip('/')) if HOST_FS_PREFIX else host_path
+                nested_doc_dir = os.path.join(real_path, "data", "documents")
                 if os.path.isdir(nested_doc_dir):
                     for nested_item in os.listdir(nested_doc_dir):
                         nested_path = os.path.join(nested_doc_dir, nested_item)
                         if os.path.islink(nested_path):
                             target = os.readlink(nested_path)
-                            if target == container_path:
+                            if target == real_path:
                                 os.remove(nested_path)
                                 logger.info(f"🧹 Rimosso symlink ricorsivo: {nested_path} -> {target}")
     # ==========================================================================
@@ -227,17 +228,17 @@ async def lifespan(app: FastAPI):
 
     # Watchdog filesystem (PollingObserver per compatibilità Docker bind mount / symlink)
     # Nota: usiamo PollingObserver (non Observer/inotify) perché inotify:
-    #   - Non segue i symlink dentro /app/documents/
-    #   - Non si propaga in modo affidabile attraverso i bind mount Docker (/host_fs)
+    #   - Non segue i symlink dentro DOC_DIR
+    #   - Non si propaga in modo affidabile attraverso i bind mount Docker (HOST_FS_PREFIX)
     # PollingObserver periodicamente esegue os.stat() sui file — funziona sempre.
     if WATCHDOG_ENABLED:
         worker_task = asyncio.create_task(rag_queue_worker())
         state.background_tasks.add(worker_task)
         observer = Observer(timeout=1)
-        handler = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, "/app/documents")
+        handler = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, DOC_DIR)
         
-        # Unico watch su /app/documents (i symlink ai progetti sono seguiti da os.scandir)
-        observer.schedule(handler, "/app/documents", recursive=True)
+        # Unico watch su DOC_DIR (i symlink ai progetti sono seguiti da os.scandir)
+        observer.schedule(handler, DOC_DIR, recursive=True)
                 
         observer.start()
         logger.info("👀 Watchdog PollingObserver Partito (intervallo 1s).")
@@ -257,8 +258,8 @@ async def lifespan(app: FastAPI):
                         observer.stop()
                         observer.join(timeout=5)
                         observer = Observer(timeout=1)
-                        new_handler = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, "/app/documents")
-                        observer.schedule(new_handler, "/app/documents", recursive=True)
+                        new_handler = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, DOC_DIR)
+                        observer.schedule(new_handler, DOC_DIR, recursive=True)
                         observer.start()
                         logger.info("Watchdog: nuovo Observer avviato dopo crash.")
                     elif qsize > 100:
@@ -426,6 +427,18 @@ from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 
+def _rate_limit_key_localhost(request: Request):
+    """Rate limiting separato per richieste interne (localhost vs esterno).
+
+    Mem0 chiama /api/embed internamente per l'entity embedding.
+    Le chiamate da localhost hanno un loro bucket (60/min) separato da
+    quello degli IP esterni, quindi non entrano in conflitto.
+    """
+    client = get_remote_address(request)
+    if client in ("127.0.0.1", "::1", "localhost", "0.0.0.0"):
+        return "127.0.0.1"  # bucket separato per chiamate interne
+    return client
+
 limiter = Limiter(key_func=get_remote_address)
 
 class Message(BaseModel):
@@ -536,10 +549,33 @@ async def reset_all(request: Request):
     return JSONResponse({"status": "success", "message": "Reset totale eseguito. Ingestion Graph RAG ripartita."})
 
 
+@app.post("/api/graph/reindex")
+@limiter.limit(API_RATE_LIMIT_HEAVY)
+async def graph_reindex(request: Request):
+    """Ricrea le connessioni (entity linking) tra tutti i nodi di memoria esistenti.
+
+    Scansiona tutte le memorie salvate in ``collateral_memories_v3``, estrae
+    le entità via spaCy e le collega nella entity store
+    (``collateral_memories_v3_entities``). Utile dopo aver attivato
+    ``infer=True`` per collegare retroattivamente i nodi pre-esistenti.
+    """
+    try:
+        body = await request.json()
+        user_id = body.get("user_id", "alfio_dev")
+    except Exception:
+        user_id = "alfio_dev"
+
+    logger.info(f"🔄 Avvio graph reindex per user={user_id}...")
+    result = await reindex_graph_connections(user_id=user_id)
+
+    status_code = 200 if result.get("success") else 500
+    return JSONResponse(content=result, status_code=status_code)
+
+
 @app.post("/api/webhook/git")
 async def git_webhook(request: Request):
     """Gestisce i webhook da GitHub/Gitea/GitLab per triggerare l'aggiornamento RAG via git pull."""
-    from config import GIT_WEBHOOK_SECRET, DOC_DIR
+    from config import GIT_WEBHOOK_SECRET
     
     # Sicurezza: Validazione secret token
     if GIT_WEBHOOK_SECRET:
@@ -823,7 +859,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
         return StreamingResponse(stream_gen(), media_type="application/x-ndjson")
 
 @app.post("/api/embeddings")
-@limiter.limit(API_RATE_LIMIT_DEFAULT)
+@limiter.limit(API_RATE_LIMIT_DEFAULT, key_func=_rate_limit_key_localhost)
 async def ollama_embeddings(request: Request):
     """Endpoint simulato per Embeddings (usato da mem0 o esterni, legacy)."""
     try:
@@ -847,7 +883,7 @@ async def ollama_embeddings(request: Request):
     return JSONResponse(status_code=200, content={"embedding": data[0].get("embedding", [])})
 
 @app.post("/api/embed")
-@limiter.limit(API_RATE_LIMIT_DEFAULT)
+@limiter.limit(API_RATE_LIMIT_DEFAULT, key_func=_rate_limit_key_localhost)
 async def ollama_embed_batch(request: Request):
     """Endpoint simulato per Embeddings in batch (usato da mem0 o esterni)."""
     try:

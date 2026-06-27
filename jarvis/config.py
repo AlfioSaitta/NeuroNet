@@ -105,23 +105,32 @@ else:
     LLM_THINKING_MODE: bool = MODEL_PROFILE.thinking_support
 
 # ==============================================================================
-# PERCORSI E CHUNKING
+# PERCORSI CENTRALIZZATI
 # ==============================================================================
+# DATA_DIR:       dati persistenti (stato RAG, cache, backup Mem0)
+# MODELS_DIR:     modelli GGUF, reranker, embedding
+# DOCUMENTS_DIR:  documenti monitorati per RAG (symlink esterni)
+# HOST_FS_PREFIX: prefisso mount host in Docker (vuoto per esecuzione diretta su host)
+DATA_DIR = os.getenv("DATA_DIR", "/app/mem0_data_v3")
+MODELS_DIR = os.getenv("MODELS_DIR", "/app/models")
+DOCUMENTS_DIR = os.getenv("DOCUMENTS_DIR", "/app/documents")
+HOST_FS_PREFIX = os.getenv("HOST_FS_PREFIX", "/host_fs")
+
 VECTOR_DB_VERSION = os.getenv("VECTOR_DB_VERSION", "v1")
 EXTERNAL_PROJECTS = os.getenv("EXTERNAL_PROJECTS", "")
-STATE_FILE = f"/app/mem0_data_v3/rag_state_{VECTOR_DB_VERSION}.json"
+STATE_FILE = os.getenv("STATE_FILE", os.path.join(DATA_DIR, f"rag_state_{VECTOR_DB_VERSION}.json"))
 CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "512"))
 CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "0"))
 MAX_CONCURRENT_EMBEDDINGS = int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", "8"))
-DOC_DIR = "/app/documents"
+DOC_DIR = DOCUMENTS_DIR
 DOC_COLLECTION = f"collateral_documents_{VECTOR_DB_VERSION}"
-INFRA_FILE = os.getenv("INFRA_FILE", "/app/mem0_data_v3/infrastructure.json")
-MEMORY_BACKUP_FILE = os.getenv("MEMORY_BACKUP_FILE", "/app/mem0_data_v3/memory_backup.json")
+INFRA_FILE = os.getenv("INFRA_FILE", os.path.join(DATA_DIR, "infrastructure.json"))
+MEMORY_BACKUP_FILE = os.getenv("MEMORY_BACKUP_FILE", os.path.join(DATA_DIR, "memory_backup.json"))
 
 # Cache HuggingFace / FastEmbed / tiktoken
-os.environ["HF_HOME"] = "/app/mem0_data_v3/hf_cache"
-os.environ["FASTEMBED_CACHE_PATH"] = "/app/mem0_data_v3/fastembed_cache"
-os.environ["TIKTOKEN_CACHE_DIR"] = "/app/mem0_data_v3/tiktoken_cache"
+os.environ["HF_HOME"] = os.path.join(DATA_DIR, "hf_cache")
+os.environ["FASTEMBED_CACHE_PATH"] = os.path.join(DATA_DIR, "fastembed_cache")
+os.environ["TIKTOKEN_CACHE_DIR"] = os.path.join(DATA_DIR, "tiktoken_cache")
 
 # ==============================================================================
 # 🎛️ PANNELLO DI CONTROLLO CENTRALIZZATO (HYPERPARAMETERS & RAG)
@@ -178,7 +187,7 @@ MCP_SKILL_EMBEDDED = os.getenv("MCP_SKILL_EMBEDDED", "true").lower() in ("1", "t
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen3-embedding-0.6b")
 EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))  # 768 via MRL (Qwen3 nativo 1024)
 FLASHRANK_MODEL = os.getenv("FLASHRANK_MODEL", "ms-marco-MiniLM-L-6-v2")
-Qwen3_RERANKER_MODEL = os.getenv("Qwen3_RERANKER_MODEL", "/app/models/Qwen3-Reranker-0.6B")
+Qwen3_RERANKER_MODEL = os.getenv("Qwen3_RERANKER_MODEL", os.path.join(MODELS_DIR, "Qwen3-Reranker-0.6B"))
 QENABLED_QWEN3_RERANKER = os.getenv("QENABLED_QWEN3_RERANKER", "").lower() in ("1", "true", "yes")
 RERANKER_DEVICE = os.getenv("RERANKER_DEVICE", "cpu")  # cpu per non rubare VRAM alla chat
 

@@ -1,0 +1,52 @@
+# ==============================================================================
+# systemd service — Jarvis AI Worker su HOST
+# ==============================================================================
+# Installazione:
+#   sudo cp jarvis-host.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable jarvis-host
+#   sudo systemctl start jarvis-host
+#
+# Logs: journalctl -u jarvis-host -f
+# ==============================================================================
+
+[Unit]
+Description=Jarvis AI Worker (Host)
+Documentation=https://github.com/collateralstudios/ai-ecosystem
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=alfio
+Group=users
+
+# Directory di lavoro = cartella jarvis/ (dove sta main.py)
+WorkingDirectory=/home/alfio/Projects/ai-ecosystem/jarvis
+
+# Ambiente Python
+Environment=PATH=/home/alfio/Projects/ai-ecosystem/venv/bin:/usr/local/bin:/usr/bin:/bin
+
+# Avvio servizi Docker prima di Jarvis
+ExecStartPre=/usr/bin/docker compose -f /home/alfio/Projects/ai-ecosystem/docker-compose.services.yml up -d
+
+# Jarvis su host con Granian ASGI server
+ExecStart=/home/alfio/Projects/ai-ecosystem/venv/bin/granian --interface asgi --host 0.0.0.0 --port 8000 main:app
+
+# Graceful stop
+ExecStop=/usr/bin/docker compose -f /home/alfio/Projects/ai-ecosystem/docker-compose.services.yml down
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Restart automatico
+Restart=on-failure
+RestartSec=5
+
+# Logs
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

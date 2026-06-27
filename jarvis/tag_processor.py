@@ -919,16 +919,34 @@ def _escape_telegram_v2(text: str) -> str:
 def _escape_telegram_legacy(text: str) -> str:
     """
     Escape minimale per Telegram Markdown legacy.
-    Solo i caratteri che causano problemi noti:
-      - `_` a inizio parola o dopo spazio può rompere italic
-      - `*` a inizio riga può rompere bold
-      - Backtick non chiuso
+    Previene "Can't parse entities: can't find end of the entity starting at byte offset N".
+
+    I code blocks sono già protetti (sostituiti con placeholder) prima della chiamata.
+    Gestisce caratteri che causano entità non chiuse:
+      - `_` solitario o mal posizionato (italic non chiuso)
+      - `*` non bilanciato (bold non chiuso)
+      - `` ` `` non bilanciato (code non chiuso)
     """
     # Proteggi _ che non fanno parte di _italic_ valido
     # Pattern: _ non bilanciato o _ in mezzo a parola
     text = re.sub(r'(?<!\w)_(?!\w)', r'\\_', text)  # _ solitario tra non-word
     text = re.sub(r'(?<=\s)_(?=\s)', r'\\_', text)   # _ isolato tra spazi
     text = re.sub(r'_(?=\d)', r'\\_', text)            # _ prima di numero (evita italic)
+
+    # Proteggi * non bilanciato (Telegram Markdown legacy: *text* = bold)
+    star_indices = [i for i, c in enumerate(text) if c == '*']
+    if len(star_indices) % 2 == 1:
+        # Numero dispari → escape dell'ultimo * (il più probabile non chiuso)
+        pos = star_indices[-1]
+        text = text[:pos] + '\\*' + text[pos+1:]
+
+    # Proteggi ` non bilanciato (code inline non chiuso)
+    bt_indices = [i for i, c in enumerate(text) if c == '`']
+    if len(bt_indices) % 2 == 1:
+        # Numero dispari → escape dell'ultimo backtick
+        pos = bt_indices[-1]
+        text = text[:pos] + '\\`' + text[pos+1:]
+
     return text
 
 

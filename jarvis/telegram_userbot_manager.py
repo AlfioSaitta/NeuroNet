@@ -11,7 +11,7 @@ from telethon import TelegramClient, events
 
 from config import (
     logger, USERBOT_ENABLED, USERBOT_API_ID, USERBOT_API_HASH,
-    LLM_OPTIONS
+    LLM_OPTIONS, DATA_DIR
 )
 from llm_engine import engine, extract_content
 import state
@@ -22,7 +22,7 @@ active_clients = {}
 userbot_sessions = {}
 SESSION_TTL = 600
 
-USERBOTS_DIR = "/app/mem0_data_v3/userbots"
+USERBOTS_DIR = os.path.join(DATA_DIR, "userbots")
 os.makedirs(USERBOTS_DIR, exist_ok=True)
 
 def get_session_path(user_id):
