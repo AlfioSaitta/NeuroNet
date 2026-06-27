@@ -274,31 +274,33 @@ async def lifespan(app: FastAPI):
     if TELEGRAM_ENABLED and TELEGRAM_TOKEN and ALLOWED_USERS:
         try:
             # HTTPXRequest con retry automatico su OSError (DNS/network sporadici)
+            # PTB 21.x: _request_wrapper è un metodo, non un attributo → subclassing invece di monkey-patch
             from telegram.error import BadRequest, NetworkError
-            _base_req = HTTPXRequest(
+
+            class _RetryHTTPXRequest(HTTPXRequest):
+                """HTTPXRequest con retry 5x su errori di rete (DNS, timeout, OSError)."""
+
+                async def _request_wrapper(self, url, method, **kw):
+                    for _attempt in range(5):
+                        try:
+                            return await super()._request_wrapper(url, method, **kw)
+                        except (OSError, NetworkError) as _e:
+                            if isinstance(_e, BadRequest):
+                                raise
+                            if _attempt < 4:
+                                logger.warning(
+                                    f"DNS/Network error su Telegram API, retry {_attempt+2}/5: {_e}"
+                                )
+                                await asyncio.sleep(2 ** _attempt + 0.5 * _attempt)
+                            else:
+                                raise
+
+            _base_req = _RetryHTTPXRequest(
                 read_timeout=120.0,
                 write_timeout=120.0,
                 connect_timeout=60.0,
                 pool_timeout=60.0,
             )
-            _orig_wrapper = _base_req._request_wrapper
-
-            async def _retry_wrapper(url, method, **kw):
-                logger.debug(f"📡 _retry_wrapper: {method} {str(url)[:80]}")
-                for _attempt in range(5):
-                    try:
-                        return await _orig_wrapper(url, method, **kw)
-                    except (OSError, NetworkError) as _e:
-                        # BadRequest estende NetworkError in PTB 21.x; non ritentiamo errori applicativi
-                        if isinstance(_e, BadRequest):
-                            raise
-                        if _attempt < 4:
-                            logger.warning(f"DNS/Network error su Telegram API, retry {_attempt+2}/5: {_e}")
-                            await asyncio.sleep(2 ** _attempt + 0.5 * _attempt)
-                        else:
-                            raise
-
-            _base_req._request_wrapper = _retry_wrapper
             logger.info("📡 Telegram HTTP client con retry DNS (5 tentativi) attivo")
 
             state.telegram_app = (
@@ -637,7 +639,7 @@ async def git_webhook(request: Request):
 async def ollama_chat(payload: ChatRequest, request: Request):
     state.total_requests += 1
     """Endpoint chat Ollama-nativa simulata con LlamaEngine in locale."""
-    from datetime import datetime
+    from datetime import datetime, UTC
     
     body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
     body["model"] = OLLAMA_MODEL
@@ -682,7 +684,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         choice = response["choices"][0]["message"]
         ollama_resp = {
             "model": body["model"],
-            "created_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": datetime.now(UTC).isoformat() + "Z",
             "message": {
                 "role": choice.get("role", "assistant"),
                 "content": choice.get("content", "")
@@ -726,7 +728,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
 
                     ollama_chunk = {
                         "model": body["model"],
-                        "created_at": datetime.utcnow().isoformat() + "Z",
+                        "created_at": datetime.now(UTC).isoformat() + "Z",
                         "message": {
                             "role": "assistant",
                             "content": content
@@ -746,7 +748,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             # Send final done message con testo pulito dai tag
             yield json.dumps({
                 "model": body["model"],
-                "created_at": datetime.utcnow().isoformat() + "Z",
+                "created_at": datetime.now(UTC).isoformat() + "Z",
                 "message": {"role": "assistant", "content": full_text},
                 "done": True
             }).encode() + b"\n"
@@ -758,7 +760,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
 async def ollama_generate(payload: GenerateRequest, request: Request):
     state.total_requests += 1
     """Endpoint generate Ollama simulato con iniezione RAG."""
-    from datetime import datetime
+    from datetime import datetime, UTC
     body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
     body["model"] = OLLAMA_MODEL
     prompt = body.get("prompt", "")
@@ -818,7 +820,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
         
         return JSONResponse(status_code=200, content={
             "model": body["model"],
-            "created_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": datetime.now(UTC).isoformat() + "Z",
             "response": cleaned,
             "done": True
         })
@@ -833,7 +835,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
                     
                     yield json.dumps({
                         "model": body["model"],
-                        "created_at": datetime.utcnow().isoformat() + "Z",
+                        "created_at": datetime.now(UTC).isoformat() + "Z",
                         "response": content,
                         "done": False
                     }).encode() + b"\n"
@@ -851,7 +853,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
             
             yield json.dumps({
                 "model": body["model"],
-                "created_at": datetime.utcnow().isoformat() + "Z",
+                "created_at": datetime.now(UTC).isoformat() + "Z",
                 "response": cleaned,
                 "done": True
             }).encode() + b"\n"
@@ -951,7 +953,7 @@ async def openai_models():
 @limiter.limit(API_RATE_LIMIT_DEFAULT)
 async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request: Request):
     state.total_requests += 1
-    from datetime import datetime
+    from datetime import datetime, UTC
     import uuid
 
     body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
@@ -999,7 +1001,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion",
-            "created": int(datetime.utcnow().timestamp()),
+            "created": int(datetime.now(UTC).timestamp()),
             "model": OLLAMA_MODEL,
             "choices": [
                 {
@@ -1022,7 +1024,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
             # Single response-scoped ID + timestamp (OpenAI spec: all chunks share the same id)
             response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-            response_created = int(datetime.utcnow().timestamp())
+            response_created = int(datetime.now(UTC).timestamp())
 
             full_chunks = []
             role_sent = False

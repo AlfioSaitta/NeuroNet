@@ -31,16 +31,22 @@ echo -e "${CYAN}  Avvio JARVIS - GPU WORKER (HOST)                  ${NC}"
 echo -e "${CYAN}====================================================${NC}"
 
 # ── 1. Verifica venv ──────────────────────────────────────────────
-if [ ! -f "$SCRIPT_DIR/venv/bin/activate" ]; then
-    echo -e "${RED}❌ Nessun ambiente virtuale trovato in venv/${NC}"
+# Priorità: jarvis/venv/ (ha CUDA già compilato) > venv/ (root)
+if [ -f "$SCRIPT_DIR/jarvis/venv/bin/activate" ]; then
+    VENV_DIR="$SCRIPT_DIR/jarvis/venv"
+elif [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
+    VENV_DIR="$SCRIPT_DIR/venv"
+else
+    echo -e "${RED}❌ Nessun ambiente virtuale trovato (cercato jarvis/venv/ e venv/)${NC}"
     echo -e "${YELLOW}   Crealo con: python3 -m venv venv && source venv/bin/activate && pip install -r jarvis/requirements.txt${NC}"
     exit 1
 fi
+echo -e "${GREEN}✅ Venv trovato: $VENV_DIR${NC}"
 
 # ── 2. Re-build opzionale llama-cpp-python ────────────────────────
 if [ "$1" = "--build" ]; then
     echo -e "${YELLOW}🔧 Re-compilazione llama-cpp-python con CUDA...${NC}"
-    source "$SCRIPT_DIR/venv/bin/activate"
+    source "$VENV_DIR/bin/activate"
     CUDACXX=/usr/local/cuda/bin/nvcc \
     CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" \
         FORCE_CMAKE=1 \
@@ -83,7 +89,7 @@ echo -e "${GREEN}✅ .env caricato (DATA_DIR=${DATA_DIR:-non impostato}).${NC}"
 
 # ── 7. Attiva venv e avvia Jarvis ─────────────────────────────────
 echo -e "${YELLOW}🚀 Avvio Jarvis su HOST (porta 8000)...${NC}"
-source "$SCRIPT_DIR/venv/bin/activate"
+source "$VENV_DIR/bin/activate"
 cd "$SCRIPT_DIR/jarvis" || exit 1
 
 exec granian --interface asgi --host 0.0.0.0 --port 8000 main:app
