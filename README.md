@@ -11,7 +11,7 @@ L'inferenza avviene **interamente in-process** tramite `llama-cpp-python` su mod
 
 ---
 
-## 🚦 Stato del Sistema (al 2026-06-24)
+## 🚦 Stato del Sistema (al 2026-06-28)
 
 | Componente | Stato | Note |
 |---|---|---|
@@ -141,28 +141,33 @@ ai-ecosystem/
     ├── Dockerfile                   # Build CUDA 13.0 + llama-cpp-python
     ├── requirements.txt             # 33 dipendenze Python
     ├── models/                      # File GGUF (~8.7GB, gitignored)
-    ├── main.py                      # Entry point FastAPI/Granian (967 righe)
-    ├── config.py                    # Configurazione centralizzata (291 righe)
-    ├── state.py                     # Stato globale mutabile (70 righe)
-    ├── llm_engine.py                # LlamaEngine + PriorityLock (365 righe)
-    ├── rag.py                       # Pipeline RAG completa (1763 righe)
-    ├── memory.py                    # Mem0 + helper memoria (99 righe)
-    ├── memory_backup.py             # Export/import memoria JSON
-    ├── prompt_builder.py            # Gatekeeper + super-prompt (427 righe)
-    ├── agent_tools.py               # Tool-calling agentico (223 righe)
-    ├── skills_manager.py            # Skill dinamiche da YAML (140 righe)
+    ├── main.py                      # Entry point FastAPI/Granian (1497 righe)
+    ├── config.py                    # Configurazione centralizzata (325 righe)
+    ├── state.py                     # Stato globale mutabile (72 righe)
+    ├── llm_engine.py                # LlamaEngine + PriorityLock (571 righe)
+    ├── rag.py                       # Pipeline RAG completa (1797 righe)
+    ├── memory.py                    # Mem0 + helper memoria (187 righe)
+    ├── memory_backup.py             # Export/import memoria JSON (68 righe)
+    ├── prompt_builder.py            # Gatekeeper + super-prompt (479 righe)
+    ├── agent_tools.py               # Tool-calling agentico (1008 righe)
+    ├── skills_manager.py            # Skill dinamiche da YAML (526 righe)
     ├── skills/                      # Skill dinamiche (vuota)
     ├── web_search.py                # SearXNG + Crawl4AI (67 righe)
-    ├── telegram_bot.py              # Handler bot Telegram (971 righe)
+    ├── telegram_bot.py              # Handler bot Telegram (1176 righe)
     ├── telegram_userbot_manager.py  # Multi-userbot Telethon (201 righe)
-    ├── cron_agent.py                # Scheduler APScheduler (185 righe)
+    ├── cron_agent.py                # Scheduler APScheduler (186 righe)
     ├── task_manager.py              # ToDo persistenti (73 righe)
-    ├── reflection_agent.py          # Self-reflection notturno (80 righe)
-    ├── dashboard.py                 # Pannello web Chart.js (1688 righe)
-    ├── infrastructure.py            # Registro server SSH (46 righe)
-    ├── model_profiles.py            # Auto-rilevamento famiglia modello
+    ├── reflection_agent.py          # Self-reflection notturno (82 righe)
+    ├── dashboard.py                 # Pannello web Chart.js (1983 righe)
+    ├── infrastructure.py            # Registro server SSH (45 righe)
+    ├── model_profiles.py            # Auto-rilevamento famiglia modello (292 righe)
+    ├── external_providers.py        # Provider cloud esterni (356 righe)
+    ├── mcp_client.py                # Client MCP per tool esterni (634 righe)
+    ├── tag_processor.py             # Elaborazione tag XML nelle risposte (1043 righe)
+    ├── agents/                      # Def. agenti specializzati
+    │   └── code-reviewer.agent.md
     ├── cron_jobs.json               # Job schedulati persistenti
-    └── test_numpy.py                # Test numpy
+    └── tasks.json                   # Task persistenti
 ```
 
 ---
@@ -631,17 +636,24 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo 
 ### Endpoint API
 
 | Endpoint | Metodo | Funzione |
-|---|---|---|
+|---|---|---|---|
 | `/api/chat` | POST | Chat con memoria + RAG + tool-calling |
 | `/api/generate` | POST | Generate + cache semantica |
-| `/v1/chat/completions` | POST | API compatibile OpenAI |
-| `/api/embed` / `/api/embeddings` | POST | Embeddings |
+| `/api/embed` / `/api/embeddings` | POST | Embeddings (legacy) |
 | `/api/tags`, `/api/ps`, `/api/show`, `/api/version` | GET/POST | Stub compatibilità Ollama |
-| `/v1/models` | GET | Lista modelli (API OpenAI) |
 | `/api/project-tree` | GET | Albero del progetto indicizzato |
 | `/api/webhook/git` | POST | Git webhook → pull → re-ingestion |
 | `/api/reset-all` | GET/POST | Reset RAG + Mem0 |
 | `/docs` | GET | Swagger UI |
+| **OpenAI-compatibili** | | |
+| `/v1/chat/completions` | POST | Chat completion (streaming SSE) |
+| `/v1/completions` | POST | Text completion (streaming SSE) |
+| `/v1/embeddings` | POST | Embeddings (float/base64) |
+| `/v1/models` | GET | Lista modelli |
+| `/v1/models/{model_name}` | GET | Dettaglio modello |
+| `/v1/moderations` | POST | Moderazione contenuti |
+| `/v1/audio/transcriptions` | POST | Trascrizione audio (whisper) |
+| `/v1/audio/speech` | POST | Text-to-speech (gTTS) |
 
 ---
 
@@ -740,6 +752,12 @@ tar -cvzf backup_ai_$(date +%Y%m%d).tar.gz ./data .env
 ---
 
 ## 📝 Changelog
+
+### v9.3.0 (2026-06-28) — OpenAI API completa + codebase cleanup
+- **OpenAI API:** Implementati 6 nuovi endpoint: `/v1/completions`, `/v1/embeddings`, `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/models/{model_name}`, `/v1/moderations`
+- **main.py:** Da 967 a 1497 righe (+55%) — nuovi Pydantic models, streaming SSE, faster-whisper, gTTS
+- **Codebase cleanup:** Rimossi `scratch/` (script orfani), `__pycache__/` dalla sorgente, symlink rotti in `documents/`
+- **Documentazione:** README e AGENTS.md aggiornati con nuovi endpoint e struttura file attuale
 
 ### v9.2.0 (2026-06-24) — Analisi completa + Architettura Provider
 - **README:** Analisi completa e approfondita di tutti i 14 moduli Jarvis

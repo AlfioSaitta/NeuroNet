@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-06-24 (planning + optimizations research)
+> **Data ultimo aggiornamento:** 2026-06-28 (OpenAI API completa + codebase cleanup)
 
 ---
 
@@ -43,7 +43,7 @@ llama-cpp-python (v0.3.31) è buildato da GitHub main con `-DGGML_CUDA=on -DCMAK
 
 ### Componente Centrale: Jarvis
 
-**Jarvis** è un proxy LLM asincrono scritto in Python (FastAPI + Granian) che espone un'API compatibile con il formato **Ollama** (NON OpenAI `/v1/*`). Integra:
+**Jarvis** è un proxy LLM asincrono scritto in Python (FastAPI + Granian) che espone API in formato **Ollama** e **OpenAI** (`/v1/*`). Integra:
 - Inferenza LLM locale via `llama-cpp-python` (file GGUF, nessun Ollama installato)
 - Memoria episodica a lungo termine (Mem0 + Qdrant)
 - RAG documentale AST-aware con Tree-sitter
@@ -488,11 +488,23 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 
 ### Endpoint API
 
-L'API è **compatibile con il formato Ollama** (non OpenAI):
-- Chat: `POST /api/chat` con body `{"model":"...", "messages":[...], "stream":false}`
-- Generate: `POST /api/generate`
-- Embed: `POST /api/embeddings`
-- Tags: `GET /api/tags` (stub Ollama)
+L'API supporta **sia il formato Ollama** che il **formato OpenAI** (`/v1/*`):
+
+**Formato Ollama:**
+- `POST /api/chat` — Chat con memoria, RAG, tool-calling
+- `POST /api/generate` — Generate + cache semantica
+- `POST /api/embeddings` — Embeddings (legacy)
+- `GET /api/tags`, `GET /api/ps`, `GET /api/show`, `GET /api/version` — Stub Ollama
+
+**Formato OpenAI (`/v1/*`):**
+- `POST /v1/chat/completions` — Chat completion (streaming SSE)
+- `POST /v1/completions` — Text completion (streaming SSE)
+- `POST /v1/embeddings` — Embeddings (float/base64 encoding)
+- `GET /v1/models` — Lista modelli
+- `GET /v1/models/{model_name}` — Dettaglio modello
+- `POST /v1/moderations` — Moderazione contenuti
+- `POST /v1/audio/transcriptions` — Trascrizione audio (faster-whisper)
+- `POST /v1/audio/speech` — Text-to-speech (gTTS)
 
 ### Tool Calling
 
