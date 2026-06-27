@@ -56,6 +56,9 @@ recovery_codes.txt
 *.key
 allowed_users.json
 
+# Session/continuation cache
+.omo/
+
 # IDE e Sistemi Operativi
 .idea/
 .vscode/
