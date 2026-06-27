@@ -124,7 +124,6 @@ Il bot Telegram è centralizzato sul nodo **Master (VPS)** per disponibilità 24
 ```
 ai-ecosystem/
 ├── .env.example                     # Template configurazione
-├── docker-compose.yml               # Stack completo di riferimento
 ├── docker-compose.vps.yml           # Stack Master VPS (no GPU)
 ├── docker-compose.worker.yml        # Stack Worker GPU locale
 ├── start_master.sh / start_worker.sh
@@ -758,6 +757,7 @@ tar -cvzf backup_ai_$(date +%Y%m%d).tar.gz ./data .env
 - **main.py:** Da 967 a 1497 righe (+55%) — nuovi Pydantic models, streaming SSE, faster-whisper, gTTS
 - **Codebase cleanup:** Rimossi `scratch/` (script orfani), `__pycache__/` dalla sorgente, symlink rotti in `documents/`
 - **Documentazione:** README e AGENTS.md aggiornati con nuovi endpoint e struttura file attuale
+- **docker-compose.yml:** Rimosso (superseduto dalla split vps.yml + worker.yml); deploy_vps.sh aggiornato a vps.yml
 
 ### v9.2.0 (2026-06-24) — Analisi completa + Architettura Provider
 - **README:** Analisi completa e approfondita di tutti i 14 moduli Jarvis

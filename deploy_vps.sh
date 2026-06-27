@@ -73,8 +73,8 @@ ssh -i "$SSH_KEY" "$VPS_USER@$VPS_IP" << 'EOF'
     mkdir -p data/mem0 data/qdrant models
     
     # Riavvio dello stack
-    sudo docker compose down
-    sudo docker compose up -d --build
+    sudo docker compose -f docker-compose.vps.yml down
+    sudo docker compose -f docker-compose.vps.yml up -d --build
     
     echo "Pulizia immagini Docker inutilizzate..."
     sudo docker image prune -f

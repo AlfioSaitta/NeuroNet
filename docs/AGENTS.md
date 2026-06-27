@@ -127,7 +127,6 @@ Master jarvis:8000
 ```
 /home/alfio/Projects/ai-ecosystem/
 ├── .env                         # Segreti e configurazione (gitignored, NON committare mai)
-├── docker-compose.yml           # Stack completo (sviluppo/reference)
 ├── docker-compose.vps.yml       # Stack Master VPS (NO sezione deploy GPU)
 ├── docker-compose.worker.yml    # Stack Worker GPU locale
 ├── start_master.sh              # Avvia il Master sulla VPS
