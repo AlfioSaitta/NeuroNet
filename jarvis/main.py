@@ -8,6 +8,8 @@ import json
 import time
 import asyncio
 import uuid
+import io
+import tempfile
 import warnings
 import sys
 import traceback
@@ -32,7 +34,7 @@ def _thread_excepthook(args):
 threading.excepthook = _thread_excepthook
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from qdrant_client import AsyncQdrantClient
@@ -929,6 +931,44 @@ class ChatCompletionRequestOpenAI(BaseModel):
     top_p: Optional[float] = None
     stop: Optional[List[str]] = None
 
+class CompletionRequestOpenAI(BaseModel):
+    model: str
+    prompt: str | List[str]
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    stop: Optional[List[str]] = None
+    stream: Optional[bool] = False
+    echo: Optional[bool] = False
+    n: Optional[int] = 1
+    suffix: Optional[str] = None
+    best_of: Optional[int] = None
+    logprobs: Optional[int] = None
+    user: Optional[str] = None
+
+    model_config = ConfigDict(extra="allow")
+
+class EmbeddingRequestOpenAI(BaseModel):
+    model: str
+    input: str | List[str]
+    encoding_format: Optional[str] = "float"
+    user: Optional[str] = None
+
+    model_config = ConfigDict(extra="allow")
+
+class SpeechRequestOpenAI(BaseModel):
+    model: str
+    input: str
+    voice: Optional[str] = "alloy"
+    speed: Optional[float] = 1.0
+    response_format: Optional[str] = "mp3"
+
+    model_config = ConfigDict(extra="allow")
+
+class ModerationRequestOpenAI(BaseModel):
+    input: str | List[str]
+    model: Optional[str] = None
+
 @app.get("/v1/models")
 async def openai_models():
     return {
@@ -1060,6 +1100,341 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(openai_stream_gen(), media_type="text/event-stream")
+
+@app.post("/v1/completions")
+@limiter.limit(API_RATE_LIMIT_DEFAULT, key_func=_rate_limit_key_localhost)
+async def openai_completions(payload: CompletionRequestOpenAI, request: Request):
+    """Endpoint text completions in formato OpenAI (legacy)."""
+    state.total_requests += 1
+    from datetime import datetime, UTC
+    import uuid
+
+    body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
+    is_stream = body.get("stream", False)
+
+    raw_prompt = body.get("prompt", "")
+    if isinstance(raw_prompt, list):
+        raw_prompt = " ".join(raw_prompt)
+    prompt_str = str(raw_prompt)
+
+    options = {}
+    if body.get("temperature") is not None:
+        options["temperature"] = body["temperature"]
+    if body.get("max_tokens") is not None:
+        options["num_predict"] = body["max_tokens"]
+    if body.get("top_p") is not None:
+        options["top_p"] = body["top_p"]
+    if body.get("stop") is not None:
+        stop_seq = body["stop"]
+        if isinstance(stop_seq, list):
+            options["stop"] = stop_seq
+        elif isinstance(stop_seq, str):
+            options["stop"] = [stop_seq]
+    if body.get("suffix"):
+        options["suffix"] = body["suffix"]
+
+    messages = [{"role": "user", "content": prompt_str}]
+
+    if not is_stream:
+        response = await engine.generate_chat(messages, options=options, stream=False)
+        if "error" in response:
+            return JSONResponse(status_code=500, content={"error": response["error"]})
+
+        state.total_prompt_tokens += response.get("usage", {}).get("prompt_tokens", 0)
+        state.total_completion_tokens += response.get("usage", {}).get("completion_tokens", 0)
+
+        content = response["choices"][0]["message"].get("content", "")
+        echo_prefix = prompt_str if body.get("echo") else ""
+        return {
+            "id": f"cmpl-{uuid.uuid4().hex[:12]}",
+            "object": "text_completion",
+            "created": int(datetime.now(UTC).timestamp()),
+            "model": OLLAMA_MODEL,
+            "choices": [
+                {
+                    "text": echo_prefix + content,
+                    "index": 0,
+                    "logprobs": None,
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": response.get("usage", {})
+        }
+    else:
+        async def completion_stream_gen():
+            gen = await engine.generate_chat(messages, options=options, stream=True)
+            if isinstance(gen, dict) and "error" in gen:
+                yield f"data: {json.dumps({'error': gen['error']})}\n\n"
+                return
+
+            response_id = f"cmpl-{uuid.uuid4().hex[:12]}"
+            response_created = int(datetime.now(UTC).timestamp())
+
+            async for chunk in gen:
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    delta = chunk["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    finish_reason = chunk["choices"][0].get("finish_reason")
+
+                    yield f"data: {json.dumps({'id': response_id, 'object': 'text_completion', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'text': content, 'logprobs': None, 'finish_reason': finish_reason}]})}\n\n"
+
+                    if finish_reason:
+                        break
+
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(completion_stream_gen(), media_type="text/event-stream")
+
+
+@app.post("/v1/embeddings")
+@limiter.limit(API_RATE_LIMIT_DEFAULT, key_func=_rate_limit_key_localhost)
+async def openai_embeddings(payload: EmbeddingRequestOpenAI, request: Request):
+    """Endpoint embeddings in formato OpenAI."""
+    import base64
+
+    body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
+    inputs = body.get("input", [])
+    if isinstance(inputs, str):
+        inputs = [inputs]
+
+    encoding_format = body.get("encoding_format", "float")
+
+    result = await engine.get_embeddings(inputs, priority=0)
+    if "error" in result:
+        return JSONResponse(status_code=500, content={"error": result["error"]})
+
+    data_list = result.get("data", [])
+    embeddings_data = []
+    total_tokens = 0
+    for idx, d in enumerate(data_list):
+        emb = d.get("embedding", [])
+        if encoding_format == "base64":
+            import struct
+            emb_bytes = struct.pack(f'{len(emb)}f', *emb)
+            emb_b64 = base64.b64encode(emb_bytes).decode("utf-8")
+            embeddings_data.append({
+                "object": "embedding",
+                "embedding": emb_b64,
+                "index": idx
+            })
+        else:
+            embeddings_data.append({
+                "object": "embedding",
+                "embedding": emb,
+                "index": idx
+            })
+        total_tokens += len(inputs[idx]) // 4 if idx < len(inputs) else 0
+
+    return {
+        "object": "list",
+        "data": embeddings_data,
+        "model": body.get("model", OLLAMA_MODEL),
+        "usage": {
+            "prompt_tokens": total_tokens or len(data_list),
+            "total_tokens": total_tokens or len(data_list)
+        }
+    }
+
+
+_whisper_model = None
+
+@app.post("/v1/audio/transcriptions")
+@limiter.limit(API_RATE_LIMIT_HEAVY)
+async def openai_audio_transcriptions(request: Request):
+    """Trascrizione audio tramite faster-whisper in formato OpenAI."""
+    global _whisper_model
+
+    form = await request.form()
+    audio_file = form.get("file")
+    if not audio_file:
+        return JSONResponse(status_code=400, content={"error": "Missing 'file' field"})
+
+    language = form.get("language", None)
+    response_format = form.get("response_format", "json")
+    prompt_text = form.get("prompt", None)
+    temperature = form.get("temperature", None)
+
+    # Lazy init WhisperModel
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        _whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+
+    # Salva upload su file temporaneo
+    audio_bytes = await audio_file.read()
+    suffix = os.path.splitext(str(audio_file.filename))[1] or ".webm"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+
+    try:
+        segments, info = _whisper_model.transcribe(
+            tmp_path,
+            language=language or None,
+            initial_prompt=prompt_text or None,
+            beam_size=5
+        )
+        segments_list = list(segments)
+        full_text = " ".join(seg.text for seg in segments_list)
+    except Exception as e:
+        logger.error(f"Whisper transcription error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    if response_format == "text":
+        return Response(content=full_text, media_type="text/plain")
+
+    # response_format == "json" (default)
+    return {
+        "text": full_text,
+    }
+
+
+@app.post("/v1/audio/speech")
+@limiter.limit(API_RATE_LIMIT_DEFAULT)
+async def openai_audio_speech(payload: SpeechRequestOpenAI, request: Request):
+    """Text-to-speech tramite gTTS in formato OpenAI."""
+    body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
+    input_text = body.get("input", "")
+    voice = body.get("voice", "alloy")
+    speed = body.get("speed", 1.0)
+
+    # Mappa voci OpenAI a codici lingua gTTS
+    voice_to_lang = {
+        "alloy": "en", "echo": "en", "fable": "en",
+        "onyx": "en", "nova": "en", "shimmer": "en",
+    }
+    lang_code = voice_to_lang.get(voice, "it")
+
+    if not input_text:
+        return JSONResponse(status_code=400, content={"error": "Missing 'input' field"})
+
+    try:
+        from gtts import gTTS
+        import io
+
+        tts = gTTS(text=input_text, lang=lang_code, slow=(speed < 1.0))
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+
+        return StreamingResponse(fp, media_type="audio/mpeg")
+    except Exception as e:
+        logger.error(f"gTTS error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/v1/models/{model_name}")
+async def openai_models_detail(model_name: str):
+    """Restituisce i dettagli di un modello specifico."""
+    known_models = {
+        OLLAMA_MODEL: {"id": OLLAMA_MODEL, "object": "model", "created": 1710000000, "owned_by": "ollama"},
+        "nomic-embed-text:latest": {"id": "nomic-embed-text:latest", "object": "model", "created": 1710000000, "owned_by": "ollama"},
+    }
+    model = known_models.get(model_name)
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    return model
+
+
+@app.post("/v1/moderations")
+@limiter.limit(API_RATE_LIMIT_DEFAULT)
+async def openai_moderations(payload: ModerationRequestOpenAI, request: Request):
+    """Content moderation tramite LLM locale."""
+    from datetime import datetime, UTC
+    import uuid
+
+    body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
+    raw_input = body.get("input", "")
+    if isinstance(raw_input, list):
+        raw_input = " ".join(raw_input)
+    input_text = str(raw_input)
+
+    # Usa il LLM per classificare il contenuto
+    mod_prompt = (
+        "Classify the following text for content moderation. "
+        "Return ONLY a JSON object with these boolean categories:\n"
+        "hate, hate/threatening, harassment, self-harm, sexual, "
+        "sexual/minors, violence, violence/graphic.\n"
+        "Example: {\"flagged\": true, \"categories\": {\"hate\": false, ...}}\n\n"
+        f"Text: {input_text[:2000]}"
+    )
+
+    messages = [{"role": "user", "content": mod_prompt}]
+    try:
+        response = await engine.generate_chat(messages, options={"temperature": 0.1, "num_predict": 256}, stream=False)
+        if "error" in response:
+            # Fallback: nessuna moderatione
+            return _moderation_fallback(input_text)
+
+        content = response["choices"][0]["message"].get("content", "")
+
+        # Estrai JSON dalla risposta
+        import re
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            mod_result = json.loads(json_match.group())
+            flagged = mod_result.get("flagged", False)
+            categories = mod_result.get("categories", {})
+            category_scores = mod_result.get("category_scores", {k: 1.0 if v else 0.0 for k, v in categories.items()})
+            if not category_scores:
+                category_scores = {k: 1.0 if v else 0.0 for k, v in categories.items()}
+            return {
+                "id": f"modr-{uuid.uuid4().hex[:12]}",
+                "model": body.get("model", OLLAMA_MODEL),
+                "results": [
+                    {
+                        "flagged": flagged,
+                        "categories": categories,
+                        "category_scores": category_scores
+                    }
+                ]
+            }
+    except Exception as e:
+        logger.warning(f"Moderation LLM error, using fallback: {e}")
+
+    return _moderation_fallback(input_text)
+
+
+def _moderation_fallback(input_text: str) -> dict:
+    """Fallback per moderation: identifica parole chiave offensivo."""
+    from datetime import datetime, UTC
+    import uuid
+
+    text_lower = input_text.lower()
+    flagged_keywords = [
+        "violence", "hate", "terrorist", "bomb", "kill", "murder",
+        "explicit", "porn", "sexual", "harassment", "abuse"
+    ]
+    flagged = any(kw in text_lower for kw in flagged_keywords)
+
+    categories = {
+        "hate": "hate" in text_lower,
+        "hate/threatening": False,
+        "harassment": "harassment" in text_lower,
+        "self-harm": False,
+        "sexual": "sexual" in text_lower or "porn" in text_lower,
+        "sexual/minors": False,
+        "violence": "violence" in text_lower or "kill" in text_lower,
+        "violence/graphic": False,
+    }
+    category_scores = {k: 1.0 if v else 0.0 for k, v in categories.items()}
+
+    return {
+        "id": f"modr-{uuid.uuid4().hex[:12]}",
+        "model": OLLAMA_MODEL,
+        "results": [
+            {
+                "flagged": flagged,
+                "categories": categories,
+                "category_scores": category_scores
+            }
+        ]
+    }
+
 
 @app.get("/api/tags")
 async def ollama_tags():
