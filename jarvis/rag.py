@@ -9,6 +9,7 @@ import hashlib
 import uuid
 import re
 import asyncio
+import shutil
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText, PointStruct, VectorParams, Distance
 from pathlib import Path
 import tiktoken
@@ -114,7 +115,14 @@ if WATCHDOG_ENABLED:
 # ==============================================================================
 
 class GitignoreFilter:
-    """Rispetta i file .gitignore nei progetti monitorati."""
+    """Filtro .aiignore / .gitignore per l'esclusione di file dal RAG.
+
+    - Se esiste .aiignore in una directory → usa quello (l'utente ha il controllo esplicito).
+    - Se non esiste .aiignore ma esiste .gitignore → crea .aiignore copiando .gitignore,
+      poi usa .aiignore. In questo modo l'utente può personalizzare le esclusioni AI
+      senza toccare il .gitignore originale.
+    - Se non esiste né .aiignore né .gitignore → nessuna regola custom per quella directory.
+    """
 
     def __init__(self, doc_dir=DOC_DIR):
         self.specs = {}
@@ -134,11 +142,26 @@ class GitignoreFilter:
             except OSError:
                 pass
             dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', '__pycache__', 'venv', 'vendor')]
-            if ".gitignore" in files:
+            if ".aiignore" in files or ".gitignore" in files:
                 base = os.path.relpath(root, doc_dir).replace('\\', '/')
                 base = "" if base == '.' else base
-                with open(os.path.join(root, ".gitignore"), 'r', errors='ignore') as f:
-                    if PATHSPEC_ENABLED:
+
+                aiignore = os.path.join(root, ".aiignore")
+                gitignore = os.path.join(root, ".gitignore")
+
+                if ".aiignore" in files:
+                    ignore_path = aiignore
+                else:
+                    # Crea .aiignore da .gitignore
+                    try:
+                        shutil.copy2(gitignore, aiignore)
+                        logger.info(f"📄 Creato {aiignore} da .gitignore")
+                    except OSError as e:
+                        logger.warning(f"⚠️ Impossibile creare {aiignore}: {e}")
+                    ignore_path = aiignore if os.path.exists(aiignore) else gitignore
+
+                if PATHSPEC_ENABLED:
+                    with open(ignore_path, 'r', errors='ignore') as f:
                         self.specs[base] = pathspec.PathSpec.from_lines('gitwildmatch', f)
 
     def is_ignored(self, rel_path):
