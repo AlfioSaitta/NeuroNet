@@ -116,6 +116,22 @@ MODELS_DIR = os.getenv("MODELS_DIR", "/app/models")
 DOCUMENTS_DIR = os.getenv("DOCUMENTS_DIR", "/app/documents")
 HOST_FS_PREFIX = os.getenv("HOST_FS_PREFIX", "/host_fs")
 
+WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "")
+
+# Auto-discover projects from WORKSPACE_DIR
+WORKSPACE_PROJECTS: list[str] = []
+if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
+    try:
+        WORKSPACE_PROJECTS = sorted([
+            os.path.join(WORKSPACE_DIR, d)
+            for d in os.listdir(WORKSPACE_DIR)
+            if os.path.isdir(os.path.join(WORKSPACE_DIR, d))
+            and not d.startswith('.')
+        ])
+        logger.info(f"📂 Workspace auto-discovered {len(WORKSPACE_PROJECTS)} projects from {WORKSPACE_DIR}")
+    except OSError as e:
+        logger.warning(f"⚠️ Error scanning WORKSPACE_DIR ({WORKSPACE_DIR}): {e}")
+
 VECTOR_DB_VERSION = os.getenv("VECTOR_DB_VERSION", "v1")
 EXTERNAL_PROJECTS = os.getenv("EXTERNAL_PROJECTS", "")
 STATE_FILE = os.getenv("STATE_FILE", os.path.join(DATA_DIR, f"rag_state_{VECTOR_DB_VERSION}.json"))
