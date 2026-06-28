@@ -10,6 +10,11 @@ import uuid
 import re
 import asyncio
 import shutil
+import sys
+
+# Alza il limite di ricorsione per tree-sitter: file con AST profondi
+# (es. classi annidate, decoratori multipli, lambda chain) sforano il default di 1000.
+sys.setrecursionlimit(5000)
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText, PointStruct, VectorParams, Distance
 from pathlib import Path
 import tiktoken
