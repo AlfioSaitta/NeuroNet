@@ -678,12 +678,35 @@ CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" pip install llama-cpp-
 
 **Problema originale:** `Observer` (inotify) non funziona su bind mount Docker con symlink. Inoltre NeuroNet crea un symlink circolare (`data/documents/NeuroNet → /app/documents/`) che blocca `DirectorySnapshot.walk()` in loop infinito.
 
-**Soluzione (3 livelli):**
+**Soluzione (3 livelli originali):**
 1. `Observer(inotify)` → `PollingObserver` (scandir ogni 1s, funziona su Docker)
 2. `rag.py`: `visited_inodes` set in tutti gli `os.walk(followlinks=True)` per rilevare e bloccare loop
 3. `main.py`: dopo creazione symlink, rimuove `data/documents/NeuroNet → /app/documents/` auto-referenziale
 
-**Performance:** snapshot 134k file in ~0.74s, rilevamento entro ~1.74s, elaborazione ~14s.
+**Performance (rilascio originale):** snapshot 134k file in ~0.74s, rilevamento entro ~1.74s, elaborazione ~14s.
+
+---
+
+### 🐛 Bug 8b (2026-06-28): CPU 88% in idle — Watchdog ottimizzato
+
+**Problema:** `PollingObserver(timeout=1)` eseguiva `stat()` su 335.479 file in `/home/alfio/Projects` ogni 1 secondo, causando 88% CPU su un thread sempre in stato `R (RUNNING)`.
+
+**Causa:** `WORKSPACE_DIR=/home/alfio/Projects` contiene 335K file (compresi `.git/`, `node_modules/`, `__pycache__/`). Il watch ricorsivo sull'intero workspace esplorava ogni directory, inclusi artefatti di build.
+
+**Soluzione (3 env var configurabili):**
+
+| Variabile | Default | Descrizione | Impatto |
+|---|---|---|---|
+| `WATCHDOG_ENABLED` | auto-detect | Sovrascrive auto-detect legacy | Disattivabile via `.env` |
+| `WATCHDOG_TIMEOUT` | `5` | Secondi tra polling (era hardcoded 1) | **5x meno polling** |
+| `WATCHDOG_WATCH_MODE` | `per_project` | `"full"`=WORKSPACE_DIR, `"per_project"`=solo WORKSPACE_PROJECTS | **~30x meno file** |
+
+**Impatto combinato:** timeout 5s × modalità per-progetto (10K file invece di 335K) = **~150x riduzione stat()/sec**, CPU stimata da 88% a **<1%**.
+
+**File modificati:**
+- `jarvis/config.py` (righe 285-304): `WATCHDOG_TIMEOUT`, `WATCHDOG_WATCH_MODE` letti da `.env` con default
+- `jarvis/main.py` (lifespan + watchdog_health): parametri passati a `PollingObserver()` e path watch basati su `WATCHDOG_WATCH_MODE`
+- `.env`: sezione `WATCHDOG FILESYSTEM` con valori ottimizzati
 
 ---
 

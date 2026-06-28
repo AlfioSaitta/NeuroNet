@@ -44,7 +44,8 @@ from config import (
     logger, OLLAMA_MODEL, QDRANT_HOST,
     DOC_COLLECTION, DOC_DIR, HOST_FS_PREFIX,
     TELEGRAM_TOKEN, ALLOWED_USERS, MEM0_CONFIG, STATE_FILE,
-    TELEGRAM_ENABLED, WATCHDOG_ENABLED, VECTOR_DB_VERSION,
+    TELEGRAM_ENABLED, WATCHDOG_ENABLED, WATCHDOG_TIMEOUT, WATCHDOG_WATCH_MODE,
+    VECTOR_DB_VERSION,
     API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, EMBEDDING_DIMS, EXTERNAL_PROJECTS,
     WORKSPACE_DIR, WORKSPACE_PROJECTS,
     MCP_ENABLED, MCP_AUTO_INIT
@@ -192,7 +193,7 @@ async def lifespan(app: FastAPI):
     if WATCHDOG_ENABLED:
         worker_task = asyncio.create_task(rag_queue_worker())
         state.background_tasks.add(worker_task)
-        observer = Observer(timeout=1)
+        observer = Observer(timeout=WATCHDOG_TIMEOUT)
         
         # Watch #1: DOC_DIR (legacy — skip se non esiste)
         if os.path.isdir(DOC_DIR):
@@ -202,14 +203,22 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning(f"⚠️ DOC_DIR non trovato ({DOC_DIR}), watchdog su DOC_DIR saltato.")
         
-        # Watch #2: WORKSPACE_DIR (auto-discovered projects)
+        # Watch #2: per-project (default) o full WORKSPACE_DIR
         if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
-            handler_ws = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, WORKSPACE_DIR)
-            observer.schedule(handler_ws, WORKSPACE_DIR, recursive=True)
-            logger.info(f"👀 Watchdog WORKSPACE_DIR: {WORKSPACE_DIR}")
+            if WATCHDOG_WATCH_MODE == "per_project":
+                for proj_dir in WORKSPACE_PROJECTS:
+                    if os.path.isdir(proj_dir):
+                        proj_handler = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, proj_dir)
+                        observer.schedule(proj_handler, proj_dir, recursive=True)
+                        proj_name = os.path.basename(proj_dir)
+                        logger.info(f"👀 Watchdog progetto: {proj_name} ({proj_dir})")
+            else:
+                handler_ws = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, WORKSPACE_DIR)
+                observer.schedule(handler_ws, WORKSPACE_DIR, recursive=True)
+                logger.info(f"👀 Watchdog WORKSPACE_DIR: {WORKSPACE_DIR}")
                 
         observer.start()
-        logger.info("👀 Watchdog PollingObserver Partito (intervallo 1s).")
+        logger.info(f"👀 Watchdog PollingObserver Partito (timeout={WATCHDOG_TIMEOUT}s, mode={WATCHDOG_WATCH_MODE}).")
 
         # Health monitor watchdog: verifica ogni 60s che i thread observer siano vivi
         async def watchdog_health():
@@ -225,13 +234,19 @@ async def lifespan(app: FastAPI):
                         logger.warning(f"Watchdog: emitter={emitter_alive} dispatch={dispatch_alive} coda={qsize} — riavvio...")
                         observer.stop()
                         observer.join(timeout=5)
-                        observer = Observer(timeout=1)
+                        observer = Observer(timeout=WATCHDOG_TIMEOUT)
                         if os.path.isdir(DOC_DIR):
                             new_handler_doc = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, DOC_DIR)
                             observer.schedule(new_handler_doc, DOC_DIR, recursive=True)
                         if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
-                            new_handler_ws = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, WORKSPACE_DIR)
-                            observer.schedule(new_handler_ws, WORKSPACE_DIR, recursive=True)
+                            if WATCHDOG_WATCH_MODE == "per_project":
+                                for proj_dir in WORKSPACE_PROJECTS:
+                                    if os.path.isdir(proj_dir):
+                                        proj_handler = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, proj_dir)
+                                        observer.schedule(proj_handler, proj_dir, recursive=True)
+                            else:
+                                new_handler_ws = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, WORKSPACE_DIR)
+                                observer.schedule(new_handler_ws, WORKSPACE_DIR, recursive=True)
                         observer.start()
                         logger.info("Watchdog: nuovo Observer avviato dopo crash.")
                     elif qsize > 100:

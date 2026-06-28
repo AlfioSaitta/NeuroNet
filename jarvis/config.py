@@ -282,13 +282,27 @@ try:
 except ImportError:
     pass
 
-WATCHDOG_ENABLED = False
+# Watchdog filesystem: auto-detected da presenza libreria, sovrascrivibile via .env
+_WATCHDOG_LIB_AVAILABLE = False
 try:
     from watchdog.observers import Observer  # noqa: F401
     from watchdog.events import FileSystemEventHandler  # noqa: F401
-    WATCHDOG_ENABLED = True
+    _WATCHDOG_LIB_AVAILABLE = True
 except ImportError:
     pass
+
+_WATCHDOG_ENV = os.getenv("WATCHDOG_ENABLED", "").lower()
+if _WATCHDOG_ENV == "true":
+    WATCHDOG_ENABLED = True
+elif _WATCHDOG_ENV == "false":
+    WATCHDOG_ENABLED = False
+else:
+    WATCHDOG_ENABLED = _WATCHDOG_LIB_AVAILABLE
+
+# PollingObserver intervallo in secondi (default 5s — riduce CPU vs 1s)
+WATCHDOG_TIMEOUT = int(os.getenv("WATCHDOG_TIMEOUT", "5"))
+# Modalità watch: "per_project" (solo directory progetto) o "full" (intero WORKSPACE_DIR)
+WATCHDOG_WATCH_MODE = os.getenv("WATCHDOG_WATCH_MODE", "per_project").lower()
 
 TELEGRAM_ENABLED_ENV = os.getenv("TELEGRAM_ENABLED", "auto").lower()
 TELEGRAM_ENABLED = False

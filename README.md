@@ -262,19 +262,21 @@ Il componente più complesso. Pipeline completa di Retrieval-Augmented Generatio
                     └──────────┬───────────┘
                                │
                     ┌──────────▼───────────┐
-                    │  Watchdog Filesystem │
-                    │  - PollingObserver   │
-                    │  - Health monitor    │
-                    │  - Re-embedding      │
-                    │    automatico        │
-                    └──────────────────────┘
+                     │  Watchdog Filesystem │
+                     │  - PollingObserver   │
+                     │  - Timeout/Modalità  │
+                     │    configurabili     │ ← .env: WATCHDOG_TIMEOUT, WATCHDOG_WATCH_MODE
+                     │  - Health monitor    │
+                     │  - Re-embedding      │
+                     │    automatico        │
+                     └──────────────────────┘
 ```
 
 **Feature evidenziate:**
 - **AST Chunking semantico:** usa Tree-sitter per parsare il codice in nodi significativi (funzioni, classi, type declarations, import sections)
 - **Reranker duale:** Qwen3-Reranker (primario, multilingua, MTEB-Code 73.42) → FlashRank (fallback ONNX)
 - **Gitignore-aware:** rispetta .gitignore nei progetti monitorati tramite pathspec
-- **Watchdog real-time:** PollingObserver per Docker compatibilità, ri-embedding automatico al salvataggio
+- **Watchdog real-time:** PollingObserver per Docker compatibilità, ri-embedding automatico al salvataggio. Timeout e modalità watch configurabili via `.env` per bilanciare CPU/latenza
 - **Semantic Cache:** cache risposte per query simili (soglia cosine 0.88)
 - **Cross-collection fallback:** se il progetto specifico non ha risultati, cerca in tutte le collezioni
 - **Web Knowledge Cache:** memorizza risultati di ricerche web per reuse
@@ -722,6 +724,11 @@ LLM_FLASH_ATTN=true
 # === RAG ===
 MAIN_PROJECT_PATH=/host_fs/home/alfio/Projects
 EMBEDDING_DIMS=768
+
+# === WATCHDOG FILESYSTEM ===
+WATCHDOG_ENABLED=true             # true/false (sovrascrive auto-detect)
+WATCHDOG_TIMEOUT=5                # secondi tra polling (default: 5)
+WATCHDOG_WATCH_MODE=per_project   # "full" o "per_project"
 ```
 
 ---
