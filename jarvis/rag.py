@@ -22,9 +22,18 @@ from config import (
     WATCHDOG_BATCH_DELAY, SEMANTIC_CACHE_THRESHOLD,
     C, CPP, JAVA, RUST, SQL, YAML,
     PATHSPEC_ENABLED, WATCHDOG_ENABLED, EMBEDDING_DIMS,
-    EXTERNAL_PROJECTS, DATA_DIR, HOST_FS_PREFIX
+    EXTERNAL_PROJECTS, WORKSPACE_DIR, WORKSPACE_PROJECTS,
+    DATA_DIR, HOST_FS_PREFIX
 )
 import state
+
+# Estensioni valide per file sorgente/documentazione (usato ovunque)
+VALID_EXTENSIONS = (
+    '.go', '.py', '.jsx', '.tsx', '.js', '.ts',
+    '.md', '.json', '.txt',
+    '.c', '.cpp', '.h', '.hpp',
+    '.java', '.rs', '.sql', '.yaml', '.yml'
+)
 
 # ==============================================================================
 # RERANKER: Qwen3-Reranker su CPU (priority), FlashRank fallback
@@ -816,21 +825,22 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
             logger.error(f"Errore su {rel_path}: {e}")
 
 
-async def ingest_local_documents():
-    """Scansione completa della cartella documenti: indicizza file nuovi/modificati, rimuove i cancellati."""
-    if state.is_reindexing:
-        logger.info("Re-indexing già in corso, salto scansione duplicata")
-        return
-    state.is_reindexing = True
-    async with state.state_lock:
-        _load_state_unsafe()
-    ignore_filter = GitignoreFilter(DOC_DIR)
-    current_files = {}
-    visited_inodes = set()
-
+async def _walk_directory(base_dir: str, folder_prefix: str | None = None,
+                           ignore_filter: GitignoreFilter | None = None,
+                           visited_inodes: set | None = None) -> dict[str, str]:
+    """Walk di una directory, ritorna dict {rel_path: abs_path}.
+    
+    folder_prefix: se impostato, il rel_path sarà prefissato con questo nome
+                   (es. "SlotBuilder/main.go" invece di "main.go").
+    """
+    if not base_dir or not os.path.isdir(base_dir):
+        return {}
+    if visited_inodes is None:
+        visited_inodes = set()
+    result = {}
     loop = asyncio.get_running_loop()
-    # followlinks=False: vedi GitignoreFilter.__init__ per la motivazione
-    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=False))):
+    filt = ignore_filter or GitignoreFilter(base_dir)
+    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(base_dir, followlinks=False))):
         try:
             st = os.stat(r)
             inode_key = (st.st_dev, st.st_ino)
@@ -843,19 +853,55 @@ async def ingest_local_documents():
         d[:] = [
             sub for sub in d
             if sub not in ('.git', 'node_modules', 'venv', 'vendor')
-            and not ignore_filter.is_ignored(os.path.relpath(os.path.join(r, sub), DOC_DIR))
+            and not filt.is_ignored(os.path.relpath(os.path.join(r, sub), base_dir))
         ]
         for file in f:
             fp = os.path.join(r, file)
-            rp = os.path.relpath(fp, DOC_DIR)
-            if rp.endswith(('.go', '.py', '.jsx', '.tsx', '.js', '.ts', '.md', '.json', '.txt', '.c', '.cpp', '.h', '.hpp', '.java', '.rs', '.sql', '.yaml', '.yml')) \
-                    and not ignore_filter.is_ignored(rp):
-                current_files[rp] = fp
+            rp = os.path.relpath(fp, base_dir)
+            if folder_prefix:
+                rp = f"{folder_prefix}/{rp}"
+            if rp.endswith(VALID_EXTENSIONS) and not filt.is_ignored(os.path.relpath(fp, base_dir)):
+                result[rp] = fp
+    return result
 
-    # Walk diretto per progetti in EXTERNAL_PROJECTS il cui data/documents/
-    # coincide con DOC_DIR (Docker volume mount → symlink circolare con watchdog).
-    # In questo caso il symlink viene rimosso in main.py per evitare loop,
-    # ma i file del progetto vanno comunque indicizzati.
+
+async def ingest_local_documents():
+    """Scansione completa di WORKSPACE_DIR + EXTERNAL_PROJECTS: 
+    indicizza file nuovi/modificati, rimuove i cancellati."""
+    if state.is_reindexing:
+        logger.info("Re-indexing già in corso, salto scansione duplicata")
+        return
+    if not WORKSPACE_DIR and not EXTERNAL_PROJECTS.strip():
+        logger.warning("⚠️ Nessun WORKSPACE_DIR o EXTERNAL_PROJECTS configurato — salto ingestion.")
+        return
+    state.is_reindexing = True
+    async with state.state_lock:
+        _load_state_unsafe()
+
+    current_files: dict[str, str] = {}
+    visited_inodes: set = set()
+
+    # ── 1. Walk WORKSPACE_DIR (auto-discovered projects) ──
+    if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
+        for proj_dir in WORKSPACE_PROJECTS:
+            if not os.path.isdir(proj_dir):
+                continue
+            proj_name = os.path.basename(proj_dir)
+            logger.info(f"📁 Workspace project: {proj_name} ({proj_dir})")
+            proj_filter = GitignoreFilter(proj_dir)
+            files = await _walk_directory(
+                proj_dir, folder_prefix=proj_name,
+                ignore_filter=proj_filter, visited_inodes=visited_inodes
+            )
+            # Dedup: EXTERNAL_PROJECTS potrebbe già aver caricato lo stesso progetto
+            for rp, fp in files.items():
+                if rp not in current_files:
+                    current_files[rp] = fp
+    else:
+        logger.info("WORKSPACE_DIR non configurato — skip workspace auto-discovery.")
+
+    # ── 2. Walk EXTERNAL_PROJECTS (backward compat) ──
+    # Skip progetti che sono già dentro WORKSPACE_DIR (già indicizzati al punto 1)
     if EXTERNAL_PROJECTS.strip():
         for pair in EXTERNAL_PROJECTS.split(','):
             pair = pair.strip()
@@ -865,34 +911,39 @@ async def ingest_local_documents():
             host_path = host_path.strip()
             folder_name = folder_name.strip()
             project_root = os.path.join(HOST_FS_PREFIX, host_path.lstrip('/')) if HOST_FS_PREFIX else host_path
-            # Verifica se data/documents/ del progetto coincide con DOC_DIR
-            if os.path.isdir(os.path.join(project_root, "data", "documents")):
-                # Questo progetto ha il mount conflict — walk diretto
-                proj_ignore = GitignoreFilter(project_root)
-                # followlinks=False: anche per EXTERNAL_PROJECTS per coerenza — evita loop ricorsivi e ingestione massiva
-                for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(project_root, followlinks=False))):
-                    try:
-                        st = os.stat(r)
-                        inode_key = (st.st_dev, st.st_ino)
-                        if inode_key in visited_inodes:
-                            d[:] = []
-                            continue
-                        visited_inodes.add(inode_key)
-                    except OSError:
-                        pass
-                    d[:] = [
-                        sub for sub in d
-                        if sub not in ('.git', 'node_modules', 'venv', 'vendor', 'data')
-                        and not proj_ignore.is_ignored(os.path.relpath(os.path.join(r, sub), project_root))
-                    ]
-                    for file in f:
-                        fp = os.path.join(r, file)
-                        rp = f"{folder_name}/{os.path.relpath(fp, project_root)}"
-                        if rp.endswith(('.go', '.py', '.jsx', '.tsx', '.js', '.ts', '.md', '.json', '.txt', '.c', '.cpp', '.h', '.hpp', '.java', '.rs', '.sql', '.yaml', '.yml')) \
-                                and not proj_ignore.is_ignored(os.path.relpath(fp, project_root)):
-                            current_files[rp] = fp
 
-    # Pulizia file rimossi dal disco
+            # Skip se già coperto dal workspace walk
+            if WORKSPACE_DIR and project_root.startswith(os.path.normpath(WORKSPACE_DIR)):
+                logger.debug(f"⏭️ EXTERNAL_PROJECTS skip (già in workspace): {folder_name}")
+                continue
+
+            if not os.path.isdir(project_root):
+                logger.warning(f"⏭️ EXTERNAL_PROJECTS path non valido: {project_root}")
+                continue
+
+            proj_filter = GitignoreFilter(project_root)
+            files = await _walk_directory(
+                project_root, folder_prefix=folder_name,
+                ignore_filter=proj_filter, visited_inodes=visited_inodes
+            )
+            for rp, fp in files.items():
+                if rp not in current_files:
+                    current_files[rp] = fp
+
+    # ── 3. Walk DOC_DIR legacy (solo se ha contenuto) ──
+    if os.path.isdir(DOC_DIR):
+        doc_items = os.listdir(DOC_DIR)
+        if doc_items:
+            doc_filter = GitignoreFilter(DOC_DIR)
+            files = await _walk_directory(
+                DOC_DIR, folder_prefix=None,
+                ignore_filter=doc_filter, visited_inodes=visited_inodes
+            )
+            for rp, fp in files.items():
+                if rp not in current_files:
+                    current_files[rp] = fp
+
+    # ── 4. Pulizia file rimossi dal disco ──
     async with state.state_lock:
         state_keys = list(state.rag_state.keys())
 
@@ -905,7 +956,6 @@ async def ingest_local_documents():
                     points_selector=Filter(must=[FieldCondition(key="filename", match=MatchValue(value=rp))])
                 )
             except Exception as e: logger.warning(f"Errore silenziato: {e}")
-            # Delete file profile too
             try:
                 fp_col = get_file_profile_col_name()
                 fp_id = hashlib.md5(rp.encode()).hexdigest()
@@ -921,7 +971,7 @@ async def ingest_local_documents():
                     _save_file_state_unsafe(rp)
             logger.info(f"🗑️ Pulizia: Rimosso {rp} dai vettori.")
 
-    # Processamento file nuovi/modificati
+    # ── 5. Processamento file nuovi/modificati ──
     files_to_process = []
     for rp, fp in current_files.items():
         try:
@@ -980,15 +1030,12 @@ async def ingest_local_documents():
 # PROJECT TREE & SKELETON
 # ==============================================================================
 
-async def generate_workspace_skeletons():
-    """Genera e salva uno scheletro del codice per ogni workspace in .ai-skeleton.md"""
-    filt = GitignoreFilter(DOC_DIR)
+async def _scan_directory_for_skeletons(base_dir: str, visited_inodes: set) -> dict[str, list[tuple[str, str]]]:
+    """Scansiona una directory alla ricerca di file sorgente per skeleton."""
+    filt = GitignoreFilter(base_dir)
     loop = asyncio.get_running_loop()
-    
     workspaces = {}
-    visited_inodes = set()
-    # followlinks=False: vedi GitignoreFilter.__init__ per la motivazione
-    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=False))):
+    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(base_dir, followlinks=False))):
         try:
             st = os.stat(r)
             inode_key = (st.st_dev, st.st_ino)
@@ -998,45 +1045,79 @@ async def generate_workspace_skeletons():
             visited_inodes.add(inode_key)
         except OSError:
             pass
-        d[:] = [sub for sub in d if sub not in ('.git', 'node_modules', 'venv', 'vendor') and not filt.is_ignored(os.path.relpath(os.path.join(r, sub), DOC_DIR))]
-        
+        d[:] = [sub for sub in d if sub not in ('.git', 'node_modules', 'venv', 'vendor') and not filt.is_ignored(os.path.relpath(os.path.join(r, sub), base_dir))]
         for file in f:
             fp = os.path.join(r, file)
-            rp = os.path.relpath(fp, DOC_DIR)
+            rp = os.path.relpath(fp, base_dir)
             if not filt.is_ignored(rp) and rp.endswith(('.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.cpp', '.c', '.h', '.hpp', '.rs')):
                 parts = rp.split('/')
                 ws = parts[0] if len(parts) > 1 else "default"
                 if ws not in workspaces:
                     workspaces[ws] = []
                 workspaces[ws].append((rp, fp))
-                
-    for ws, files in workspaces.items():
-        skeleton_lines = [f"# Code Skeleton: {ws}\n"]
-        for rp, fp in files:
-            try:
-                with open(fp, "r", encoding="utf-8", errors="ignore") as file_obj:
-                    content = file_obj.read()
-                
-                signatures = []
-                for idx, line in enumerate(content.split('\n')):
-                    line_strip = line.strip()
-                    if re.match(r'^(?:export\s+)?(?:async\s+)?(?:def|class|function|func|type|interface)\s+[a-zA-Z0-9_]', line_strip) or \
-                       re.match(r'^(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|enum|[a-zA-Z0-9_<>\[\]]+\s+[a-zA-Z0-9_]+)\(', line_strip):
-                        signatures.append(f"  L{idx+1}: {line_strip}")
-                
-                if signatures:
-                    skeleton_lines.append(f"📄 {rp}")
-                    skeleton_lines.extend(signatures)
-                    skeleton_lines.append("")
-            except Exception as e: logger.warning(f"Errore silenziato: {e}")
-                
-        if ws != "default":
-            out_path = os.path.join(DOC_DIR, ws, ".ai-skeleton.md")
-            try:
-                with open(out_path, "w", encoding="utf-8") as out_file:
-                    out_file.write("\n".join(skeleton_lines))
-            except Exception as e:
-                logger.warning(f"Impossibile salvare skeleton in {out_path}: {e}")
+    return workspaces
+
+
+def _write_skeleton(ws: str, skeleton_lines: list[str], base_dir: str):
+    """Scrive il file .ai-skeleton.md per un workspace."""
+    if ws == "default":
+        return
+    out_path = os.path.join(base_dir, ws, ".ai-skeleton.md")
+    try:
+        with open(out_path, "w", encoding="utf-8") as out_file:
+            out_file.write("\n".join(skeleton_lines))
+    except Exception as e:
+        logger.warning(f"Impossibile salvare skeleton in {out_path}: {e}")
+
+
+async def generate_workspace_skeletons():
+    """Genera e salva uno scheletro del codice per ogni workspace in .ai-skeleton.md"""
+    loop = asyncio.get_running_loop()
+    visited_inodes: set = set()
+    
+    # Scansiona DOC_DIR
+    if os.path.isdir(DOC_DIR):
+        doc_workspaces = await _scan_directory_for_skeletons(DOC_DIR, visited_inodes)
+        for ws, files in doc_workspaces.items():
+            skeleton_lines = [f"# Code Skeleton: {ws}\n"]
+            for rp, fp in files:
+                try:
+                    with open(fp, "r", encoding="utf-8", errors="ignore") as file_obj:
+                        content = file_obj.read()
+                    signatures = []
+                    for idx, line in enumerate(content.split('\n')):
+                        line_strip = line.strip()
+                        if re.match(r'^(?:export\s+)?(?:async\s+)?(?:def|class|function|func|type|interface)\s+[a-zA-Z0-9_]', line_strip) or \
+                           re.match(r'^(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|enum|[a-zA-Z0-9_<>\[\]]+\s+[a-zA-Z0-9_]+)\(', line_strip):
+                            signatures.append(f"  L{idx+1}: {line_strip}")
+                    if signatures:
+                        skeleton_lines.append(f"📄 {rp}")
+                        skeleton_lines.extend(signatures)
+                        skeleton_lines.append("")
+                except Exception as e: logger.warning(f"Errore silenziato: {e}")
+            _write_skeleton(ws, skeleton_lines, DOC_DIR)
+    
+    # Scansiona WORKSPACE_DIR
+    if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
+        ws_workspaces = await _scan_directory_for_skeletons(WORKSPACE_DIR, visited_inodes)
+        for ws, files in ws_workspaces.items():
+            skeleton_lines = [f"# Code Skeleton: {ws}\n"]
+            for rp, fp in files:
+                try:
+                    with open(fp, "r", encoding="utf-8", errors="ignore") as file_obj:
+                        content = file_obj.read()
+                    signatures = []
+                    for idx, line in enumerate(content.split('\n')):
+                        line_strip = line.strip()
+                        if re.match(r'^(?:export\s+)?(?:async\s+)?(?:def|class|function|func|type|interface)\s+[a-zA-Z0-9_]', line_strip) or \
+                           re.match(r'^(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|enum|[a-zA-Z0-9_<>\[\]]+\s+[a-zA-Z0-9_]+)\(', line_strip):
+                            signatures.append(f"  L{idx+1}: {line_strip}")
+                    if signatures:
+                        skeleton_lines.append(f"📄 {rp}")
+                        skeleton_lines.extend(signatures)
+                        skeleton_lines.append("")
+                except Exception as e: logger.warning(f"Errore silenziato: {e}")
+            _write_skeleton(ws, skeleton_lines, WORKSPACE_DIR)
 
 async def update_project_tree_cache():
     """Aggiorna la cache in background (eseguito in to_thread per non bloccare FastAPI)."""
@@ -1046,14 +1127,14 @@ async def update_project_tree_cache():
     except Exception as e:
         logger.warning(f"Errore aggiornamento project tree cache: {e}")
 
-async def generate_project_tree():
-    """Genera una rappresentazione testuale dell'albero del progetto indicizzato."""
-    filt = GitignoreFilter(DOC_DIR)
+async def _tree_for_dir(base_dir: str, visited_inodes: set) -> str:
+    """Genera l'albero testuale per una directory, rispettando .gitignore."""
+    if not base_dir or not os.path.isdir(base_dir):
+        return ""
+    filt = GitignoreFilter(base_dir)
     loop = asyncio.get_running_loop()
-    t = "📂 PROGETTO:\n"
-    visited_inodes = set()
-    # followlinks=False: vedi GitignoreFilter.__init__ per la motivazione
-    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=False))):
+    t = ""
+    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(base_dir, followlinks=False))):
         try:
             st = os.stat(r)
             inode_key = (st.st_dev, st.st_ino)
@@ -1066,71 +1147,114 @@ async def generate_project_tree():
         d[:] = [
             sub for sub in d
             if sub not in ('.git', 'node_modules', 'venv', 'vendor')
-            and not filt.is_ignored(os.path.relpath(os.path.join(r, sub), DOC_DIR))
+            and not filt.is_ignored(os.path.relpath(os.path.join(r, sub), base_dir))
         ]
-        lvl = r.replace(DOC_DIR, '').count(os.sep)
+        lvl = r.replace(base_dir, '').count(os.sep)
         t += f"{'    '*lvl}📁 {os.path.basename(r) or 'root'}/\n"
         for file in f:
-            rp = os.path.relpath(os.path.join(r, file), DOC_DIR)
-            if not filt.is_ignored(rp) and rp.endswith(('.go', '.py', '.jsx', '.tsx', '.js', '.ts', '.md', '.json', '.txt', '.c', '.cpp', '.h', '.hpp', '.java', '.rs', '.sql', '.yaml', '.yml')):
+            rp = os.path.relpath(os.path.join(r, file), base_dir)
+            if not filt.is_ignored(rp) and rp.endswith(VALID_EXTENSIONS):
                 t += f"{'    '*(lvl+1)}📄 {file}\n"
     return t
 
-def generate_telegram_ls_data(subpath=None):
-    """Genera l'elenco dei file e cartelle (tipo ls) per il bot Telegram sotto forma di dizionario strutturato."""
-    filt = GitignoreFilter(DOC_DIR)
-    
-    target_dir = DOC_DIR
-    if subpath:
-        target_dir = os.path.normpath(os.path.join(DOC_DIR, subpath))
-        if not target_dir.startswith(DOC_DIR):
-            target_dir = DOC_DIR
-            subpath = None
-            
+
+async def generate_project_tree():
+    """Genera una rappresentazione testuale dell'albero del progetto indicizzato."""
+    visited_inodes: set = set()
+    parts = []
+    if os.path.isdir(DOC_DIR):
+        doc_tree = await _tree_for_dir(DOC_DIR, visited_inodes)
+        if doc_tree:
+            parts.append(f"📂 DOC_DIR:\n{doc_tree}")
+    if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
+        ws_tree = await _tree_for_dir(WORKSPACE_DIR, visited_inodes)
+        if ws_tree:
+            parts.append(f"📂 WORKSPACE_DIR:\n{ws_tree}")
+    return "\n\n".join(parts) if parts else "📂 PROGETTO:\n_(vuoto)_\n"
+
+def _ls_for_dir(target_dir: str, base_dir: str, subpath: str | None = None):
+    """Elenco file/cartelle per una directory specifica."""
+    filt = GitignoreFilter(base_dir)
     if not os.path.exists(target_dir):
-        return {"error": f"Percorso non trovato: {subpath}"}
-        
+        return None
     if not os.path.isdir(target_dir):
         return {"error": f"📄 `{os.path.basename(target_dir)}` è un file, non una cartella."}
-
-    t = f"📂 *{subpath if subpath else 'PROGETTI (Root)'}*:\n"
-    folders = []
-    files = []
+    
+    t = f"📂 *{subpath or os.path.basename(target_dir) or 'Root'}*:\n"
+    folders, files = [], []
     try:
-        items = os.listdir(target_dir)
-        
-        for item in items:
+        for item in os.listdir(target_dir):
             if item in ('.git', 'node_modules', 'venv', 'vendor'):
                 continue
-                
             full_path = os.path.join(target_dir, item)
-            rel_path = os.path.relpath(full_path, DOC_DIR)
-            
+            rel_path = os.path.relpath(full_path, base_dir)
             if filt.is_ignored(rel_path):
                 continue
-                
             if os.path.isdir(full_path):
                 folders.append(item)
             else:
                 files.append(item)
-                
         folders.sort()
         files.sort()
-        
         if not folders and not files:
             t += "_Cartella vuota._\n"
         else:
             t += f"_({len(folders)} cartelle, {len(files)} file)_\n"
-            
         t += "\n💡 Seleziona un elemento per esplorarlo o scaricarlo."
-        return {
-            "text": t,
-            "folders": folders,
-            "files": files,
-            "current_path": subpath
-        }
+        return {"text": t, "folders": folders, "files": files, "current_path": subpath}
     except Exception as e:
         return {"error": f"Errore: {e}"}
+
+
+def generate_telegram_ls_data(subpath=None):
+    """Genera l'elenco dei file e cartelle (tipo ls) per il bot Telegram.
+    
+    Se subpath è specificato, naviga in quella sottodirectory (prima cerca in
+    WORKSPACE_DIR, poi in DOC_DIR). Se subpath è None, mostra la root che
+    include sia i progetti di WORKSPACE_DIR che di DOC_DIR.
+    """
+    if subpath:
+        # Prima cerca in WORKSPACE_DIR, poi in DOC_DIR
+        if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
+            ws_target = os.path.normpath(os.path.join(WORKSPACE_DIR, subpath))
+            if ws_target.startswith(WORKSPACE_DIR) and os.path.exists(ws_target):
+                return _ls_for_dir(ws_target, WORKSPACE_DIR, subpath)
+        doc_target = os.path.normpath(os.path.join(DOC_DIR, subpath))
+        if doc_target.startswith(DOC_DIR):
+            return _ls_for_dir(doc_target, DOC_DIR, subpath)
+        return {"error": f"Percorso non trovato: {subpath}"}
+    
+    # Root view: merge WORKSPACE_DIR + DOC_DIR progetti
+    ws_projects: list[str] = []
+    doc_projects: list[str] = []
+    seen: set = set()
+    
+    if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
+        for item in sorted(os.listdir(WORKSPACE_DIR)):
+            if item.startswith('.') or item in ('.git', 'node_modules', 'venv', 'vendor'):
+                continue
+            full = os.path.join(WORKSPACE_DIR, item)
+            if os.path.isdir(full):
+                ws_projects.append(item)
+                seen.add(item.lower())
+    
+    if os.path.isdir(DOC_DIR):
+        for item in sorted(os.listdir(DOC_DIR)):
+            if item.startswith('.'):
+                continue
+            full = os.path.join(DOC_DIR, item)
+            if os.path.isdir(full) and item.lower() not in seen:
+                doc_projects.append(item)
+    
+    all_projects = sorted(set(ws_projects + doc_projects))
+    t = f"📂 *PROGETTI (Workspace)*:\n_({len(all_projects)} progetti)_\n\n" if all_projects else "📂 *PROGETTI:*\n_(nessun progetto)_\n"
+    t += "\n💡 Seleziona un progetto per esplorarlo."
+    return {
+        "text": t,
+        "folders": all_projects,
+        "files": [],
+        "current_path": None
+    }
 
 
 # ==============================================================================
@@ -1173,8 +1297,10 @@ async def search_documents(query, is_project_query=False, project_name=None):
         if not vector:
             return ""
 
-        top_k = RAG_CONFIG["top_k_code"] if is_project_query else RAG_CONFIG["top_k_docs"]
-        required_score = RAG_CONFIG["score_threshold_code"] if is_project_query else RAG_CONFIG["score_threshold_docs"]
+        # Docs/ special threshold: se la query menziona documentazione
+        is_docs_query = any(kw in query.lower() for kw in (' docs', '/docs', 'docs/', 'documentazion', 'documentation', 'documenti'))
+        top_k = RAG_CONFIG["top_k_docs"] if (is_docs_query or not is_project_query) else RAG_CONFIG["top_k_code"]
+        required_score = RAG_CONFIG["score_threshold_docs"] if (is_docs_query or not is_project_query) else RAG_CONFIG["score_threshold_code"]
         
         # Individua i workspace appropriati
         try:
@@ -1197,6 +1323,10 @@ async def search_documents(query, is_project_query=False, project_name=None):
             for c in col_names:
                 if _ws_name(c).lower() == pn_normalized:
                     target_cols.append(c)
+                    # Se il progetto è Docs, usa soglie documentazione
+                    if _ws_name(c).lower() in ('docs', 'documentation', 'documents'):
+                        top_k = RAG_CONFIG["top_k_docs"]
+                        required_score = RAG_CONFIG["score_threshold_docs"]
                     break
             if not target_cols:
                 logger.warning(f"Nessuna collezione trovata per progetto: {project_name}")
@@ -1204,7 +1334,9 @@ async def search_documents(query, is_project_query=False, project_name=None):
 
         if not target_cols:
             query_lower = query.lower()
-            for c in col_names:
+            # Longest name first: evita che "RumpiIPTV" matchi prima di "RumpiIPTV_OLD"
+            sorted_cols = sorted(col_names, key=lambda c: len(_ws_name(c)), reverse=True)
+            for c in sorted_cols:
                 ws = _ws_name(c)
                 ws_lower = ws.lower()
                 # Match diretto (nomi singola parola come "NeuroNet", "SlotBuilder")
@@ -1479,12 +1611,20 @@ def _alias_to_project(projects: list[str]) -> dict[str, str]:
 
 
 def _match_project_in_query(query: str, alias_to_project: dict[str, str]) -> str | None:
-    """Cerca un progetto conosciuto in una singola query."""
+    """Cerca un progetto conosciuto in una singola query.
+    
+    Longest-match-first: gli alias più lunghi vengono controllati prima,
+    per evitare che "RumpiIPTV" matchi prima di "RumpiIPTV_OLD" quando
+    la query menziona "RumpiIPTV-OLD".
+    """
     query_lower = query.lower()
 
+    # Longest alias first per evitare falsi positivi con prefissi
+    sorted_aliases = sorted(alias_to_project.keys(), key=len, reverse=True)
+
     # Cerca menzione diretta (parola intera con word boundary)
-    # Usa \b per evitare false positivi: "web" non matcha "website"
-    for alias, project in alias_to_project.items():
+    for alias in sorted_aliases:
+        project = alias_to_project[alias]
         if re.search(r'\b' + re.escape(alias) + r'\b', query_lower):
             return project
 
@@ -1492,7 +1632,8 @@ def _match_project_in_query(query: str, alias_to_project: dict[str, str]) -> str
     path_match = re.search(r'\b([A-Za-z][\w.-]*)[/\\]', query)
     if path_match:
         dir_name = path_match.group(1).lower()
-        for alias, project in alias_to_project.items():
+        for alias in sorted_aliases:
+            project = alias_to_project[alias]
             if dir_name == alias:
                 return project
 
@@ -1584,6 +1725,13 @@ if WATCHDOG_ENABLED:
                 self._safe_queue('process', canon_dest)
 
 
+def _get_watchdog_rel_path(fp: str) -> str:
+    """Calcola il path relativo appropriato in base a quale watchdog ha generato l'evento."""
+    if WORKSPACE_DIR and fp.startswith(WORKSPACE_DIR):
+        return os.path.relpath(fp, WORKSPACE_DIR)
+    return os.path.relpath(fp, DOC_DIR)
+
+
 async def rag_queue_worker():
     """Worker asincrono che processa eventi di file dalla coda del watchdog con debounce."""
     sem = asyncio.Semaphore(MAX_CONCURRENT_EMBEDDINGS)
@@ -1607,7 +1755,7 @@ async def rag_queue_worker():
                 if state.is_reindexing:
                     logger.debug("Re-indexing in corso, salto evento watchdog")
                     continue
-                rel_path = os.path.relpath(fp, DOC_DIR)
+                rel_path = _get_watchdog_rel_path(fp)
                 try:
                     if act == 'delete':
                         col_name = get_workspace_col_name(rel_path)
