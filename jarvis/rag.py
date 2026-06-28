@@ -110,7 +110,10 @@ class GitignoreFilter:
     def __init__(self, doc_dir=DOC_DIR):
         self.specs = {}
         visited_inodes = set()
-        for root, dirs, files in os.walk(doc_dir, followlinks=True):
+        # followlinks=False: evita di seguire symlink in progetti esterni (SlotBuilder 76k, StreamAI 34k)
+        # che causano CPU al 100% per 8+ ore durante l'ingestione iniziale.
+        # I symlink rimangono in DOC_DIR per il project-tree display, ma os.walk non li segue.
+        for root, dirs, files in os.walk(doc_dir, followlinks=False):
             # Evita loop da symlink circolari (NeuroNet/data/documents/NeuroNet)
             try:
                 st = os.stat(root)
@@ -826,7 +829,8 @@ async def ingest_local_documents():
     visited_inodes = set()
 
     loop = asyncio.get_running_loop()
-    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=True))):
+    # followlinks=False: vedi GitignoreFilter.__init__ per la motivazione
+    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=False))):
         try:
             st = os.stat(r)
             inode_key = (st.st_dev, st.st_ino)
@@ -865,7 +869,8 @@ async def ingest_local_documents():
             if os.path.isdir(os.path.join(project_root, "data", "documents")):
                 # Questo progetto ha il mount conflict — walk diretto
                 proj_ignore = GitignoreFilter(project_root)
-                for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(project_root, followlinks=True))):
+                # followlinks=False: anche per EXTERNAL_PROJECTS per coerenza — evita loop ricorsivi e ingestione massiva
+                for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(project_root, followlinks=False))):
                     try:
                         st = os.stat(r)
                         inode_key = (st.st_dev, st.st_ino)
@@ -982,7 +987,8 @@ async def generate_workspace_skeletons():
     
     workspaces = {}
     visited_inodes = set()
-    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=True))):
+    # followlinks=False: vedi GitignoreFilter.__init__ per la motivazione
+    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=False))):
         try:
             st = os.stat(r)
             inode_key = (st.st_dev, st.st_ino)
@@ -1046,7 +1052,8 @@ async def generate_project_tree():
     loop = asyncio.get_running_loop()
     t = "📂 PROGETTO:\n"
     visited_inodes = set()
-    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=True))):
+    # followlinks=False: vedi GitignoreFilter.__init__ per la motivazione
+    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(DOC_DIR, followlinks=False))):
         try:
             st = os.stat(r)
             inode_key = (st.st_dev, st.st_ino)

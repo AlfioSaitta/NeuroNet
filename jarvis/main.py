@@ -159,63 +159,18 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Errore silenziato in create_collection: {e}")
 
     # ==========================================================================
-    # MOUNT DINAMICI EXTERNAL PROJECTS
+    # PULIZIA SYMLINK IN DOC_DIR
     # ==========================================================================
-    path_mapping = {}
-    
-    # Rimuovi vecchi symlink dinamici da DOC_DIR (evita loop ricorsivi)
+    # I symlink in DOC_DIR non sono più creati: con followlinks=False in tutti
+    # gli os.walk di rag.py, il RAG e il project tree usano EXTERNAL_PROJECTS
+    # tramite percorso diretto. I symlink facevano sì che il PollingObserver
+    # del watchdog (che segue sempre i symlink) ricadesse in 119k file esterni
+    # ogni secondo, consumando ~56% CPU.
     if os.path.exists(DOC_DIR):
         for item in os.listdir(DOC_DIR):
             item_path = os.path.join(DOC_DIR, item)
             if os.path.islink(item_path):
                 os.remove(item_path)
-    
-    if EXTERNAL_PROJECTS.strip():
-        for pair in EXTERNAL_PROJECTS.split(','):
-            pair = pair.strip()
-            if ':' in pair:
-                host_path, folder_name = pair.split(':', 1)
-                host_path = host_path.strip()
-                folder_name = folder_name.strip()
-                
-                # In Docker: HOST_FS_PREFIX=/host_fs → /host_fs/home/alfio/...
-                # Su host:   HOST_FS_PREFIX="" → /home/alfio/... (path diretto)
-                real_path = os.path.join(HOST_FS_PREFIX, host_path.lstrip('/')) if HOST_FS_PREFIX else host_path
-                symlink_path = os.path.join(DOC_DIR, folder_name)
-                
-                if os.path.exists(real_path):
-                    try:
-                        os.symlink(real_path, symlink_path)
-                        path_mapping[real_path] = symlink_path
-                        logger.info(f"🔗 Mount dinamico RAG creato: {folder_name} -> {host_path}")
-                    except Exception as e:
-                        logger.warning(f"Impossibile creare mount per {folder_name}: {e}")
-                else:
-                    logger.warning(f"Mount ignorato: il percorso host '{host_path}' non esiste sul filesystem root.")
-        
-        # Dopo aver creato i symlink, rimuovi eventuali loop ricorsivi nidificati
-        # (es. NeuroNet/data/documents/NeuroNet → DOC_DIR == data/documents/
-        #  crea loop infinito in os.walk e DirectorySnapshot)
-        # NOTA: per il progetto NeuroNet (ai-ecosystem), data/documents/ è un Docker
-        # volume montato a DOC_DIR. Il symlink DOC_DIR/NeuroNet ha lo
-        # STESSO inode di NeuroNet/data/documents/NeuroNet (stesso file). Rimuoviamo
-        # TUTTI i symlink ricorsivi per evitare loop in DirectorySnapshot (watchdog).
-        # NeuroNet verrà indicizzato in ingest_local_documents tramite percorso diretto.
-        for pair in EXTERNAL_PROJECTS.split(','):
-            pair = pair.strip()
-            if ':' in pair:
-                host_path, _ = pair.split(':', 1)
-                host_path = host_path.strip()
-                real_path = os.path.join(HOST_FS_PREFIX, host_path.lstrip('/')) if HOST_FS_PREFIX else host_path
-                nested_doc_dir = os.path.join(real_path, "data", "documents")
-                if os.path.isdir(nested_doc_dir):
-                    for nested_item in os.listdir(nested_doc_dir):
-                        nested_path = os.path.join(nested_doc_dir, nested_item)
-                        if os.path.islink(nested_path):
-                            target = os.readlink(nested_path)
-                            if target == real_path:
-                                os.remove(nested_path)
-                                logger.info(f"🧹 Rimosso symlink ricorsivo: {nested_path} -> {target}")
     # ==========================================================================
 
     # Avvio asincrono di Mem0 (con ritardo per il loopback proxy)
@@ -302,6 +257,7 @@ async def lifespan(app: FastAPI):
                 write_timeout=120.0,
                 connect_timeout=60.0,
                 pool_timeout=60.0,
+                connection_pool_size=50,
             )
             logger.info("📡 Telegram HTTP client con retry DNS (5 tentativi) attivo")
 
