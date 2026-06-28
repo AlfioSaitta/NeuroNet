@@ -151,14 +151,17 @@ class GitignoreFilter:
 
                 if ".aiignore" in files:
                     ignore_path = aiignore
-                else:
-                    # Crea .aiignore da .gitignore
+                elif base == "":
+                    # Root del progetto: crea .aiignore da .gitignore
                     try:
                         shutil.copy2(gitignore, aiignore)
                         logger.info(f"📄 Creato {aiignore} da .gitignore")
                     except OSError as e:
                         logger.warning(f"⚠️ Impossibile creare {aiignore}: {e}")
                     ignore_path = aiignore if os.path.exists(aiignore) else gitignore
+                else:
+                    # Sottodirectory: usa .gitignore direttamente senza creare .aiignore
+                    ignore_path = gitignore
 
                 if PATHSPEC_ENABLED:
                     with open(ignore_path, 'r', errors='ignore') as f:
