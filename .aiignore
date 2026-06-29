@@ -72,9 +72,3 @@ clients/
 mem0_data_v3
 
 jarvis/documents
-
-# Legacy skeleton files (sostituiti da root node in Qdrant)
-.ai-skeleton.md
-
-# llama-cpp-python source clone (persistente, non editable)
-.llama-cpp-src/

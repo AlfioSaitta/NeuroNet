@@ -46,7 +46,7 @@ from config import (
     TELEGRAM_TOKEN, ALLOWED_USERS, MEM0_CONFIG, STATE_FILE,
     TELEGRAM_ENABLED, WATCHDOG_ENABLED, WATCHDOG_TIMEOUT, WATCHDOG_WATCH_MODE,
     VECTOR_DB_VERSION,
-    API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, EMBEDDING_DIMS, EXTERNAL_PROJECTS,
+    API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, API_RATE_LIMIT_EMBED, EMBEDDING_DIMS, EXTERNAL_PROJECTS,
     WORKSPACE_DIR, WORKSPACE_PROJECTS,
     MCP_ENABLED, MCP_AUTO_INIT
 )
@@ -849,7 +849,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
         return StreamingResponse(stream_gen(), media_type="application/x-ndjson")
 
 @app.post("/api/embeddings")
-@limiter.limit(API_RATE_LIMIT_DEFAULT, key_func=_rate_limit_key_localhost)
+@limiter.limit(API_RATE_LIMIT_EMBED, key_func=_rate_limit_key_localhost)
 async def ollama_embeddings(request: Request):
     """Endpoint simulato per Embeddings (usato da mem0 o esterni, legacy)."""
     try:
@@ -873,7 +873,7 @@ async def ollama_embeddings(request: Request):
     return JSONResponse(status_code=200, content={"embedding": data[0].get("embedding", [])})
 
 @app.post("/api/embed")
-@limiter.limit(API_RATE_LIMIT_DEFAULT, key_func=_rate_limit_key_localhost)
+@limiter.limit(API_RATE_LIMIT_EMBED, key_func=_rate_limit_key_localhost)
 async def ollama_embed_batch(request: Request):
     """Endpoint simulato per Embeddings in batch (usato da mem0 o esterni)."""
     try:
@@ -1173,7 +1173,7 @@ async def openai_completions(payload: CompletionRequestOpenAI, request: Request)
 
 
 @app.post("/v1/embeddings")
-@limiter.limit(API_RATE_LIMIT_DEFAULT, key_func=_rate_limit_key_localhost)
+@limiter.limit(API_RATE_LIMIT_EMBED, key_func=_rate_limit_key_localhost)
 async def openai_embeddings(payload: EmbeddingRequestOpenAI, request: Request):
     """Endpoint embeddings in formato OpenAI."""
     import base64

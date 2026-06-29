@@ -17,6 +17,7 @@ import sys
 sys.setrecursionlimit(5000)
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText, PointStruct, VectorParams, Distance
 from pathlib import Path
+from datetime import datetime
 import tiktoken
 
 from config import (
@@ -681,6 +682,11 @@ def get_workspace_col_name(rel_path):
 def get_file_profile_col_name():
     return f"file_profiles_{VECTOR_DB_VERSION}"
 
+def get_project_col_name(project_name: str) -> str:
+    """Restituisce il nome della collezione Qdrant per un dato project name."""
+    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', project_name)
+    return f"collateral_docs_{sanitized}_{VECTOR_DB_VERSION}"
+
 def _mean_vector(vectors: list[list[float]]) -> list[float] | None:
     """Media elemento-per-elemento di una lista di vettori."""
     if not vectors:
@@ -1048,8 +1054,14 @@ async def ingest_local_documents():
             
         logger.info("✅ Sincronizzazione Graph RAG completata.")
 
-    # Genera skeleton architetturali per IDE (Punto 3)
-    await generate_workspace_skeletons()
+    # Genera root node per ogni progetto (sostituisce .ai-skeleton.md)
+    from collections import defaultdict
+    files_by_project: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for rp, fp in current_files.items():
+        proj = rp.replace('\\', '/').split('/')[0] if '/' in rp.replace('\\', '/') else "default"
+        files_by_project[proj].append((rp, fp))
+    for proj_name, proj_files in files_by_project.items():
+        await update_project_root_node(proj_name, proj_files)
     
     # Aggiorna cache del tree in background (Fix 9.4)
     await update_project_tree_cache()
@@ -1061,94 +1073,80 @@ async def ingest_local_documents():
 # PROJECT TREE & SKELETON
 # ==============================================================================
 
-async def _scan_directory_for_skeletons(base_dir: str, visited_inodes: set) -> dict[str, list[tuple[str, str]]]:
-    """Scansiona una directory alla ricerca di file sorgente per skeleton."""
-    filt = GitignoreFilter(base_dir)
-    loop = asyncio.get_running_loop()
-    workspaces = {}
-    for r, d, f in await loop.run_in_executor(None, lambda: list(os.walk(base_dir, followlinks=False))):
-        try:
-            st = os.stat(r)
-            inode_key = (st.st_dev, st.st_ino)
-            if inode_key in visited_inodes:
-                d[:] = []
-                continue
-            visited_inodes.add(inode_key)
-        except OSError:
-            pass
-        d[:] = [sub for sub in d if sub not in ('.git', 'node_modules', 'venv', 'vendor') and not filt.is_ignored(os.path.relpath(os.path.join(r, sub), base_dir))]
-        for file in f:
-            fp = os.path.join(r, file)
-            rp = os.path.relpath(fp, base_dir)
-            if not filt.is_ignored(rp) and rp.endswith(('.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.cpp', '.c', '.h', '.hpp', '.rs')):
-                parts = rp.split('/')
-                ws = parts[0] if len(parts) > 1 else "default"
-                if ws not in workspaces:
-                    workspaces[ws] = []
-                workspaces[ws].append((rp, fp))
-    return workspaces
+async def update_project_root_node(project_name: str, files: list[tuple[str, str]]):
+    """Genera skeleton text per un progetto, lo embedda e upserta un root node in Qdrant.
 
-
-def _write_skeleton(ws: str, skeleton_lines: list[str], base_dir: str):
-    """Scrive il file .ai-skeleton.md per un workspace."""
-    if ws == "default":
+    Il root node è un punto speciale nella collezione Qdrant del progetto con:
+    - type=project_root (filtrabile)
+    - vettore = embedding del skeleton text (elenco signature function/class)
+    - payload con metadati del progetto (total_files, linguaggi, last_indexed)
+    """
+    if not files:
+        logger.warning(f"⚠️ Root node: progetto '{project_name}' senza file, skip")
         return
-    out_path = os.path.join(base_dir, ws, ".ai-skeleton.md")
+
+    # ── Genera skeleton text dalle signature dei file ──
+    skeleton_lines = [f"# Code Skeleton: {project_name}\n"]
+    lang_count: dict[str, int] = {}
+    for rp, fp in sorted(files, key=lambda x: x[0]):
+        ext = os.path.splitext(rp)[1].lower()
+        lang_count[ext] = lang_count.get(ext, 0) + 1
+        try:
+            with open(fp, "r", encoding="utf-8", errors="ignore") as file_obj:
+                content = file_obj.read()
+            signatures = []
+            for idx, line in enumerate(content.split('\n')):
+                line_strip = line.strip()
+                if re.match(r'^(?:export\s+)?(?:async\s+)?(?:def|class|function|func|type|interface)\s+[a-zA-Z0-9_]', line_strip) or \
+                   re.match(r'^(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|enum|[a-zA-Z0-9_<>\[\]]+\s+[a-zA-Z0-9_]+)\(', line_strip):
+                    signatures.append(f"  L{idx+1}: {line_strip}")
+            if signatures:
+                skeleton_lines.append(f"📄 {rp}")
+                skeleton_lines.extend(signatures)
+                skeleton_lines.append("")
+        except Exception as e:
+            logger.warning(f"Root node: errore lettura {fp} per skeleton: {e}")
+
+    skeleton_text = "\n".join(skeleton_lines)
+    if not skeleton_text.strip():
+        logger.warning(f"⚠️ Root node: skeleton vuoto per '{project_name}', skip")
+        return
+
+    # ── Embedding dello skeleton text ──
+    vector = await get_embedding(skeleton_text)
+    if not vector:
+        logger.warning(f"⚠️ Root node: embedding fallito per '{project_name}'")
+        return
+
+    # ── Upsert root node nella collezione del progetto ──
+    col_name = get_project_col_name(project_name)
+    await ensure_workspace_collection(col_name)
+
+    root_id = hashlib.md5(f"root__{project_name}".encode()).hexdigest()
     try:
-        with open(out_path, "w", encoding="utf-8") as out_file:
-            out_file.write("\n".join(skeleton_lines))
-    except Exception as e:
-        logger.warning(f"Impossibile salvare skeleton in {out_path}: {e}")
+        await state.qdrant.delete(
+            collection_name=col_name,
+            points_selector=[root_id]
+        )
+    except Exception:
+        pass
 
-
-async def generate_workspace_skeletons():
-    """Genera e salva uno scheletro del codice per ogni workspace in .ai-skeleton.md"""
-    loop = asyncio.get_running_loop()
-    visited_inodes: set = set()
-    
-    # Scansiona DOC_DIR
-    if os.path.isdir(DOC_DIR):
-        doc_workspaces = await _scan_directory_for_skeletons(DOC_DIR, visited_inodes)
-        for ws, files in doc_workspaces.items():
-            skeleton_lines = [f"# Code Skeleton: {ws}\n"]
-            for rp, fp in files:
-                try:
-                    with open(fp, "r", encoding="utf-8", errors="ignore") as file_obj:
-                        content = file_obj.read()
-                    signatures = []
-                    for idx, line in enumerate(content.split('\n')):
-                        line_strip = line.strip()
-                        if re.match(r'^(?:export\s+)?(?:async\s+)?(?:def|class|function|func|type|interface)\s+[a-zA-Z0-9_]', line_strip) or \
-                           re.match(r'^(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|enum|[a-zA-Z0-9_<>\[\]]+\s+[a-zA-Z0-9_]+)\(', line_strip):
-                            signatures.append(f"  L{idx+1}: {line_strip}")
-                    if signatures:
-                        skeleton_lines.append(f"📄 {rp}")
-                        skeleton_lines.extend(signatures)
-                        skeleton_lines.append("")
-                except Exception as e: logger.warning(f"Errore silenziato: {e}")
-            _write_skeleton(ws, skeleton_lines, DOC_DIR)
-    
-    # Scansiona WORKSPACE_DIR
-    if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
-        ws_workspaces = await _scan_directory_for_skeletons(WORKSPACE_DIR, visited_inodes)
-        for ws, files in ws_workspaces.items():
-            skeleton_lines = [f"# Code Skeleton: {ws}\n"]
-            for rp, fp in files:
-                try:
-                    with open(fp, "r", encoding="utf-8", errors="ignore") as file_obj:
-                        content = file_obj.read()
-                    signatures = []
-                    for idx, line in enumerate(content.split('\n')):
-                        line_strip = line.strip()
-                        if re.match(r'^(?:export\s+)?(?:async\s+)?(?:def|class|function|func|type|interface)\s+[a-zA-Z0-9_]', line_strip) or \
-                           re.match(r'^(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|enum|[a-zA-Z0-9_<>\[\]]+\s+[a-zA-Z0-9_]+)\(', line_strip):
-                            signatures.append(f"  L{idx+1}: {line_strip}")
-                    if signatures:
-                        skeleton_lines.append(f"📄 {rp}")
-                        skeleton_lines.extend(signatures)
-                        skeleton_lines.append("")
-                except Exception as e: logger.warning(f"Errore silenziato: {e}")
-            _write_skeleton(ws, skeleton_lines, WORKSPACE_DIR)
+    await state.qdrant.upsert(
+        collection_name=col_name,
+        points=[PointStruct(
+            id=root_id,
+            vector=vector,
+            payload={
+                "type": "project_root",
+                "project": project_name,
+                "total_files": len(files),
+                "languages": lang_count,
+                "last_indexed": datetime.now().isoformat(),
+                "skeleton_text": skeleton_text
+            }
+        )]
+    )
+    logger.info(f"🏗️ Root node aggiornato per progetto '{project_name}' ({len(files)} file, {sum(lang_count.values())} sorgenti)")
 
 async def update_project_tree_cache():
     """Aggiorna la cache in background (eseguito in to_thread per non bloccare FastAPI)."""

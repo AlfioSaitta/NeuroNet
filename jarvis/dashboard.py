@@ -19,10 +19,29 @@ HTML_CONTENT = r"""
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NeuroNet — Neural Control Panel</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
-    <script src="https://unpkg.com/force-graph"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/atom-one-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "sigma": "https://esm.sh/sigma@3.0.3",
+            "graphology": "https://esm.sh/graphology@0.26.0",
+            "graphology-layout-forceatlas2": "https://esm.sh/graphology-layout-forceatlas2@0.10.1",
+            "graphology-layout-forceatlas2/worker": "https://esm.sh/graphology-layout-forceatlas2@0.10.1/worker"
+        }
+    }
+    </script>
+    <script type="module">
+    import Graphology from 'graphology';
+    import Sigma from 'sigma';
+    import forceAtlas2 from 'graphology-layout-forceatlas2';
+    import FA2Layout from 'graphology-layout-forceatlas2/worker';
+    window.__sigma = Sigma;
+    window.__graphology = Graphology;
+    window.__fa2 = forceAtlas2;
+    window.__fa2Worker = FA2Layout;
+    </script>
     <style>
         :root {
             --bg-base: #05070a;
@@ -515,10 +534,22 @@ HTML_CONTENT = r"""
 
     <script>
         let isModalOpen = false;
-        let Graph = null;
-        let currentSelectedNode = null;
+        let sigmaInstance = null;
+        let fa2Layout = null;
+        let selectedNodeId = null;
         let allNodes = [];
         let allLinks = [];
+
+        const graphFilter = { ext: 'ALL', query: '' };
+
+        function escapeHtml(unsafe) {
+            return String(unsafe)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
 
         function calcGpuTempColor(temp) {
             if (temp < 65) return { color: '#00ffcc', class: 'green' };
@@ -533,30 +564,12 @@ HTML_CONTENT = r"""
         }
 
         function applyGraphFilter() {
-            if (!Graph) return;
-            const selectedType = document.getElementById('file-type-filter').value;
-            const query = document.getElementById('node-search').value.toLowerCase();
-            
-            let filteredNodes = allNodes;
-            if (selectedType !== "ALL") {
-                filteredNodes = allNodes.filter(n => n.ext === selectedType);
-            }
-            if (query.length > 0) {
-                filteredNodes = filteredNodes.filter(n => {
-                    const txt = (n.payload.text || n.payload.data || JSON.stringify(n.payload)).toLowerCase();
-                    return txt.includes(query) || String(n.id).toLowerCase().includes(query);
-                });
-            }
-            
-            const nodeIds = new Set(filteredNodes.map(n => n.id));
-            const filteredLinks = allLinks.filter(l => nodeIds.has(l.source.id || l.source) && nodeIds.has(l.target.id || l.target));
-            
-            Graph.graphData({ nodes: filteredNodes, links: filteredLinks });
-            
-            if (currentSelectedNode && !nodeIds.has(currentSelectedNode.id)) {
-                document.getElementById('node-info').style.display = "none";
-                currentSelectedNode = null;
-            }
+            if (!sigmaInstance) return;
+            graphFilter.ext = document.getElementById('file-type-filter').value;
+            graphFilter.query = document.getElementById('node-search').value.toLowerCase();
+            document.getElementById('node-info').style.display = "none";
+            selectedNodeId = null;
+            sigmaInstance.refresh();
         }
 
         const EXT_COLORS = {
@@ -582,6 +595,9 @@ HTML_CONTENT = r"""
             document.getElementById('graph-container').innerHTML = '';
             document.getElementById('filter-container').style.display = "none";
             document.getElementById('node-search').value = '';
+            selectedNodeId = null;
+            graphFilter.ext = 'ALL';
+            graphFilter.query = '';
 
             allNodes = [];
             allLinks = [];
@@ -653,11 +669,7 @@ HTML_CONTENT = r"""
                     degree[tId] = (degree[tId] || 0) + 1;
                 });
                 const maxDeg = Math.max(1, ...Object.values(degree));
-
-                function nodeColor(node) {
-                    if (node === currentSelectedNode) return '#ff00ff';
-                    return EXT_COLORS[node.ext] || '#888888';
-                }
+                const nodeCount = allNodes.length;
 
                 // Build legend
                 const legendEl = document.getElementById('graph-legend');
@@ -674,66 +686,137 @@ HTML_CONTENT = r"""
                     legendEl.appendChild(row);
                 });
 
-                Graph = ForceGraph()(document.getElementById('graph-container'))
-                    .backgroundColor('transparent')
-                    .nodeRelSize(6)
-                    .nodeVal(node => 1 + (degree[node.id] || 0) / maxDeg * 4)
-                    .linkDirectionalParticles(link => link.similarity > 0.7 ? 2 : 0)
-                    .linkDirectionalParticleSpeed(d => 0.008)
-                    .linkDirectionalParticleWidth(2)
-                    .linkColor(link => {
-                        const a = Math.max(0.1, (link.similarity - 0.35) * 2);
-                        return `rgba(0, 255, 204, ${a})`;
-                    })
-                    .linkWidth(link => Math.max(0.3, (link.similarity - 0.35) * 8))
-                    .nodeColor(nodeColor)
-                    .nodeLabel(node => `${EXT_NAMES[node.ext] || node.ext} — ${degree[node.id] || 0} connections`)
-                    .onNodeClick(node => {
-                        currentSelectedNode = node;
-                        Graph.nodeColor(Graph.nodeColor());
+                // --- Build graphology graph ---
+                const sigmaGraph = new window.__graphology();
 
-                        const infoBox = document.getElementById('node-info');
-                        const contentBox = document.getElementById('node-content');
-                        infoBox.style.display = "block";
+                data.points.forEach(p => {
+                    const ext = allNodes.find(n => n.id === p.id)?.ext || 'Unknown';
+                    const size = Math.max(3, Math.min(20, 1 + (degree[p.id] || 0) / maxDeg * 4));
+                    sigmaGraph.addNode(p.id, {
+                        label: `${EXT_NAMES[ext] || ext} — ${degree[p.id] || 0} connections`,
+                        x: Math.random() * 200 - 100,
+                        y: Math.random() * 200 - 100,
+                        size: nodeCount > 500 ? size * 0.6 : size,
+                        color: EXT_COLORS[ext] || '#888888',
+                        ext: ext,
+                        payload: p.payload || {},
+                    });
+                });
 
-                        let htmlContent = `<div class="property-row"><div class="property-label">Vector ID</div><div class="property-value">${node.id}</div></div>`;
-
-                        function escapeHtml(unsafe) {
-                            return String(unsafe)
-                                 .replace(/&/g, "&amp;")
-                                 .replace(/</g, "&lt;")
-                                 .replace(/>/g, "&gt;")
-                                 .replace(/"/g, "&quot;")
-                                 .replace(/'/g, "&#039;");
-                        }
-
-                        if(node.payload.text || node.payload.data) {
-                            const mainText = node.payload.text || node.payload.data;
-                            htmlContent += `<div class="property-row"><div class="property-label">Primary Text</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(mainText)}</code></pre></div></div>`;
-                        }
-
-                        const payloadStr = JSON.stringify(node.payload, null, 2);
-                        htmlContent += `<div class="property-row"><div class="property-label">Raw Payload (JSON)</div><pre><code class="language-json" style="padding: 8px; border-radius: 4px;">${escapeHtml(payloadStr)}</code></pre></div>`;
-
-                        contentBox.innerHTML = htmlContent;
-
-                        contentBox.querySelectorAll('pre code').forEach((block) => {
-                            hljs.highlightElement(block);
+                data.links.forEach(l => {
+                    const source = l.source?.id || l.source;
+                    const target = l.target?.id || l.target;
+                    if (sigmaGraph.hasNode(source) && sigmaGraph.hasNode(target)) {
+                        const width = Math.max(0.3, (l.similarity - 0.35) * 8);
+                        const alpha = Math.max(0.1, (l.similarity - 0.35) * 2);
+                        sigmaGraph.addEdge(source, target, {
+                            color: `rgba(0, 255, 204, ${alpha})`,
+                            size: width,
                         });
-                    })
-                    .onNodeHover(node => {
-                        document.getElementById('graph-container').style.cursor = node ? 'pointer' : null;
-                    })
-                    .onBackgroundClick(() => {
-                        currentSelectedNode = null;
-                        Graph.nodeColor(Graph.nodeColor());
-                        document.getElementById('node-info').style.display = "none";
-                    })
-                    .graphData({ nodes: allNodes, links: allLinks });
+                    }
+                });
 
+                // Warm-up with synchronous FA2
+                window.__fa2.assign(sigmaGraph, {
+                    iterations: nodeCount > 500 ? 80 : 50,
+                    settings: {
+                        barnesHutOptimize: nodeCount > 500,
+                        gravity: 0.5,
+                        scalingRatio: nodeCount > 500 ? 5 : 2,
+                    },
+                });
+
+                // Continuous FA2 in Web Worker
+                const layout = new window.__fa2Worker(sigmaGraph, {
+                    settings: {
+                        barnesHutOptimize: nodeCount > 500,
+                        gravity: 0.5,
+                        scalingRatio: nodeCount > 500 ? 5 : 2,
+                    },
+                });
+                layout.start();
+                fa2Layout = layout;
+
+                // Create sigma renderer
+                const renderer = new window.__sigma(sigmaGraph, document.getElementById('graph-container'), {
+                    renderEdgeLabels: false,
+                    enableEdgeEvents: true,
+                    labelRenderedSizeThreshold: 6,
+                    labelDensity: 0.3,
+                    minCameraRatio: 0.05,
+                    maxCameraRatio: 10,
+                    nodeReducer: (node, data) => {
+                        if (graphFilter.ext !== 'ALL' && data.ext !== graphFilter.ext) {
+                            return { ...data, hidden: true };
+                        }
+                        if (graphFilter.query) {
+                            const payload = data.payload || {};
+                            const txt = (payload.text || payload.data || JSON.stringify(payload)).toLowerCase();
+                            if (!txt.includes(graphFilter.query) && !String(node).toLowerCase().includes(graphFilter.query)) {
+                                return { ...data, hidden: true };
+                            }
+                        }
+                        if (node === selectedNodeId) {
+                            return { ...data, color: '#ff00ff', size: data.size * 1.5 };
+                        }
+                        return data;
+                    },
+                    edgeReducer: (edge, data) => {
+                        const [src, tgt] = sigmaGraph.extremities(edge);
+                        const srcAttrs = sigmaGraph.getNodeAttributes(src);
+                        const tgtAttrs = sigmaGraph.getNodeAttributes(tgt);
+                        if (srcAttrs.hidden || tgtAttrs.hidden) return { ...data, hidden: true };
+                        return data;
+                    },
+                });
+
+                sigmaInstance = renderer;
+
+                // Node click
+                renderer.on('clickNode', ({ node }) => {
+                    selectedNodeId = node;
+                    const attrs = sigmaGraph.getNodeAttributes(node);
+
+                    const infoBox = document.getElementById('node-info');
+                    const contentBox = document.getElementById('node-content');
+                    infoBox.style.display = "block";
+
+                    let htmlContent = `<div class="property-row"><div class="property-label">Vector ID</div><div class="property-value">${escapeHtml(node)}</div></div>`;
+
+                    if(attrs.payload.text || attrs.payload.data) {
+                        const mainText = attrs.payload.text || attrs.payload.data;
+                        htmlContent += `<div class="property-row"><div class="property-label">Primary Text</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(mainText)}</code></pre></div></div>`;
+                    }
+
+                    const payloadStr = JSON.stringify(attrs.payload, null, 2);
+                    htmlContent += `<div class="property-row"><div class="property-label">Raw Payload (JSON)</div><pre><code class="language-json" style="padding: 8px; border-radius: 4px;">${escapeHtml(payloadStr)}</code></pre></div>`;
+
+                    contentBox.innerHTML = htmlContent;
+                    contentBox.querySelectorAll('pre code').forEach((block) => {
+                        hljs.highlightElement(block);
+                    });
+
+                    renderer.refresh();
+                });
+
+                renderer.on('enterNode', ({ node }) => {
+                    document.getElementById('graph-container').style.cursor = 'pointer';
+                });
+
+                renderer.on('leaveNode', () => {
+                    document.getElementById('graph-container').style.cursor = '';
+                });
+
+                renderer.on('clickStage', () => {
+                    selectedNodeId = null;
+                    document.getElementById('node-info').style.display = "none";
+                    renderer.refresh();
+                });
+
+                // Fit view
                 setTimeout(() => {
-                    Graph.zoomToFit(400, 50);
-                }, 600);
+                    renderer.getCamera().animatedReset({ duration: 400 });
+                }, 200);
 
             } catch(e) {
                 console.error(e);
@@ -745,9 +828,13 @@ HTML_CONTENT = r"""
             document.getElementById('graph-modal').style.display = "none";
             document.getElementById('node-info').style.display = "none";
             document.getElementById('graph-legend').style.display = "none";
-            if(Graph) {
-                Graph._destructor();
-                Graph = null;
+            if(fa2Layout) {
+                fa2Layout.kill();
+                fa2Layout = null;
+            }
+            if(sigmaInstance) {
+                sigmaInstance.kill();
+                sigmaInstance = null;
             }
             document.getElementById('graph-container').innerHTML = '';
             isModalOpen = false;
@@ -800,73 +887,134 @@ HTML_CONTENT = r"""
                     degree[tId] = (degree[tId] || 0) + 1;
                 });
                 const maxDeg = Math.max(1, ...Object.values(degree));
+                const nodeCount = allNodes.length;
 
-                Graph = ForceGraph()(document.getElementById('graph-container'))
-                    .backgroundColor('transparent')
-                    .nodeRelSize(node => node.group === 'entity' ? 10 : 5)
-                    .nodeVal(node => 2 + (degree[node.id] || 0) / maxDeg * 6)
-                    .linkDirectionalParticles(2)
-                    .linkDirectionalParticleSpeed(d => 0.006)
-                    .linkDirectionalParticleWidth(2)
-                    .linkColor(() => 'rgba(0, 255, 204, 0.3)')
-                    .linkWidth(1)
-                    .nodeColor(node => node.group === 'entity' ? '#b388ff' : '#00e5ff')
-                    .nodeLabel(node => node.group === 'entity'
-                        ? `Entity: ${node.payload.entity_name} (${degree[node.id] || 0} connections)`
-                        : `Memory (${degree[node.id] || 0} connections)`)
-                    .onNodeClick(node => {
-                        currentSelectedNode = node;
-                        Graph.nodeColor(Graph.nodeColor());
+                // --- Build graphology graph ---
+                const sigmaGraph = new window.__graphology();
 
-                        const infoBox = document.getElementById('node-info');
-                        const contentBox = document.getElementById('node-content');
-                        infoBox.style.display = "block";
+                allNodes.forEach(p => {
+                    const group = p.group || 'memory';
+                    const isEntity = group === 'entity';
+                    const size = isEntity
+                        ? Math.max(5, Math.min(25, 2 + (degree[p.id] || 0) / maxDeg * 6))
+                        : Math.max(3, Math.min(15, 1 + (degree[p.id] || 0) / maxDeg * 4));
+                    sigmaGraph.addNode(p.id, {
+                        label: isEntity
+                            ? `Entity: ${p.payload.entity_name} (${degree[p.id] || 0} connections)`
+                            : `Memory (${degree[p.id] || 0} connections)`,
+                        x: Math.random() * 200 - 100,
+                        y: Math.random() * 200 - 100,
+                        size: nodeCount > 500 ? size * 0.7 : size,
+                        color: isEntity ? '#b388ff' : '#00e5ff',
+                        group: group,
+                        payload: p.payload || {},
+                    });
+                });
 
-                        let htmlContent = `<div class="property-row"><div class="property-label">Type</div><div class="property-value">${node.group === 'entity' ? '🔮 Entity' : '🧠 Memory'}</div></div>`;
-
-                        function escapeHtml(unsafe) {
-                            return String(unsafe)
-                                .replace(/&/g, "&amp;")
-                                .replace(/</g, "&lt;")
-                                .replace(/>/g, "&gt;")
-                                .replace(/"/g, "&quot;")
-                                .replace(/'/g, "&#039;");
-                        }
-
-                        if (node.group === 'entity') {
-                            htmlContent += `<div class="property-row"><div class="property-label">Entity Name</div><div class="property-value">${escapeHtml(node.payload.entity_name)}</div></div>`;
-                            htmlContent += `<div class="property-row"><div class="property-label">Connected Memories</div><div class="property-value">${node.payload.connected_memories || 0}</div></div>`;
-                            if (node.payload.entity_type) {
-                                htmlContent += `<div class="property-row"><div class="property-label">Entity Type</div><div class="property-value">${escapeHtml(node.payload.entity_type)}</div></div>`;
-                            }
-                        } else {
-                            const memText = node.payload.memory || '';
-                            htmlContent += `<div class="property-row"><div class="property-label">Memory Excerpt</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(memText)}</code></pre></div></div>`;
-                            if (node.payload.entity_count) {
-                                htmlContent += `<div class="property-row"><div class="property-label">Connected Entities</div><div class="property-value">${node.payload.entity_count}</div></div>`;
-                            }
-                        }
-
-                        htmlContent += `<div class="property-row"><div class="property-label">Node ID</div><div class="property-value" style="font-size:0.7rem;color:var(--text-muted);">${escapeHtml(node.id)}</div></div>`;
-                        contentBox.innerHTML = htmlContent;
-
-                        contentBox.querySelectorAll('pre code').forEach((block) => {
-                            hljs.highlightElement(block);
+                allLinks.forEach(l => {
+                    const source = l.source?.id || l.source;
+                    const target = l.target?.id || l.target;
+                    if (sigmaGraph.hasNode(source) && sigmaGraph.hasNode(target)) {
+                        sigmaGraph.addEdge(source, target, {
+                            color: 'rgba(0, 255, 204, 0.3)',
+                            size: 1,
                         });
-                    })
-                    .onNodeHover(node => {
-                        document.getElementById('graph-container').style.cursor = node ? 'pointer' : null;
-                    })
-                    .onBackgroundClick(() => {
-                        currentSelectedNode = null;
-                        Graph.nodeColor(Graph.nodeColor());
-                        document.getElementById('node-info').style.display = "none";
-                    })
-                    .graphData({ nodes: allNodes, links: allLinks });
+                    }
+                });
 
+                // Warm-up with synchronous FA2
+                window.__fa2.assign(sigmaGraph, {
+                    iterations: nodeCount > 500 ? 80 : 50,
+                    settings: {
+                        barnesHutOptimize: nodeCount > 500,
+                        gravity: 0.5,
+                        scalingRatio: nodeCount > 500 ? 5 : 2,
+                    },
+                });
+
+                // Continuous FA2 in Web Worker
+                const layout = new window.__fa2Worker(sigmaGraph, {
+                    settings: {
+                        barnesHutOptimize: nodeCount > 500,
+                        gravity: 0.5,
+                        scalingRatio: nodeCount > 500 ? 5 : 2,
+                    },
+                });
+                layout.start();
+                fa2Layout = layout;
+
+                // Create sigma renderer
+                const renderer = new window.__sigma(sigmaGraph, document.getElementById('graph-container'), {
+                    renderEdgeLabels: false,
+                    enableEdgeEvents: true,
+                    labelRenderedSizeThreshold: 6,
+                    labelDensity: 0.3,
+                    minCameraRatio: 0.05,
+                    maxCameraRatio: 10,
+                    nodeReducer: (node, data) => {
+                        if (node === selectedNodeId) {
+                            return { ...data, color: '#ff00ff', size: data.size * 1.5 };
+                        }
+                        return data;
+                    },
+                });
+
+                sigmaInstance = renderer;
+
+                // Node click
+                renderer.on('clickNode', ({ node }) => {
+                    selectedNodeId = node;
+                    const attrs = sigmaGraph.getNodeAttributes(node);
+                    const isEntity = attrs.group === 'entity';
+
+                    const infoBox = document.getElementById('node-info');
+                    const contentBox = document.getElementById('node-content');
+                    infoBox.style.display = "block";
+
+                    let htmlContent = `<div class="property-row"><div class="property-label">Type</div><div class="property-value">${isEntity ? '🔮 Entity' : '🧠 Memory'}</div></div>`;
+
+                    if (isEntity) {
+                        htmlContent += `<div class="property-row"><div class="property-label">Entity Name</div><div class="property-value">${escapeHtml(attrs.payload.entity_name)}</div></div>`;
+                        htmlContent += `<div class="property-row"><div class="property-label">Connected Memories</div><div class="property-value">${attrs.payload.connected_memories || 0}</div></div>`;
+                        if (attrs.payload.entity_type) {
+                            htmlContent += `<div class="property-row"><div class="property-label">Entity Type</div><div class="property-value">${escapeHtml(attrs.payload.entity_type)}</div></div>`;
+                        }
+                    } else {
+                        const memText = attrs.payload.memory || '';
+                        htmlContent += `<div class="property-row"><div class="property-label">Memory Excerpt</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(memText)}</code></pre></div></div>`;
+                        if (attrs.payload.entity_count) {
+                            htmlContent += `<div class="property-row"><div class="property-label">Connected Entities</div><div class="property-value">${attrs.payload.entity_count}</div></div>`;
+                        }
+                    }
+
+                    htmlContent += `<div class="property-row"><div class="property-label">Node ID</div><div class="property-value" style="font-size:0.7rem;color:var(--text-muted);">${escapeHtml(node)}</div></div>`;
+                    contentBox.innerHTML = htmlContent;
+
+                    contentBox.querySelectorAll('pre code').forEach((block) => {
+                        hljs.highlightElement(block);
+                    });
+
+                    renderer.refresh();
+                });
+
+                renderer.on('enterNode', ({ node }) => {
+                    document.getElementById('graph-container').style.cursor = 'pointer';
+                });
+
+                renderer.on('leaveNode', () => {
+                    document.getElementById('graph-container').style.cursor = '';
+                });
+
+                renderer.on('clickStage', () => {
+                    selectedNodeId = null;
+                    document.getElementById('node-info').style.display = "none";
+                    renderer.refresh();
+                });
+
+                // Fit view
                 setTimeout(() => {
-                    Graph.zoomToFit(400, 50);
-                }, 600);
+                    renderer.getCamera().animatedReset({ duration: 400 });
+                }, 200);
 
             } catch(e) {
                 console.error(e);
