@@ -19,6 +19,12 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
+# Import TOOLS_SCHEMA for agentic capabilities
+try:
+    from agent_tools import TOOLS_SCHEMA
+except ImportError:
+    TOOLS_SCHEMA = []
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -120,6 +126,7 @@ class JarvisAgent:
         self.chat_window = None
         self.tray = None
         self.tray_menu = None
+        self._conversation_id = str(uuid.uuid4())
 
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -483,6 +490,20 @@ class JarvisAgent:
             log.error(f"Errore trascrizione: {e}")
             return ""
 
+    def _classify_quick(self, text: str) -> bool:
+        """Returns True for quick/greeting queries (no project context needed), False for code/project queries."""
+        quick_patterns = [
+            r'^(ciao|salve|buongiorno|buonasera|buon pomeriggio|ehilà|hey|grazie|grazie mille|ti ringrazio)$',
+            r'^(come stai|come va|tutto bene|che fai)$',
+            r'^(che ore sono|che giorno è|che data è)$',
+            r'^(arrivederci|ciao|a dopo|a presto)$',
+        ]
+        clean = text.strip().lower()
+        for pattern in quick_patterns:
+            if re.match(pattern, clean):
+                return True
+        return False
+
     def _query_jarvis(self, text):
         if not HAVE_HTTPX or not self.api_client:
             return ""
@@ -492,15 +513,21 @@ class JarvisAgent:
                 "messages": [
                     {"role": "system", "content": (
                         "Sei Jarvis, un assistente AI personale. "
-                        "Rispondi in modo conciso e naturale in italiano. "
-                        "Puoi controllare il desktop dell'utente. "
-                        "Per eseguire azioni, includi nella risposta il tag: [azione: comando]. "
-                        "Comandi disponibili:\n"
+                        "Rispondi in modo conciso e naturale in italiano.\n"
+                        "Puoi controllare il DESKTOP usando [azione: comando]:\n"
                         "- [azione: finestre] — elenca le finestre aperte\n"
                         "- [azione: apri <url>] — apre il browser su una pagina\n"
                         "- [azione: avvia <applicazione>] — avvia un'applicazione\n"
-                        "- [azione: cerca <testo>] — cerca su Google\n"
-                        "Esempio: 'Certo, apro il sito. [azione: apri https://example.com]'"
+                        "- [azione: cerca <testo>] — cerca su Google\n\n"
+                        "Puoi interagire con file e codice usando i TOOL messi a disposizione nella chat "
+                        "(read_file, search_code, git_status, ecc).\n\n"
+                        "Puoi usare tag XML per azioni backend:\n"
+                        "- <EXEC>comando</EXEC> — comandi shell readonly (whitelist)\n"
+                        "- <MEMORY>testo</MEMORY> — salva in memoria\n"
+                        "- <SCHEDULE>cron|task</SCHEDULE> — promemoria ricorrenti\n"
+                        "- <SSH>server|comando</SSH> — esecuzione remota\n"
+                        "- <TODO_ADD>desc|prio|scadenza</TODO_ADD> — aggiungi task\n\n"
+                        "Esempio: 'Certo, apro il sito. [azione: apri https://example.com]'\n"
                         "Se l'utente chiede informazioni su impegni, eventi o task, "
                         "usa il task manager integrato per verificare. "
                         "Se chiede di creare promemoria o task, creali. "
@@ -508,7 +535,9 @@ class JarvisAgent:
                     {"role": "user", "content": text}],
                 "stream": False,
                 "user_id": self.config.get("user_id", "alfio_dev"),
-                "options": {"concise": True}}
+                "tools": TOOLS_SCHEMA,
+                "conversation_id": self._conversation_id if hasattr(self, '_conversation_id') else "default",
+                "options": {"concise": self._classify_quick(text)}}
             resp = self.api_client.post("/api/chat", json=payload)
             resp.raise_for_status()
             data = resp.json()
