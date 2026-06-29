@@ -34,7 +34,8 @@ class ModelProfile:
 def detect_model_family(model_path: Optional[str] = None) -> ModelProfile:
     """Rileva la famiglia del modello dal path del GGUF."""
     if not model_path:
-        model_path = os.environ.get("LLAMA_MODEL_PATH", "")
+        # Chiamato senza argomento da context esterni; default hardcoded
+        model_path = "./models/qwen2.5-coder-3b.gguf"
 
     filename = os.path.basename(model_path).lower()
 

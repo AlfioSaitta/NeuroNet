@@ -3,7 +3,6 @@ Provider Router — Astrazione per provider LLM esterni (Gemini, Claude, ecc.).
 Permette routing strategico delle richieste tra motore locale e cloud.
 """
 
-import os
 import json
 import asyncio
 import logging
@@ -344,11 +343,11 @@ def init_router(config: dict) -> ProviderRouter:
     global _router
     _router = ProviderRouter(config)
 
-    gemini_key = config.get("gemini_api_key", os.getenv("GEMINI_API_KEY", ""))
+    gemini_key = config.get("gemini_api_key", "")
     if gemini_key:
         gemini = GeminiProvider({
             "api_key": gemini_key,
-            "model": config.get("gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.5-pro-exp-03-25"))
+            "model": config.get("gemini_model", "gemini-2.5-pro-exp-03-25")
         })
         _router.register_provider("gemini", gemini)
         logger.info("ProviderRouter: Gemini registrato come provider esterno")

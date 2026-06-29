@@ -11,14 +11,15 @@ L'inferenza avviene **interamente in-process** tramite `llama-cpp-python` su mod
 
 ---
 
-## 🚦 Stato del Sistema (al 2026-06-28)
+## 🚦 Stato del Sistema (al 2026-06-29)
 
 | Componente | Stato | Note |
 |---|---|---|
-| **Worker GPU (Locale)** | ✅ **ONLINE** | Qwen3.5-4B-UD Q4_K_XL, n_gpu_layers=15, flash_attn=true, CUDA 13.0 overlay |
+| **Worker GPU (Locale)** | ✅ **ONLINE** | Gemma 4 E2B QAT, n_gpu_layers=15, flash_attn=true, CUDA 13.0 overlay |
 | **VPS Master** | ⏳ Da deployare | Piano completo pronto per deploy |
 | **Container CUDA** | ✅ **FUNZIONANTE** | CUDA 13.0 overlay su base 12.2 per driver NVIDIA 580.159.03 |
-| **GPU Inferenza** | ✅ **OK** | Chat: ~1924MiB (47%), Embed: ~2320MiB (57%), 86°C peak |
+| **GPU Inferenza** | ✅ **OK** | Chat: ~1036MiB (25%), Embed: ~400MiB (+10%), 86°C peak |
+| **OpenAI API** | ✅ **COMPLETA** | 15+ endpoint `/v1/*` tra cui Assistants/Threads/Runs, DB race fix |
 | **Embedding** | ✅ **Qwen3-Embedding-0.6B** | 768d MRL, Q8_0, ~396MiB VRAM |
 | **Reranker** | ✅ **Qwen3-Reranker-0.6B** | CPU fp16, multilingua, MTEB-Code 73.42 |
 | **Memoria Mem0** | ✅ **ATTIVA** | Qdrant vector store, spaCy entity extraction |
@@ -145,6 +146,8 @@ ai-ecosystem/
     ├── state.py                     # Stato globale mutabile (72 righe)
     ├── llm_engine.py                # LlamaEngine + PriorityLock (571 righe)
     ├── rag.py                       # Pipeline RAG completa (1797 righe)
+    ├── rag_reranker.py              # Reranker modulare (Qwen3 + FlashRank) (80 righe)
+    ├── rag_cache.py                 # Cache semantica + Web Knowledge Qdrant (190 righe)
     ├── memory.py                    # Mem0 + helper memoria (187 righe)
     ├── memory_backup.py             # Export/import memoria JSON (68 righe)
     ├── prompt_builder.py            # Gatekeeper + super-prompt (479 righe)
@@ -163,6 +166,26 @@ ai-ecosystem/
     ├── external_providers.py        # Provider cloud esterni (356 righe)
     ├── mcp_client.py                # Client MCP per tool esterni (634 righe)
     ├── tag_processor.py             # Elaborazione tag XML nelle risposte (1043 righe)
+    ├── telegram_format.py            # Utility formattazione Telegram Markdown (147 righe)
+    ├── dashboard_template.py         # Template HTML/CSS/JS dashboard (cyberpunk, Chart.js, Sigma.js)
+    ├── openai_router.py              # (Legacy) Router OpenAI /v1/* (545 righe)
+    ├── openai/                       # Sotto-pacchetto OpenAI API (modulare)
+    │   ├── __init__.py               # Factory init_openai_routes() con lazy import
+    │   ├── state.py                  # OpenAIDatabase SQLite singleton + lock asyncio
+    │   ├── models.py                 # Pydantic models + /v1/models endpoint
+    │   ├── chat.py                   # POST /v1/chat/completions (streaming, tool-calling)
+    │   ├── completions.py            # POST /v1/completions (legacy)
+    │   ├── embeddings.py             # POST /v1/embeddings (float/base64)
+    │   ├── audio.py                  # POST /v1/audio/transcriptions, translations, speech
+    │   ├── images.py                 # POST /v1/images/* stub (400)
+    │   ├── moderations.py            # POST /v1/moderations
+    │   ├── files.py                  # POST /v1/files
+    │   ├── uploads.py                # POST /v1/uploads (large file)
+    │   ├── assistants.py             # CRUD Assistants API
+    │   ├── threads.py                # CRUD Threads API
+    │   ├── runs.py                   # POST /v1/threads/{id}/runs
+    │   ├── run_engine.py             # Motore esecuzione Run (LLM + streaming)
+    │   └── vector_stores.py          # CRUD Vector Store
     ├── agents/                      # Def. agenti specializzati
     │   └── code-reviewer.agent.md
     ├── cron_jobs.json               # Job schedulati persistenti
@@ -586,9 +609,10 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo 
 
 | Modello | Stato | VRAM | Note |
 |---|---|---|---|
-| `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ✅ **IN USO** | 1924MiB (47%) | n_gpu_layers=15, flash_attn=true |
-| `Qwen3-Embedding-0.6B-Q8_0.gguf` | ✅ IN USO | +396MiB (57% tot) | 768d MRL |
-| `nomic-embed-text-v1.5.gguf` | ⏳ Sostituito | CPU | Rimpiazzato da Qwen3 |
+| `gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf` | ✅ **IN USO** | 1036MiB (25%) | n_gpu_layers=15, flash_attn=true, 2.1B param QAT |
+| `Qwen3-Embedding-0.6B-Q8_0.gguf` | ✅ IN USO | +400MiB (35% tot) | 768d MRL |
+| `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ⏳ Backup | 1924MiB (47%) | Sostituito da Gemma 4 (86% meno VRAM) |
+| `nomic-embed-text-v1.5.gguf` | ❌ Rimosso | CPU | Rimpiazzato da Qwen3 |
 
 ### Master VPS (CPU-only — 24GB RAM)
 
@@ -647,14 +671,27 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo 
 | `/api/reset-all` | GET/POST | Reset RAG + Mem0 |
 | `/docs` | GET | Swagger UI |
 | **OpenAI-compatibili** | | |
-| `/v1/chat/completions` | POST | Chat completion (streaming SSE) |
-| `/v1/completions` | POST | Text completion (streaming SSE) |
-| `/v1/embeddings` | POST | Embeddings (float/base64) |
+| `/v1/chat/completions` | POST | Chat completion (streaming SSE, tool-calling, confirmation tokens) |
+| `/v1/completions` | POST | Text completion legacy (streaming SSE, echo) |
+| `/v1/embeddings` | POST | Embeddings (float/base64 encoding) |
 | `/v1/models` | GET | Lista modelli |
 | `/v1/models/{model_name}` | GET | Dettaglio modello |
-| `/v1/moderations` | POST | Moderazione contenuti |
-| `/v1/audio/transcriptions` | POST | Trascrizione audio (whisper) |
+| `/v1/moderations` | POST | Moderazione contenuti (LLM-based + keyword fallback) |
+| `/v1/audio/transcriptions` | POST | Trascrizione audio (faster-whisper) |
+| `/v1/audio/translations` | POST | Traduzione audio → inglese (faster-whisper) |
 | `/v1/audio/speech` | POST | Text-to-speech (gTTS) |
+| `/v1/images/generations` | POST | Stub 400 (model not available) |
+| `/v1/images/edits` | POST | Stub 400 (model not available) |
+| `/v1/images/variations` | POST | Stub 400 (model not available) |
+| `/v1/assistants` | GET/POST | Lista/Crea Assistente |
+| `/v1/assistants/{id}` | GET | Dettaglio Assistente |
+| `/v1/threads` | POST | Crea Thread |
+| `/v1/threads/{id}` | GET | Dettaglio Thread |
+| `/v1/threads/{id}/runs` | POST | Esegui Run su Thread |
+| `/v1/threads/{id}/runs/{run_id}/submit_tool_outputs` | POST | Tool output per Run |
+| `/v1/vector_stores` | GET/POST | Lista/Crea Vector Store |
+| `/v1/files` | POST | Upload file |
+| `/v1/uploads` | POST | Upload large file in parti |
 
 ---
 
@@ -758,6 +795,18 @@ tar -cvzf backup_ai_$(date +%Y%m%d).tar.gz ./data .env
 ---
 
 ## 📝 Changelog
+
+### v9.4.0 (2026-06-29) — Refactor OpenAI in sottopacchetto + DB race fix
+- **Refactor OpenAI:** `openai_router.py` → pacchetto `openai/` con 17 moduli. Lazy import tramite `init_openai_routes()`, init ritardato nell'lifespan
+- **Assistants API:** Nuovi endpoint per Assistants, Threads, Runs, Vector Stores, Files, Uploads
+- **DB race condition fix:** `asyncio.Lock` + double-check in `get_db()` di `openai/state.py` — risolve `RuntimeError: OpenAIDatabase not initialised` su richieste concorrenti
+- **Audio API:** Aggiunto endpoint `/v1/audio/translations` (forced en); `/v1/audio/speech` migliorato
+- **Images API:** Stub `/v1/images/*` (generations, edits, variations) con errore 400 standard OpenAI
+- **Reranker modulare:** Estratto `rag_reranker.py` da `rag.py`: Qwen3-Reranker (transformers fp16 CPU) + fallback FlashRank ONNX
+- **Cache semantica:** Estratto `rag_cache.py` da `rag.py`: `semantic_cache_search/store/clear`, `save_web_knowledge`, `search_web_knowledge`
+- **Telegram formatting:** Estratto `telegram_format.py` da `tag_processor.py`: `telegram_safe_format()` con escape MarkdownV2/Markdown
+- **Dashboard template:** Estratto `dashboard_template.py` da `dashboard.py`: template HTML/CSS/JS con Chart.js, Sigma.js, stile cyberpunk
+- **Documentazione:** AGENTS.md e README.md aggiornati con nuovo pacchetto e fix
 
 ### v9.3.0 (2026-06-28) — OpenAI API completa + codebase cleanup
 - **OpenAI API:** Implementati 6 nuovi endpoint: `/v1/completions`, `/v1/embeddings`, `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/models/{model_name}`, `/v1/moderations`

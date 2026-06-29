@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-06-28 (OpenAI API completa + codebase cleanup)
+> **Data ultimo aggiornamento:** 2026-06-29 (Refactor OpenAI in pacchetto + DB race fix)
 
 ---
 
@@ -139,7 +139,9 @@ Master jarvis:8000
 │       └── master_worker_implementation.md  # Piano dettagliato deployment
 ├── jarvis/                      # Codice sorgente Jarvis
 │   ├── models/                  # File GGUF modelli LLM
-│   └── skills/                  # Skill dinamiche caricabili a runtime
+│   ├── skills/                  # Skill dinamiche caricabili a runtime
+│   ├── openai/                  # Sotto-pacchetto OpenAI API (modulare)
+│   └── openai_router.py         # (Legacy) Router OpenAI — rimpiazzabile da openai/
 └── data/                        # Stato persistente (gitignored)
     ├── qdrant/                  # Dati Qdrant
     ├── jarvis_mem0/             # Cache Mem0, sessioni Userbot Telegram
@@ -166,6 +168,32 @@ Master jarvis:8000
 | `dashboard.py` | Pannello web di controllo Jarvis. | `state` |
 | `skills_manager.py` | Carica skill dinamiche da `jarvis/skills/` a runtime. | — |
 | `reflection_agent.py` | Job notturno di consolidamento memoria. | `memory`, `llm_engine` |
+| `openai_router.py` | Router legacy endpoint OpenAI (`/v1/*`) in main.py. | `config`, `llm_engine`, `prompt_builder` |
+| `rag_reranker.py` | Reranker modulare: Qwen3-Reranker (transformers, cpu fp16) + fallback FlashRank ONNX. | `config` |
+| `rag_cache.py` | Cache semantica Qdrant + Web Knowledge persistence (salva/ricerca conoscenza web). | `state`, `config` |
+| `telegram_format.py` | Utility formattazione Telegram MarkdownV2 e Markdown legacy. | `re` |
+| `dashboard_template.py` | Template HTML/CSS/JS della dashboard web (Chart.js, Sigma.js, stile cyberpunk). | — |
+
+### Sotto-pacchetto `jarvis/openai/`
+
+| File | Responsabilità |
+|---|---|
+| `__init__.py` | Factory `init_openai_routes()` — import lazy di tutti i sub-moduli |
+| `state.py` | `OpenAIDatabase` singleton su SQLite per persistere Assistants/Threads/Runs. Doppio lock `asyncio.Lock` contro race condition |
+| `models.py` | Pydantic models: `ChatCompletionRequestOpenAI`, `CompletionRequestOpenAI`, `EmbeddingRequestOpenAI`, `SpeechRequestOpenAI`, `ModerationRequestOpenAI`. Endpoint `GET /v1/models` e `GET /v1/models/{name}` |
+| `chat.py` | `POST /v1/chat/completions` — streaming SSE + tool-calling + confirmation tokens |
+| `completions.py` | `POST /v1/completions` — text completions legacy (streaming + echo) |
+| `embeddings.py` | `POST /v1/embeddings` — float/base64 encoding |
+| `audio.py` | `POST /v1/audio/transcriptions` (faster-whisper), `POST /v1/audio/translations` (forced en), `POST /v1/audio/speech` (gTTS) |
+| `images.py` | `POST /v1/images/generations`, `/edits`, `/variations` — stub 400 (Jarvis non supporta image gen) |
+| `moderations.py` | `POST /v1/moderations` — LLM-based + fallback keyword |
+| `files.py` | `POST /v1/files` — upload file management per Assistants API |
+| `uploads.py` | `POST /v1/uploads` — upload large file in parti |
+| `assistants.py` | `POST/GET /v1/assistants` — CRUD Assistants |
+| `threads.py` | `POST/GET /v1/threads` — CRUD Threads |
+| `runs.py` | `POST /v1/threads/{id}/runs` — esecuzione Assistants Run |
+| `run_engine.py` | Motore di esecuzione Run: recupero messaggi thread, chiamata LLM, streaming |
+| `vector_stores.py` | `POST/GET /v1/vector_stores` — CRUD Vector Store |
 
 ---
 
@@ -316,7 +344,14 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 ### Cronologia Modifiche Recenti
 
 | Data | Modifica | Impatto |
-|---|---|---|---|
+|---|---|---|
+| 29/06 | **Refactor OpenAI in sottopacchetto** | `openai/` modulare con 17 moduli: lazy import, Assistants/Threads/Runs API, state persistente su SQLite |
+| 29/06 | **DB race condition fix (OpenAI)** | `asyncio.Lock` + double-check in `get_db()` di `openai/state.py` — risolve `RuntimeError: OpenAIDatabase not initialised` su richieste concorrenti |
+| 29/06 | **Reranker modulare (rag_reranker.py)** | Estratto da `rag.py`: Qwen3-Reranker transformers + FlashRank fallback in file separato |
+| 29/06 | **Cache semantica + Web Knowledge (rag_cache.py)** | Estratto da `rag.py`: `semantic_cache_search/store/clear`, `save_web_knowledge`, `search_web_knowledge` |
+| 29/06 | **Telegram formatting (telegram_format.py)** | Estratto da `tag_processor.py`: `telegram_safe_format()` con escape MarkdownV2/Markdown |
+| 29/06 | **Dashboard template esterno (dashboard_template.py)** | HTML/CSS/JS estratto da `dashboard.py`: Chart.js, Sigma.js graph, stile cyberpunk |
+| 29/06 | **Endpoint audio/translations + images stub** | `POST /v1/audio/translations` (forced en), `/v1/images/*` stub 400 |
 | 24/06 | **Dashboard log viewer + restart container/ingestion** | Docker logs con combo box, auto-refresh, restart container/ingestion |
 | 24/06 | **tiktoken caching offline** | `o200k_base` pre-scaricato in build, lazy init con fallback chain, niente crash su DNS assente |
 | 24/06 | **Docker API via Unix socket** | Sostituito httpx http+unix:// con http.client + AF_UNIX per compatibilità |
@@ -410,6 +445,12 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/telegram_bot.py` | ✅ Corretto | user_id normalizzato a string, session TTL resetta progetto |
 | `jarvis/model_profiles.py` | ✅ Nuovo | Auto-rilevamento famiglia modello da nome GGUF (Qwen, Gemma, DeepSeek, Llama, Mistral, Phi, Command-R) |
 | `jarvis/dashboard.py` | ✅ Riscritto | GPU monitor real-time con time-series charts (Chart.js), inference counters, modelli, Qdrant collections |
+| `jarvis/openai/` (pacchetto) | ✅ Nuovo | 17 moduli: chat/completions/embeddings/audio/images + Assistants/Threads/Runs API. Lazy import, init ritardato nell'lifespan |
+| `jarvis/openai/state.py` | ✅ Fixato | `asyncio.Lock` + double-check locking in `get_db()` — risolve race condition su richieste concorrenti al DB Assistants |
+| `jarvis/rag_reranker.py` | ✅ Nuovo | Reranker modulare: Qwen3-Reranker (transformers fp16 CPU) + fallback FlashRank ONNX |
+| `jarvis/rag_cache.py` | ✅ Nuovo | Cache semantica Qdrant + Web Knowledge persistence |
+| `jarvis/telegram_format.py` | ✅ Nuovo | Utility formattazione Telegram MarkdownV2/Markdown |
+| `jarvis/dashboard_template.py` | ✅ Nuovo | Template HTML/CSS/JS dashboard estratto da `dashboard.py` |
 | `jarvis/Dockerfile` | ✅ CUDA 13.0 | overlay cuda-compiler-13-0 + cudart-dev + cublas-dev su base 12.2; llama-cpp-python buildato con GGML_CUDA=on |
 | `docker-compose.vps.yml` | ✅ Pronto | Stack Master senza GPU (no sezione deploy) |
 | `docker-compose.worker.yml` | ✅ Pronto | QDRANT_HOST da .env, volumi mem0+documents montati |
@@ -417,7 +458,7 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `start_worker.sh` | ✅ Pronto | Modalità Worker GPU |
 | `.env` (Worker locale) | ✅ Ottimizzato | N_GPU_LAYERS=15, LLM_NUM_CTX=12288, flash_attn=true |
 | `sync_to_master.sh` | ✅ Creato | Script rsync con verifica SSH |
-| **Istanza Locale** | ✅ **ONLINE** | Gemma 4 E2B QAT GPU inference (15 layer, 1036MiB/25% VRAM chart, 1432MiB/35% totale), CUDA 13.0 overlay, dashboard con GPU charts |
+| **Istanza Locale** | ✅ **ONLINE** | Gemma 4 E2B QAT GPU inference (15 layer, 1036MiB/25% VRAM), GPU Worker stabile, tutti gli endpoint OpenAI funzionanti |
 
 ### ⏳ Da Completare (Operazioni Manuali sulla VPS)
 
@@ -496,14 +537,37 @@ L'API supporta **sia il formato Ollama** che il **formato OpenAI** (`/v1/*`):
 - `GET /api/tags`, `GET /api/ps`, `GET /api/show`, `GET /api/version` — Stub Ollama
 
 **Formato OpenAI (`/v1/*`):**
-- `POST /v1/chat/completions` — Chat completion (streaming SSE)
-- `POST /v1/completions` — Text completion (streaming SSE)
+
+Endpoint core:
+- `POST /v1/chat/completions` — Chat completion (streaming SSE, tool-calling, confirmation tokens)
+- `POST /v1/completions` — Text completion legacy (streaming SSE, echo)
 - `POST /v1/embeddings` — Embeddings (float/base64 encoding)
-- `GET /v1/models` — Lista modelli
+- `GET /v1/models` — Lista modelli (chat + embed + external providers)
 - `GET /v1/models/{model_name}` — Dettaglio modello
-- `POST /v1/moderations` — Moderazione contenuti
+- `POST /v1/moderations` — Moderazione contenuti (LLM-based + fallback keyword)
+
+Audio:
 - `POST /v1/audio/transcriptions` — Trascrizione audio (faster-whisper)
+- `POST /v1/audio/translations` — Traduzione audio → inglese (faster-whisper force en)
 - `POST /v1/audio/speech` — Text-to-speech (gTTS)
+
+Immagini (stub — Jarvis non supporta image generation):
+- `POST /v1/images/generations` — 400 model_not_available
+- `POST /v1/images/edits` — 400 model_not_available
+- `POST /v1/images/variations` — 400 model_not_available
+
+Assistants API (beta):
+- `POST /v1/assistants` — Crea Assistente
+- `GET /v1/assistants` — Lista Assistenti
+- `GET /v1/assistants/{id}` — Dettaglio Assistente
+- `POST /v1/threads` — Crea Thread
+- `GET /v1/threads/{id}` — Dettaglio Thread
+- `POST /v1/threads/{id}/runs` — Esegui Run su Thread
+- `POST /v1/threads/{id}/runs/{run_id}/submit_tool_outputs` — Tool output per Run in attesa
+- `POST /v1/vector_stores` — Crea Vector Store
+- `GET /v1/vector_stores` — Lista Vector Store
+- `POST /v1/files` — Upload file
+- `POST /v1/uploads` — Upload large file in parti
 
 ### Tool Calling
 
@@ -707,6 +771,31 @@ CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" pip install llama-cpp-
 - `jarvis/config.py` (righe 285-304): `WATCHDOG_TIMEOUT`, `WATCHDOG_WATCH_MODE` letti da `.env` con default
 - `jarvis/main.py` (lifespan + watchdog_health): parametri passati a `PollingObserver()` e path watch basati su `WATCHDOG_WATCH_MODE`
 - `.env`: sezione `WATCHDOG FILESYSTEM` con valori ottimizzati
+
+---
+
+### 🐛 Bug 10 (2026-06-29): OpenAI DB Race Condition — `RuntimeError: OpenAIDatabase not initialised`
+
+**Problema:** Sotto carico concorrente (due richieste simultanee agli endpoint Assistants API), `get_db()` in `jarvis/openai/state.py` lanciava `RuntimeError: OpenAIDatabase not initialised` perché entrambe le coroutine vedevano `_db_instance is None` e avviavano inizializzazione concorrente, ma una delle due vinceva la race e lasciava l'altra in errore.
+
+**Diagnosi:** Il singleton `OpenAIDatabase` era protetto da un semplice `if _db_instance is None` senza lock, causando race condition in contesto asincrono (FastAPI + Granian multi-worker).
+
+**Soluzione (double-checked locking con `asyncio.Lock`):**
+```python
+_init_lock = asyncio.Lock()
+
+async def get_db() -> OpenAIDatabase:
+    global _db_instance
+    if _db_instance is None:
+        async with _init_lock:
+            if _db_instance is None:  # double-check
+                instance = OpenAIDatabase(...)
+                await instance.initialize()
+                _db_instance = instance
+    return _db_instance
+```
+
+**Impatto:** Risolve il crash su endpoint Assistants/Threads/Runs in presenza di richieste concorrenti. Pattern double-checked locking standard per singleton asincroni.
 
 ---
 

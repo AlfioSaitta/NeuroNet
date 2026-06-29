@@ -4,7 +4,10 @@ import re
 import json
 import subprocess
 import logging
+import httpx
 from concurrent.futures import ThreadPoolExecutor
+
+from config import LLM_THINKING_MODE, MODEL_PROFILE, EXTERNAL_GPU_URL, OLLAMA_MODEL, LLM_MAX_TOKENS
 
 try:
     from llama_cpp import Llama
@@ -113,23 +116,24 @@ class LlamaEngine:
             logger.error("Impossibile caricare i modelli: llama-cpp-python mancante.")
             return
 
-        chat_model_path = os.environ.get("LLAMA_MODEL_PATH", "./models/qwen2.5-coder-3b.gguf")
-        embed_model_path = os.environ.get("LLAMA_EMBED_MODEL_PATH", "./models/Qwen3-Embedding-0.6B-Q8_0.gguf")
+        from config import LLAMA_MODEL_PATH as _cfg_model_path, LLAMA_EMBED_MODEL_PATH as _cfg_embed_path
+        chat_model_path = _cfg_model_path
+        embed_model_path = _cfg_embed_path
 
         # 1. Caricamento del Modello Chat Principale (Spinge al limite la GPU)
         if os.path.exists(chat_model_path):
-            n_gpu_layers = int(os.environ.get("N_GPU_LAYERS", 20))
-            n_ctx = int(os.environ.get("LLM_NUM_CTX") or os.environ.get("LLM_CTX_SIZE") or "32768")
-            n_batch = int(os.environ.get("LLM_BATCH_SIZE", "128"))
-            n_ubatch = int(os.environ.get("LLM_UBATCH_SIZE", "128"))
-            flash_attn = os.environ.get("LLM_FLASH_ATTN", "false").lower() == "true"
+            from config import N_GPU_LAYERS as _cfg_gpu, LLM_NUM_CTX as _cfg_ctx, LLM_BATCH_SIZE as _cfg_batch
+            from config import LLM_UBATCH_SIZE as _cfg_ubatch, LLM_FLASH_ATTN as _cfg_flash
+            n_gpu_layers = _cfg_gpu
+            n_ctx = _cfg_ctx
+            n_batch = _cfg_batch
+            n_ubatch = _cfg_ubatch
+            flash_attn = _cfg_flash
             logger.info(f"Caricamento Chat Model: {chat_model_path}")
             logger.info(f"⚙️ n_gpu_layers={n_gpu_layers} n_ctx={n_ctx} n_batch={n_batch} n_ubatch={n_ubatch} flash_attn={flash_attn}")
             # chat_format: auto dal profilo modello, sovrascrivibile via LLM_CHAT_FORMAT
-            from config import MODEL_PROFILE as _init_profile
-            _chat_format = os.environ.get("LLM_CHAT_FORMAT")
-            if not _chat_format:
-                _chat_format = _init_profile.chat_format
+            from config import MODEL_PROFILE as _init_profile, LLM_CHAT_FORMAT as _cfg_chat_format
+            _chat_format = _cfg_chat_format if _cfg_chat_format else _init_profile.chat_format
             logger.info(f"⚙️ chat_format={_chat_format} (family={_init_profile.family})")
 
             self.chat_model = Llama(
@@ -162,7 +166,7 @@ class LlamaEngine:
                     import config as _cfg
                     _cfg.MODEL_PROFILE = _new_profile
                     # Aggiorna LLM_THINKING_MODE se non sovrascritto da env var
-                    if not os.environ.get("LLM_THINKING_MODE"):
+                    if not _cfg.LLM_THINKING_MODE_RAW:
                         _cfg.LLM_THINKING_MODE = _new_profile.thinking_support
                     logger.info(f"🧠 Modello rilevato: {_new_profile.model_name} "
                                 f"({_new_profile.family}/{_new_profile.variant}) "
@@ -209,7 +213,6 @@ class LlamaEngine:
 
         # --- Thinking Mode (Gemma/DeepSeek/QwQ) ---
         # Verifica dal model profile se il modello caricato supporta <|think|>
-        from config import LLM_THINKING_MODE, MODEL_PROFILE
         _thinking_tag = "<|think|>"
         # Se il chat_format è gemma, usa [Thinking] invece di <|think|>
         if MODEL_PROFILE.chat_format == "gemma":
@@ -252,9 +255,6 @@ class LlamaEngine:
                     })
 
         # --- DELEGAZIONE EXTERNAL GPU (High-Availability Fallback) ---
-        from config import EXTERNAL_GPU_URL, OLLAMA_MODEL
-        import httpx
-        import json
         if EXTERNAL_GPU_URL:
             try:
                 payload = {
@@ -309,7 +309,7 @@ class LlamaEngine:
         # Il default 2048 garantisce che i tag di coda (MEMORY, CONFIDENCE, ecc.)
         # non vengano troncati prima della chiusura.
         # Sovrascrivibile via LLM_MAX_TOKENS env var nel .env
-        _max_tokens_cap = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
+        _max_tokens_cap = LLM_MAX_TOKENS
         max_tokens = min(max_tokens, _max_tokens_cap)
 
         if stream:

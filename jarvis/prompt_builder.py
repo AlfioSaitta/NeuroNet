@@ -2,15 +2,22 @@
 Prompt Builder — Gatekeeper LLM per classificazione intento + costruzione del super-prompt omnisciente.
 """
 
+import datetime
 import json
+import os
 import re
 import asyncio
+from functools import partial
 
-from config import logger, BOT_NAME, LLM_OPTIONS
-from rag import search_documents, generate_project_tree, list_rag_projects, detect_project_in_conversation
+from config import logger, BOT_NAME, LLM_OPTIONS, MODEL_PROFILE, DOC_DIR
+from rag import search_documents, generate_project_tree, list_rag_projects, detect_project_in_conversation, GitignoreFilter
+from rag_cache import search_web_knowledge, save_web_knowledge
 from memory import extract_memories, save_to_memory
 from web_search import perform_web_search_and_crawl
 from tag_processor import build_tag_instructions
+from task_manager import get_open_tasks
+from llm_engine import engine, extract_content
+from llama_cpp import LlamaGrammar
 import state
 
 
@@ -62,8 +69,6 @@ Richiesta utente: "{truncated_msg}"
 Rispondi SOLO con un JSON valido in questo formato esatto, senza altre parole:
 {{"is_project": true}} oppure {{"is_project": false}}
 """
-    from llm_engine import engine, extract_content
-    from llama_cpp import LlamaGrammar
     try:
         messages = [{"role": "user", "content": gatekeeper_prompt}]
         grammar_str = r'''root ::= "{\"is_project\": " boolean "}"
@@ -117,7 +122,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
 
     # ── MODALITÀ CONCISE: skip RAG, memoria, web, progetto ──
     if concise:
-        import datetime
         _, clean_msg = await perform_web_search_and_crawl(latest_msg)
         # Salva comunque in memoria il messaggio utente
         if state.memory:
@@ -125,9 +129,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 async def _bg_add_concise():
                     await save_to_memory(clean_msg, user_id=current_user_id)
                 task = asyncio.create_task(_bg_add_concise())
-                import state as gstate
-                gstate.background_tasks.add(task)
-                task.add_done_callback(gstate.background_tasks.discard)
+                state.background_tasks.add(task)
+                task.add_done_callback(state.background_tasks.discard)
             except Exception:
                 pass
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -222,9 +225,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 await save_to_memory(clean_msg, user_id=current_user_id, project=active_project)
 
             task = asyncio.create_task(_bg_add())
-            import state as gstate
-            gstate.background_tasks.add(task)
-            task.add_done_callback(gstate.background_tasks.discard)
+            state.background_tasks.add(task)
+            task.add_done_callback(state.background_tasks.discard)
         except Exception as e:
             logger.warning(f"Errore memory add in prompt builder: {e}")
 
@@ -233,7 +235,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if active_project:
             try:
                 loop = asyncio.get_running_loop()
-                from functools import partial
                 mem_filters = {"user_id": current_user_id, "project": active_project}
                 _mem_limit = _user_override_mem_count if _user_override_mem_count > 0 else 5
                 search_func = partial(state.memory.search, query=clean_msg, filters=mem_filters, limit=_mem_limit)
@@ -250,9 +251,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             # Trova nomi di file nel prompt (es. auth.py, src/main.go)
             matches = set(re.findall(r'\b([\w\.\-/]+\.(?:py|js|ts|jsx|tsx|go|c|cpp|h|hpp|rs|sql|yaml|yml|md|json))\b', latest_msg))
             if matches:
-                from rag import GitignoreFilter
-                from config import DOC_DIR
-                import os
                 filt = GitignoreFilter(DOC_DIR)
                 for match in matches:
                     filename_only = match.split('/')[-1]
@@ -279,7 +277,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     # (evita chiamate web inutili e lente per "ciao" o "grazie").
     _is_short_greeting = len(clean_msg.strip()) < 20 and not is_project_query
     if not _is_short_greeting and not rag_ctx.strip() and not web_ctx:
-        from rag import search_web_knowledge, save_web_knowledge
         search_query = clean_msg
         if is_project_query and active_project and active_project not in search_query:
             search_query = f"{active_project} {search_query}"
@@ -302,12 +299,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                     summary = f"[Web Knowledge] Query: {clean_msg[:200]}\nFonti: {', '.join(sources[:3])}\nRisultati: {web_search_ctx[:600]}"
                     await save_to_memory(summary, user_id=current_user_id, project=active_project)
                 task = asyncio.create_task(_bg_save_web())
-                import state as gstate
-                gstate.background_tasks.add(task)
-                task.add_done_callback(gstate.background_tasks.discard)
+                state.background_tasks.add(task)
+                task.add_done_callback(state.background_tasks.discard)
 
     # Distribuzione dinamica del budget di contesto basata sul modello caricato
-    from config import MODEL_PROFILE
     num_ctx = int(LLM_OPTIONS.get("num_ctx", MODEL_PROFILE.default_ctx))
     if num_ctx > MODEL_PROFILE.max_ctx:
         num_ctx = MODEL_PROFILE.max_ctx
@@ -353,7 +348,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
 
     mem_final = mem_ctx.strip()[:min(800, remaining)] if mem_ctx and mem_ctx.strip() else ""
     
-    from task_manager import get_open_tasks
     open_tasks = get_open_tasks(user_id)
     tasks_final = ""
     if open_tasks:
@@ -377,7 +371,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     if active_project:
         blocks.append(f"<active_project>\n{active_project}\n</active_project>")
 
-    import datetime
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ── Helper per costruire il system directive (deduplicato) ──

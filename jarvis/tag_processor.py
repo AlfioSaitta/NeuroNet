@@ -356,7 +356,7 @@ async def _handle_think_deep(tag: TagDef, content: str, ctx: TagContext) -> Opti
 
 async def _handle_cache_clear(tag: TagDef, content: str, ctx: TagContext) -> Optional[str]:
     """<CACHE_CLEAR/> — Resetta la cache semantica."""
-    from rag import semantic_cache_clear
+    from rag_cache import semantic_cache_clear
     try:
         await semantic_cache_clear()
         return "🗑️ **Cache semantica resettata**."
@@ -406,8 +406,7 @@ async def _handle_rag(tag: TagDef, content: str, ctx: TagContext) -> Optional[st
 
 async def _handle_summary(tag: TagDef, content: str, ctx: TagContext) -> Optional[str]:
     """<SUMMARY target="user_id">testo</SUMMARY> — Salva riepilogo cross-user."""
-    import re as _re
-    m = _re.match(r'^\s*target\s*=\s*"([^"]+)"\s*>\s*(.*)$', content, _re.DOTALL)
+    m = re.match(r'^\s*target\s*=\s*"([^"]+)"\s*>\s*(.*)$', content, re.DOTALL)
     if not m:
         return None
     target_user = m.group(1).strip()
@@ -845,186 +844,6 @@ def telegram_prepare_markdown(text: str) -> str:
 
     return text.strip()
 
-
-def telegram_safe_format(text: str, use_markdown_v2: bool = False) -> str:
-    """
-    Converte testo preparato in formato compatibile con Telegram.
-    DA USARE su ogni chunk PRIMA di inviare.
-
-    use_markdown_v2=True  → escape per parse_mode='MarkdownV2'
-    use_markdown_v2=False → escape minimale per parse_mode='Markdown'
-    """
-    if not text:
-        return text
-
-    # Proteggi blocchi di codice dall'escaping
-    code_blocks: dict[str, str] = {}
-    def _protect_code(m: re.Match) -> str:
-        placeholder = f"__CB_{len(code_blocks)}__"
-        code_blocks[placeholder] = m.group(0)
-        return placeholder
-    text = re.sub(r'```[\s\S]*?```', _protect_code, text)
-    text = re.sub(r'(?<!`)`(?!`)([^`\n]+?)`(?!`)', _protect_code, text)
-
-    if use_markdown_v2:
-        text = _escape_telegram_v2(text)
-    else:
-        text = _escape_telegram_legacy(text)
-
-    for placeholder, original in code_blocks.items():
-        text = text.replace(placeholder, original)
-
-    return text.strip()
-
-
-def _escape_telegram_v2(text: str) -> str:
-    """
-    Escape caratteri speciali per Telegram MarkdownV2.
-    Vanno escapati: _ * [ ] ( ) ~ ` > # + - = | { } . !
-    
-    MA non dentro costrutti markdown validi (già protetti).
-    """
-    # Caratteri speciali MarkdownV2 che vanno escapati con \
-    special_chars = r'_*[]()~`>#+-=|{}.!'
-    
-    # Regex: matcha ogni carattere speciale che NON è già dentro un costrutto markdown
-    # Protegge: *bold* _italic_ `code` [text](url) ~strike~ ||spoiler||
-    def _needs_escape(m: re.Match) -> str:
-        ch = m.group(0)
-        pos = m.start()
-        before = text[max(0, pos - 50):pos]
-        after = text[pos:pos + 50]
-        
-        # Non escape se dentro un costrutto markdown probabilmente valido
-        escaped = '\\' + ch
-        return escaped
-    
-    result = []
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if ch in special_chars:
-            # Controlla se il carattere è parte di un costrutto markdown valido
-            if _is_inside_markdown_construct(text, i):
-                result.append(ch)
-            else:
-                result.append('\\' + ch)
-        else:
-            result.append(ch)
-        i += 1
-    
-    return ''.join(result)
-
-
-def _escape_telegram_legacy(text: str) -> str:
-    """
-    Escape minimale per Telegram Markdown legacy.
-    Previene "Can't parse entities: can't find end of the entity starting at byte offset N".
-
-    I code blocks sono già protetti (sostituiti con placeholder) prima della chiamata.
-    Gestisce caratteri che causano entità non chiuse:
-      - `_` solitario o mal posizionato (italic non chiuso)
-      - `*` non bilanciato (bold non chiuso)
-      - `` ` `` non bilanciato (code non chiuso)
-    """
-    # Proteggi _ che non fanno parte di _italic_ valido
-    # Pattern: _ non bilanciato o _ in mezzo a parola
-    text = re.sub(r'(?<!\w)_(?!\w)', r'\\_', text)  # _ solitario tra non-word
-    text = re.sub(r'(?<=\s)_(?=\s)', r'\\_', text)   # _ isolato tra spazi
-    text = re.sub(r'_(?=\d)', r'\\_', text)            # _ prima di numero (evita italic)
-
-    # Proteggi * non bilanciato (Telegram Markdown legacy: *text* = bold)
-    star_indices = [i for i, c in enumerate(text) if c == '*']
-    if len(star_indices) % 2 == 1:
-        # Numero dispari → escape dell'ultimo * (il più probabile non chiuso)
-        pos = star_indices[-1]
-        text = text[:pos] + '\\*' + text[pos+1:]
-
-    # Proteggi ` non bilanciato (code inline non chiuso)
-    bt_indices = [i for i, c in enumerate(text) if c == '`']
-    if len(bt_indices) % 2 == 1:
-        # Numero dispari → escape dell'ultimo backtick
-        pos = bt_indices[-1]
-        text = text[:pos] + '\\`' + text[pos+1:]
-
-    return text
-
-
-def _is_inside_markdown_construct(text: str, pos: int) -> bool:
-    """
-    Determina se il carattere alla posizione `pos` è dentro un costrutto markdown valido.
-    Controlla:
-      - *...* (bold/italic)
-      - _..._ (italic)
-      - `...` (code)
-      - ~~...~~ (strikethrough)
-      - ||...|| (spoiler)
-      - [text](url)
-    """
-    if pos <= 0 or pos >= len(text) - 1:
-        return False
-    
-    ch = text[pos]
-    
-    # Per * e _, controlla se sono parte di una coppia bilanciata
-    if ch in ('*', '_'):
-        # Controlla se è un delimitatore di una coppia markdown
-        # Pattern: *testo* o _testo_ - cerca la chiusura corrispondente
-        before = text[:pos]
-        after = text[pos + 1:]
-        
-        # Controlla se siamo in mezzo a *...* o _..._
-        open_count = before.count(ch)
-        close_count = after.count(ch)
-        
-        # Se c'è un numero dispari di delimitatori prima e dopo,
-        # probabilmente siamo dentro un costrutto markdown
-        if open_count > 0 and close_count > 0:
-            # Verifica che i delimitatori non siano troppi (es. ****)
-            if open_count % 2 == 1 and close_count % 2 == 1:
-                return True
-    
-    # Per `, controlla se fa parte di code inline
-    if ch == '`':
-        before = text[:pos]
-        after = text[pos + 1:]
-        if '`' in before and '`' in after:
-            return True
-    
-    # Per ~, controlla se fa parte di ~~strikethrough~~
-    if ch == '~':
-        before = text[:pos]
-        after = text[pos + 1:]
-        # ~~...~~
-        if pos + 1 < len(text) and text[pos + 1] == '~':
-            return True
-        if pos > 0 and text[pos - 1] == '~':
-            return True
-    
-    # Per |, controlla se fa parte di ||spoiler||
-    if ch == '|':
-        if pos + 1 < len(text) and text[pos + 1] == '|':
-            return True
-        if pos > 0 and text[pos - 1] == '|':
-            return True
-    
-    # Per [ ] ( ), controlla se fanno parte di [text](url)
-    if ch in ('[', ']'):
-        # Semplice: se c'è una parentesi quadra bilanciata
-        if ch == '[' and ']' in text[pos:]:
-            return True
-        if ch == ']' and '[' in text[:pos]:
-            return True
-    
-    if ch == '(':
-        if ')' in text[pos:]:
-            return True
-    
-    if ch == ')':
-        if '(' in text[:pos]:
-            return True
-    
-    return False
 
 
 def build_tag_instructions() -> str:

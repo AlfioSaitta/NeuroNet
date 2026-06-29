@@ -184,8 +184,9 @@ if TELEGRAM_ENABLED:
             
             chat_status = "✅ Caricato" if engine.chat_model else "❌ Non caricato"
             embed_status = "✅ Caricato" if engine.embed_model else "❌ Non caricato"
-            chat_name = os.path.basename(os.environ.get("LLAMA_MODEL_PATH", "?"))
-            embed_name = os.path.basename(os.environ.get("LLAMA_EMBED_MODEL_PATH", "?"))
+            from config import LLAMA_MODEL_PATH as _cfg_model, LLAMA_EMBED_MODEL_PATH as _cfg_embed
+            chat_name = os.path.basename(_cfg_model) if _cfg_model else "?"
+            embed_name = os.path.basename(_cfg_embed) if _cfg_embed else "?"
             models_str_parts.append(f"• Chat: `{chat_name}` — {chat_status}")
             models_str_parts.append(f"• Embed: `{embed_name}` — {embed_status}")
             models_str = "\n".join(models_str_parts)
@@ -1003,8 +1004,7 @@ if TELEGRAM_ENABLED:
                         tool_calls = parse_qwen_tool_calls(content)
                     if tool_calls:
                         # Rimuovi i tag tool_call dal contenuto
-                        import re as _re
-                        clean_content = _re.sub(
+                        clean_content = re.sub(
                             r'<\|tool_call\|>.*?<\|tool_call\|>',
                             '', content, flags=_re.DOTALL
                         ).strip()
@@ -1034,7 +1034,8 @@ if TELEGRAM_ENABLED:
                     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🔧 {tool_res}", disable_notification=True)
 
             # — Delegato a tag_processor.py: parsing centralizzato di TUTTI i tag —
-            from tag_processor import process_all_tags, TagContext, telegram_safe_format, telegram_prepare_markdown
+            from tag_processor import process_all_tags, TagContext, telegram_prepare_markdown
+            from telegram_format import telegram_safe_format
             from config import MODEL_PROFILE as _mdl
             
             tag_ctx = TagContext(

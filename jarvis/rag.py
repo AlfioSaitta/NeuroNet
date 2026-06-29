@@ -20,17 +20,22 @@ from pathlib import Path
 from datetime import datetime
 import tiktoken
 
+import sqlite3
+from collections import defaultdict
+
+from llm_engine import engine
+
 from config import (
     logger, QDRANT_HOST, DOC_COLLECTION, DOC_DIR,
     STATE_FILE, CHUNK_SIZE, CHUNK_OVERLAP, MAX_CONCURRENT_EMBEDDINGS,
     RAG_CONFIG, AST_ENABLED, GO, PY, JS, TSX,
-    VECTOR_DB_VERSION, FLASHRANK_MODEL, Qwen3_RERANKER_MODEL,
-    QENABLED_QWEN3_RERANKER, RERANKER_DEVICE,
-    WATCHDOG_BATCH_DELAY, SEMANTIC_CACHE_THRESHOLD,
+    VECTOR_DB_VERSION,
+    WATCHDOG_BATCH_DELAY,
     C, CPP, JAVA, RUST, SQL, YAML,
     PATHSPEC_ENABLED, WATCHDOG_ENABLED, EMBEDDING_DIMS,
     EXTERNAL_PROJECTS, WORKSPACE_DIR, WORKSPACE_PROJECTS,
-    DATA_DIR, HOST_FS_PREFIX
+    DATA_DIR, HOST_FS_PREFIX,
+    MODEL_PROFILE,
 )
 import state
 
@@ -43,68 +48,9 @@ VALID_EXTENSIONS = (
 )
 
 # ==============================================================================
-# RERANKER: Qwen3-Reranker su CPU (priority), FlashRank fallback
+# RERANKER: estratto in rag_reranker.py
 # ==============================================================================
-# Entrambi girano su CPU: Qwen3 usa transformers, FlashRank usa ONNX.
-# Qwen3 offre multilingua (100+ lingue, incluso italiano) e punteggio MTEB-Code 73.42.
-_reranker = None
-
-os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
-
-# ==============================================================================
-# RERANKER STRATEGY:
-#   1. FlashRank ONNX (leggero e veloce, sempre disponibile)
-#   2. Se QENABLED_QWEN3_RERANKER=true E la directory esiste, prova Qwen3 (migliore qualità)
-# ==============================================================================
-_use_qwen3_reranker = QENABLED_QWEN3_RERANKER and os.path.isdir(Qwen3_RERANKER_MODEL)
-
-if _use_qwen3_reranker:
-    try:
-        import torch
-        from transformers import AutoTokenizer, AutoModelForCausalLM
-
-        _device = torch.device(RERANKER_DEVICE)
-        _tok = AutoTokenizer.from_pretrained(Qwen3_RERANKER_MODEL, padding_side='left', trust_remote_code=True)
-        _model = AutoModelForCausalLM.from_pretrained(
-            Qwen3_RERANKER_MODEL,
-            dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            trust_remote_code=True
-        ).to(_device).eval()
-
-        _yes_id = _tok.convert_tokens_to_ids("yes")
-        _no_id = _tok.convert_tokens_to_ids("no")
-        logger.info(f"🔀 Reranker: Qwen3-Reranker su {RERANKER_DEVICE} ({Qwen3_RERANKER_MODEL})")
-
-        def _reranker(query, passages):
-            texts = [f"Query: {query}\nDocument: {p.get('text', '')}\nRelevance:" for p in passages]
-            inputs = _tok(texts, padding=True, truncation=True, max_length=8192, return_tensors="pt").to(_device)
-            with torch.no_grad():
-                logits = _model(**inputs).logits[:, -1, :]
-            scores = torch.softmax(torch.stack([logits[:, _no_id], logits[:, _yes_id]], dim=-1), dim=-1)[:, 1]
-            for p, s in zip(passages, scores.tolist()):
-                p["score"] = round(s, 4)
-            return sorted(passages, key=lambda x: x["score"], reverse=True)
-
-        _reranker = _reranker
-
-    except Exception as e:
-        logger.warning(f"Qwen3-Reranker errore ({e}), fallback su FlashRank...")
-        _use_qwen3_reranker = False
-
-if not _use_qwen3_reranker:
-    try:
-        from flashrank import Ranker, RerankRequest
-        _flash = Ranker(model_name=FLASHRANK_MODEL, cache_dir=os.path.join(DATA_DIR, "flashrank_cache"))
-
-        def _reranker(query, passages):
-            req = RerankRequest(query=query, passages=passages)
-            return _flash.rerank(req)
-
-        _reranker = _reranker
-        logger.info(f"🔀 Reranker: FlashRank ({FLASHRANK_MODEL})")
-    except Exception as e2:
-        logger.warning(f"FlashRank non caricabile ({e2}). Reranker disattivato.")
+from rag_reranker import _reranker
 
 if AST_ENABLED:
     from tree_sitter import Parser
@@ -208,7 +154,6 @@ async def get_embedding(texts, priority=10, is_query=False):
         if is_query:
             texts = [QWEN3_QUERY_INSTRUCTION + t for t in texts]
             
-        from llm_engine import engine
         result = await engine.get_embeddings(texts, priority=priority)
         if "error" in result:
             return [[] for _ in texts] if not is_single else []
@@ -600,7 +545,6 @@ def ast_code_chunking(content, filepath):
 # ==============================================================================
 
 def _get_db():
-    import sqlite3
     db_path = STATE_FILE.replace('.json', '.db')
     conn = sqlite3.connect(db_path, timeout=10)
     conn.execute('CREATE TABLE IF NOT EXISTS file_state (filepath TEXT PRIMARY KEY, hash TEXT, mtime REAL, size INTEGER)')
@@ -783,7 +727,7 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
                     batch_vectors = await get_embedding(batch)
                     vectors.extend(batch_vectors)
                     # Yield volontario per permettere all'event loop di servire il PriorityLock
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0)
                 
                 # Estrae il nome progetto dal path relativo (prima directory)
                 _project_id = rel_path.replace('\\', '/').split('/')[0] if '/' in rel_path.replace('\\', '/') else "default"
@@ -803,7 +747,6 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
                         ))
 
             if points:
-                from config import MODEL_PROFILE
                 for p in points:
                     p.payload["model_family"] = MODEL_PROFILE.family
                     p.payload["model_variant"] = MODEL_PROFILE.variant
@@ -1055,7 +998,6 @@ async def ingest_local_documents():
         logger.info("✅ Sincronizzazione Graph RAG completata.")
 
     # Genera root node per ogni progetto (sostituisce .ai-skeleton.md)
-    from collections import defaultdict
     files_by_project: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for rp, fp in current_files.items():
         proj = rp.replace('\\', '/').split('/')[0] if '/' in rp.replace('\\', '/') else "default"
@@ -1820,162 +1762,12 @@ async def rag_queue_worker():
             logger.error(f"Watchdog worker crashato, riavvio: {e}", exc_info=True)
             await asyncio.sleep(5)
 
-# ==============================================================================
-# CACHE SEMANTICA (8.2)
-# ==============================================================================
-
-async def semantic_cache_search(prompt: str, threshold: float = SEMANTIC_CACHE_THRESHOLD):
-    try:
-        vector = await get_embedding(prompt, priority=0, is_query=True)
-        if not vector: return None
-        res = await state.qdrant.query_points(
-            collection_name=f"semantic_cache_{VECTOR_DB_VERSION}",
-            query=vector,
-            limit=1,
-            score_threshold=threshold,
-            with_payload=True
-        )
-        if res and res.points:
-            return res.points[0].payload.get("response")
-    except Exception as e: logger.warning(f"Errore silenziato: {e}")
-    return None
-
-async def semantic_cache_store(prompt: str, response: str):
-    try:
-        vector = await get_embedding(prompt, is_query=True)
-        if vector:
-            await state.qdrant.upsert(
-                collection_name=f"semantic_cache_{VECTOR_DB_VERSION}",
-                points=[PointStruct(
-                    id=str(uuid.uuid4()),
-                    vector=vector,
-                    payload={"prompt": prompt, "response": response}
-                )]
-            )
-    except Exception as e: logger.warning(f"Errore silenziato: {e}")
-
-async def semantic_cache_clear():
-    """Cancella tutta la cache semantica ricreando la collezione."""
-    try:
-        col_name = f"semantic_cache_{VECTOR_DB_VERSION}"
-        try:
-            await state.qdrant.delete_collection(col_name)
-        except Exception:
-            pass  # Non esiste ancora
-        from config import EMBEDDING_DIMS
-        await state.qdrant.create_collection(
-            collection_name=col_name,
-            vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
-        )
-        logger.info(f"🗑️ Cache semantica resettata: {col_name}")
-        return True
-    except Exception as e:
-        logger.warning(f"Errore semantic_cache_clear: {e}")
-        return False
-
-
-# ==============================================================================
-# WEB KNOWLEDGE PERSISTENCE (Qdrant + Mem0)
-# ==============================================================================
-
-async def ensure_web_knowledge_collection():
-    """Crea la collezione web_knowledge in Qdrant se non esiste."""
-    col_name = f"web_knowledge_{VECTOR_DB_VERSION}"
-    if col_name not in state.created_collections:
-        async with state.state_lock:
-            if col_name not in state.created_collections:
-                try:
-                    exists = await state.qdrant.collection_exists(collection_name=col_name)
-                    if not exists:
-                        await state.qdrant.create_collection(
-                            collection_name=col_name,
-                            vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
-                        )
-                except Exception as e:
-                    logger.warning(f"Errore creazione web knowledge collection: {e}")
-                state.created_collections.add(col_name)
-
-
-async def save_web_knowledge(query: str, context: str, sources: list[str] | None = None):
-    """Salva conoscenza da web in Qdrant per future ricerche semantiche."""
-    try:
-        await ensure_web_knowledge_collection()
-        col_name = f"web_knowledge_{VECTOR_DB_VERSION}"
-
-        try:
-            await state.qdrant.delete(
-                collection_name=col_name,
-                points_selector=Filter(must=[FieldCondition(key="query_hash", match=MatchValue(value=hashlib.md5(query.encode()).hexdigest()[:16]))])
-            )
-        except Exception:
-            pass
-
-        chunks = [context[i:i+CHUNK_SIZE] for i in range(0, len(context), CHUNK_SIZE - CHUNK_OVERLAP)]
-        valid_chunks = [c for c in chunks if len(c.strip()) >= 50]
-        if not valid_chunks:
-            return
-
-        texts_to_embed = [f"QUERY: {query} | WEB: {chunk}" for chunk in valid_chunks]
-        vectors = []
-        for i in range(0, len(texts_to_embed), 3):
-            batch = texts_to_embed[i:i+3]
-            batch_vectors = await get_embedding(batch)
-            vectors.extend(batch_vectors)
-            await asyncio.sleep(0.01)
-
-        points = []
-        for chunk, vector in zip(valid_chunks, vectors):
-            if vector:
-                points.append(PointStruct(
-                    id=str(uuid.uuid4()),
-                    vector=vector,
-                    payload={
-                        "query": query[:300],
-                        "query_hash": hashlib.md5(query.encode()).hexdigest()[:16],
-                        "text": chunk,
-                        "sources": sources[:5] if sources else [],
-                        "type": "web_knowledge"
-                    }
-                ))
-
-        if points:
-            await state.qdrant.upsert(collection_name=col_name, points=points)
-            logger.info(f"🌐 Web knowledge salvata in Qdrant: '{query[:60]}...' ({len(points)} chunks)")
-    except Exception as e:
-        logger.warning(f"Errore save_web_knowledge: {e}")
-
-
-async def search_web_knowledge(query: str) -> str:
-    """Cerca nella knowledge base web Qdrant. Ritorna contesto se trovato, stringa vuota altrimenti."""
-    try:
-        col_name = f"web_knowledge_{VECTOR_DB_VERSION}"
-        try:
-            exists = await state.qdrant.collection_exists(collection_name=col_name)
-            if not exists:
-                return ""
-        except Exception:
-            return ""
-
-        vector = await get_embedding(query, is_query=True)
-        if not vector:
-            return ""
-
-        res = await state.qdrant.query_points(
-            collection_name=col_name,
-            query=vector,
-            limit=3,
-            score_threshold=0.35,
-            with_payload=True
-        )
-        if res and res.points:
-            results = []
-            for p in res.points:
-                text = p.payload.get("text", "")
-                if text:
-                    results.append(text)
-            if results:
-                logger.info(f"🌐 Web knowledge cache HIT per: '{query[:60]}...'")
-                return "\n---\n".join(results)
-    except Exception as e:
-        logger.warning(f"Errore search_web_knowledge: {e}")
-    return ""
+# Cache semantica e Web Knowledge — estratte in rag_cache.py
+from rag_cache import (
+    semantic_cache_search,
+    semantic_cache_store,
+    semantic_cache_clear,
+    ensure_web_knowledge_collection,
+    save_web_knowledge,
+    search_web_knowledge,
+)

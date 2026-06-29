@@ -87,10 +87,29 @@ LLM_OPTIONS = {
     "top_p": float(os.getenv("LLM_TOP_P", "0.95")),
     "top_k": int(os.getenv("LLM_TOP_K", "40"))
 }
+# ==============================================================================
+# PERCORSI MODELLI GGUF
+# ==============================================================================
+LLAMA_MODEL_PATH = os.getenv("LLAMA_MODEL_PATH", "./models/qwen2.5-coder-3b.gguf")
+LLAMA_EMBED_MODEL_PATH = os.getenv("LLAMA_EMBED_MODEL_PATH", "./models/Qwen3-Embedding-0.6B-Q8_0.gguf")
+
+# ==============================================================================
+# CONFIGURAZIONE INFERENZA LLM
+# ==============================================================================
+N_GPU_LAYERS = int(os.getenv("N_GPU_LAYERS", "20"))
+LLM_NUM_CTX = _llm_num_ctx
+LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "128"))
+LLM_UBATCH_SIZE = int(os.getenv("LLM_UBATCH_SIZE", "128"))
+LLM_FLASH_ATTN = os.getenv("LLM_FLASH_ATTN", "false").lower() == "true"
+LLM_CHAT_FORMAT = os.getenv("LLM_CHAT_FORMAT") or None
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+# Raw env var flag per runtime checks (es. metadata override)
+LLM_THINKING_MODE_RAW = os.getenv("LLM_THINKING_MODE", "")
+
 # Rilevamento automatico famiglia modello dal GGUF.
 # Usato per thinking mode, temperatura, contesto massimo e compatibilità RAG.
 from model_profiles import detect_model_family
-MODEL_PROFILE = detect_model_family()
+MODEL_PROFILE = detect_model_family(LLAMA_MODEL_PATH)
 logger.info(f"🤖 Modello rilevato: {MODEL_PROFILE.family} ({MODEL_PROFILE.description}) | "
             f"thinking={'✅' if MODEL_PROFILE.thinking_support else '❌'} | "
             f"unsloth={'✅' if MODEL_PROFILE.unsloth_optimized else '❌'} | "
