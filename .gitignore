@@ -31,6 +31,9 @@ qdrant_storage/
 *.db
 *.sqlite3
 
+# Runtime legacy (sostituito da DATA_DIR in .env)
+mem0_data_v3/
+
 # Modelli LLM e Pesi
 models/
 *.gguf
