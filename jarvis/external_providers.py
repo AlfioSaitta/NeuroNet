@@ -253,7 +253,9 @@ class ProviderRouter:
     async def _route_fallback(self, messages, options, stream):
         """Tenta locale, se fallisce → cloud."""
         if self._local_engine:
-            result = await self._local_engine.generate_chat(messages, options, stream)
+            result = await self._local_engine.generate_chat(messages=messages, options=options, stream=stream)
+            if stream:
+                return result  # async generator → pass through, no error check possible
             if "error" not in result:
                 return result
 
@@ -277,7 +279,7 @@ class ProviderRouter:
             ["codice", "file", "funzione", "classe", "bug", "refactor", "script"])
 
         if is_code_query and self._local_engine:
-            return await self._local_engine.generate_chat(messages, options, stream)
+            return await self._local_engine.generate_chat(messages=messages, options=options, stream=stream)
 
         for name, provider in self.providers.items():
             result = await provider.generate_chat(messages, options, stream)
@@ -286,7 +288,7 @@ class ProviderRouter:
                 return result
 
         if self._local_engine:
-            return await self._local_engine.generate_chat(messages, options, stream)
+            return await self._local_engine.generate_chat(messages=messages, options=options, stream=stream)
         return {"error": "Nessun provider disponibile"}
 
     async def _route_parallel(self, messages, options, stream):
@@ -296,7 +298,7 @@ class ProviderRouter:
 
         tasks = []
         if self._local_engine:
-            tasks.append(self._local_engine.generate_chat(messages, options, stream=False))
+            tasks.append(self._local_engine.generate_chat(messages=messages, options=options, stream=False))
         for provider in self.providers.values():
             tasks.append(provider.generate_chat(messages, options, stream=False))
 
@@ -325,7 +327,7 @@ class ProviderRouter:
 
         if self._local_engine:
             logger.warning("ProviderRouter: nessun provider cloud per richiesta multimodale, uso locale")
-            return await self._local_engine.generate_chat(messages, options, stream)
+            return await self._local_engine.generate_chat(messages=messages, options=options, stream=stream)
         return {"error": "Nessun provider disponibile per richiesta multimodale"}
 
 
