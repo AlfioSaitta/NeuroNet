@@ -308,39 +308,30 @@ def _run_cmd(cmd: str, cwd: str, timeout: int = 60) -> tuple[int, str, str]:
 
 
 # ──────────────────────────────────────────────
-# CONFIRMATION SYSTEM
-# ──────────────────────────────────────────────
-
-import asyncio
-pending_confirmations = {}
-
-
-async def ask_confirmation(bot, chat_id, action_desc):
-    if not bot or not chat_id:
-        return True  # bypass if no bot available
-
-    future = asyncio.Future()
-    pending_confirmations[chat_id] = future
-
-    await bot.send_message(
-        chat_id=chat_id,
-        text=f"⚠️ **ATTENZIONE: Richiesta Autorizzazione**\nL'LLM sta per eseguire:\n`{action_desc}`\n\nVuoi autorizzare? Rispondi con **Y** o **N**.",
-        parse_mode="Markdown"
-    )
-
-    try:
-        approved = await asyncio.wait_for(future, timeout=300)
-        return approved
-    except asyncio.TimeoutError:
-        pending_confirmations.pop(chat_id, None)
-        return False
-
-
-# ──────────────────────────────────────────────
 # TOOL EXECUTOR
 # ──────────────────────────────────────────────
 
-async def execute_tool_call(tool_call, bot=None, chat_id=None):
+async def execute_tool_call(tool_call, bot=None, chat_id=None, confirmation_mgr=None):
+    """Execute a tool call with optional confirmation management.
+
+    Args:
+        tool_call: The tool call dict with function/name/arguments
+        bot: Telegram bot instance (legacy, use confirmation_mgr instead)
+        chat_id: Telegram chat ID (legacy, use confirmation_mgr instead)
+        confirmation_mgr: ConfirmationManager instance for user confirmation.
+                         If None, falls back to bot/chat_id legacy pattern.
+    """
+    from confirmation_manager import PendingConfirmation, AutoProvider, ConfirmationManager
+
+    # Build confirmation_mgr if not provided but bot/chat_id are
+    if confirmation_mgr is None:
+        if bot and chat_id:
+            confirmation_mgr = ConfirmationManager.from_bot(bot, chat_id)
+        else:
+            # Fallback: auto-approve (same as old behavior without bot)
+            confirmation_mgr = ConfirmationManager()
+            confirmation_mgr.set_provider(AutoProvider())
+
     name = tool_call.get("function", {}).get("name")
     try:
         args_raw = tool_call.get("function", {}).get("arguments", "{}")
@@ -686,7 +677,10 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
 
         elif name == "write_file":
             path = resolve_path(args["path"])
-            approved = await ask_confirmation(bot, chat_id, f"Scrittura file: {args['path']}")
+            try:
+                approved = await confirmation_mgr.ask(f"Scrittura file: {args['path']}")
+            except PendingConfirmation as e:
+                return f"⚠️ **Conferma richiesta**: {e.action_desc}\nPer autorizzare, invia: `confirm:{e.token}`"
             if not approved:
                 return "❌ Scrittura rifiutata dall'utente."
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -699,12 +693,14 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
             path = resolve_path(args["path"])
             target = args.get("target_text", "")
             replacement = args.get("replacement_text", "")
-            approved = await ask_confirmation(
-                bot, chat_id,
-                f"Patch file: {args['path']}\n\n"
-                f"**DA:**\n```\n{target[:300]}{'...' if len(target) > 300 else ''}\n```\n"
-                f"**A:**\n```\n{replacement[:300]}{'...' if len(replacement) > 300 else ''}\n```"
-            )
+            try:
+                approved = await confirmation_mgr.ask(
+                    f"Patch file: {args['path']}\n\n"
+                    f"**DA:**\n```\n{target[:300]}{'...' if len(target) > 300 else ''}\n```\n"
+                    f"**A:**\n```\n{replacement[:300]}{'...' if len(replacement) > 300 else ''}\n```"
+                )
+            except PendingConfirmation as e:
+                return f"⚠️ **Conferma richiesta**: {e.action_desc}\nPer autorizzare, invia: `confirm:{e.token}`"
             if not approved:
                 return "❌ Modifica rifiutata dall'utente."
 
@@ -724,7 +720,10 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
 
         elif name == "delete_file":
             path = resolve_path(args["path"])
-            approved = await ask_confirmation(bot, chat_id, f"Eliminazione file: {args['path']}")
+            try:
+                approved = await confirmation_mgr.ask(f"Eliminazione file: {args['path']}")
+            except PendingConfirmation as e:
+                return f"⚠️ **Conferma richiesta**: {e.action_desc}\nPer autorizzare, invia: `confirm:{e.token}`"
             if not approved:
                 return "❌ Eliminazione rifiutata dall'utente."
             if os.path.exists(path):
@@ -744,11 +743,13 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
             if not git_root:
                 return "⚠️ Questa directory non è un repository git."
 
-            approved = await ask_confirmation(
-                bot, chat_id,
-                f"Git commit in `{os.path.relpath(git_root, DOC_DIR)}/`:\n"
-                f"`{message}`"
-            )
+            try:
+                approved = await confirmation_mgr.ask(
+                    f"Git commit in `{os.path.relpath(git_root, DOC_DIR)}/`:\n"
+                    f"`{message}`"
+                )
+            except PendingConfirmation as e:
+                return f"⚠️ **Conferma richiesta**: {e.action_desc}\nPer autorizzare, invia: `confirm:{e.token}`"
             if not approved:
                 return "❌ Commit rifiutato dall'utente."
 
@@ -780,10 +781,12 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
                 _, out_b, _ = _run_cmd("git branch --show-current", git_root)
                 branch = out_b
 
-            approved = await ask_confirmation(
-                bot, chat_id,
-                f"Git push: `{remote}/{branch}` in `{os.path.relpath(git_root, DOC_DIR)}/`"
-            )
+            try:
+                approved = await confirmation_mgr.ask(
+                    f"Git push: `{remote}/{branch}` in `{os.path.relpath(git_root, DOC_DIR)}/`"
+                )
+            except PendingConfirmation as e:
+                return f"⚠️ **Conferma richiesta**: {e.action_desc}\nPer autorizzare, invia: `confirm:{e.token}`"
             if not approved:
                 return "❌ Push rifiutato dall'utente."
 
@@ -825,10 +828,12 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
 
             # Salta conferma per read-only
             if not is_readonly:
-                approved = await ask_confirmation(
-                    bot, chat_id,
-                    f"Esecuzione in `{os.path.relpath(target_dir, DOC_DIR)}/`:\n$ {cmd[:300]}"
-                )
+                try:
+                    approved = await confirmation_mgr.ask(
+                        f"Esecuzione in `{os.path.relpath(target_dir, DOC_DIR)}/`:\n$ {cmd[:300]}"
+                    )
+                except PendingConfirmation as e:
+                    return f"⚠️ **Conferma richiesta**: {e.action_desc}\nPer autorizzare, invia: `confirm:{e.token}`"
                 if not approved:
                     return "❌ Comando rifiutato dall'utente."
 
@@ -891,9 +896,10 @@ async def execute_tool_call(tool_call, bot=None, chat_id=None):
                     return content
 
                 # Fallback: legacy YAML execution (richiede conferma)
-                approved = await ask_confirmation(
-                    bot, chat_id, f"Esecuzione Skill: {name}\n{args}"
-                )
+                try:
+                    approved = await confirmation_mgr.ask(f"Esecuzione Skill: {name}\n{args}")
+                except PendingConfirmation as e:
+                    return f"⚠️ **Conferma richiesta**: {e.action_desc}\nPer autorizzare, invia: `confirm:{e.token}`"
                 if not approved:
                     return "❌ Skill rifiutata dall'utente."
                 return await execute_skill(name, args)

@@ -914,8 +914,8 @@ if TELEGRAM_ENABLED:
         if not user_text:
             return
 
-        # Intercept pending confirmation responses (Fix 9.1)
-        from agent_tools import pending_confirmations
+        # Intercept pending confirmation responses
+        from confirmation_manager import pending_confirmations
         chat_id = update.effective_chat.id
         if chat_id in pending_confirmations:
             future = pending_confirmations[chat_id]

@@ -56,6 +56,8 @@ from memory import init_mem0_delayed, extract_memories, save_to_memory, process_
 from prompt_builder import build_omniscient_prompt
 from llm_engine import engine, extract_content
 from agent_tools import TOOLS_SCHEMA, execute_tool_call
+from confirmation_manager import ApiTokenProvider, PendingConfirmation, ConfirmationManager
+from classificatore import is_internal_query, classify_confirmation
 
 if WATCHDOG_ENABLED:
     from watchdog.observers.polling import PollingObserver as Observer
@@ -442,6 +444,10 @@ class ChatRequest(BaseModel):
     messages: List[Message]
     stream: Optional[bool] = True
     options: Optional[Dict[str, Any]] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    conversation_id: Optional[str] = None
+    provider: Optional[str] = None
+    confirmation_token: Optional[str] = None
 
     model_config = ConfigDict(extra="allow")
 
@@ -644,13 +650,48 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         for m in raw_messages:
             if isinstance(m, dict) and m.get("role") == "user":
                 txt = str(m.get("content", ""))
-                if txt.startswith("## Summary") or "Extract entities" in txt or txt.strip().startswith("ADD_MEMORY") or txt.strip().startswith("UPDATE_MEMORY") or "deduce the facts" in txt:
+                if is_internal_query(txt):
                     is_internal = True
                     break
                 
     current_user_id = body.get("user_id") or (options.get("user_id") if isinstance(options, dict) else None) or "alfio_dev"
     conversation_id = body.get("conversation_id") or request.headers.get("X-Conversation-Id", "default")
     concise = isinstance(options, dict) and options.get("concise") is True
+    provider = body.get("provider") or payload.provider
+
+    # ── Confirmation token handling ──
+    confirmation_mgr = None
+    confirmation_token = body.get("confirmation_token") or payload.confirmation_token
+    if confirmation_token:
+        resolved = ApiTokenProvider.resolve(confirmation_token, approved=True)
+        if resolved:
+            return JSONResponse(status_code=200, content={
+                "model": body["model"],
+                "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
+                "done": True
+            })
+    elif raw_messages:
+        last_msg = raw_messages[-1] if isinstance(raw_messages[-1], dict) else {}
+        if last_msg.get("role") == "user":
+            msg_text = str(last_msg.get("content", ""))
+            result = classify_confirmation(msg_text)
+            if result:
+                token, approved = result
+                api_resolved = ApiTokenProvider.resolve(token, approved=approved)
+                if api_resolved:
+                    return JSONResponse(status_code=200, content={
+                        "model": body["model"],
+                        "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
+                        "done": True
+                    })
+                else:
+                    return JSONResponse(status_code=200, content={
+                        "model": body["model"],
+                        "message": {"role": "assistant", "content": "⚠️ Token di conferma non valido o scaduto."},
+                        "done": True
+                    })
+        # Lazy: ConfirmationManager creato solo quando servono tool calls
+
     if not is_internal:
         body["messages"] = await build_omniscient_prompt(
             raw_messages, user_id=current_user_id,
@@ -661,7 +702,10 @@ async def ollama_chat(payload: ChatRequest, request: Request):
     
     if not is_stream:
         # Non-stream
-        response = await engine.generate_chat(body["messages"], tools=body.get("tools"), options=body.get("options"), stream=False)
+        response = await engine.generate_chat_with_router(
+            body["messages"], tools=body.get("tools"), options=body.get("options"),
+            stream=False, preferred_provider=provider
+        )
         if "error" in response:
             return JSONResponse(status_code=500, content={"error": response["error"]})
         
@@ -685,13 +729,19 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         # Gestione Agentica per intercettare i tools non stream (iterazione)
         tool_calls = ollama_resp["message"].get("tool_calls", [])
         if tool_calls:
+            # Lazy init: confirmation_mgr solo se servono tool calls
+            if confirmation_mgr is None:
+                confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
             body["messages"].append(ollama_resp["message"])
             for tc in tool_calls:
-                tool_res = await execute_tool_call(tc)
+                tool_res = await execute_tool_call(tc, confirmation_mgr=confirmation_mgr)
                 body["messages"].append({"role": "tool", "content": tool_res, "name": tc.get("function", {}).get("name", "unknown")})
             
             # Ricorsione simulata per far generare la risposta finale dopo il tool
-            response = await engine.generate_chat(body["messages"], tools=body.get("tools"), options=body.get("options"), stream=False)
+            response = await engine.generate_chat_with_router(
+                body["messages"], tools=body.get("tools"), options=body.get("options"),
+                stream=False, preferred_provider=provider
+            )
             choice = response["choices"][0]["message"]
             ollama_resp["message"] = {"role": choice.get("role", "assistant"), "content": choice.get("content", "")}
         content = ollama_resp["message"].get("content", "")
@@ -702,7 +752,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
     else:
         # Streaming
         async def stream_gen():
-            gen = await engine.generate_chat(body["messages"], tools=body.get("tools"), options=body.get("options"), stream=True)
+            gen = await engine.generate_chat_with_router(body["messages"], tools=body.get("tools"), options=body.get("options"), stream=True, preferred_provider=provider)
             if isinstance(gen, dict) and "error" in gen:
                 yield json.dumps({"error": gen["error"]}).encode() + b"\n"
                 return
@@ -916,6 +966,9 @@ class ChatCompletionRequestOpenAI(BaseModel):
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None
     stop: Optional[List[str]] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    confirmation_token: Optional[str] = None
+    model_config = ConfigDict(extra="allow")
 
 class CompletionRequestOpenAI(BaseModel):
     model: str
@@ -1005,13 +1058,58 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
     current_user_id = body.get("user_id") or "alfio_dev"
     conversation_id = body.get("conversation_id") or request.headers.get("X-Conversation-Id", "default")
     concise = body.get("concise", False)
+
+    # ── Confirmation token handling ──
+    confirmation_mgr = None
+    confirmation_token = body.get("confirmation_token") or payload.confirmation_token
+    if confirmation_token:
+        resolved = ApiTokenProvider.resolve(confirmation_token, approved=True)
+        if resolved:
+            return {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion",
+                "created": int(datetime.now(UTC).timestamp()),
+                "model": OLLAMA_MODEL,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."}, "finish_reason": "stop"}],
+                "usage": {}
+            }
+    elif raw_messages:
+        last_msg = raw_messages[-1] if isinstance(raw_messages[-1], dict) else {}
+        if last_msg.get("role") == "user":
+            msg_text = str(last_msg.get("content", ""))
+            result = classify_confirmation(msg_text)
+            if result:
+                token, approved = result
+                api_resolved = ApiTokenProvider.resolve(token, approved=approved)
+                if api_resolved:
+                    status_text = "✅ Conferma ricevuta. Operazione autorizzata." if approved else "❌ Operazione rifiutata."
+                    return {
+                        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                        "object": "chat.completion",
+                        "created": int(datetime.now(UTC).timestamp()),
+                        "model": OLLAMA_MODEL,
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": status_text}, "finish_reason": "stop"}],
+                        "usage": {}
+                    }
+                else:
+                    return {
+                        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                        "object": "chat.completion",
+                        "created": int(datetime.now(UTC).timestamp()),
+                        "model": OLLAMA_MODEL,
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": "⚠️ Token di conferma non valido o scaduto."}, "finish_reason": "stop"}],
+                        "usage": {}
+                    }
+        # Lazy: ConfirmationManager creato solo quando servono tool calls
+
     enriched = await build_omniscient_prompt(
         ollama_messages, user_id=current_user_id,
         conversation_id=str(conversation_id), concise=concise
     )
+    tools = body.get("tools")
     chat_body = {"model": OLLAMA_MODEL, "messages": enriched, "stream": is_stream, "options": options}
     if not is_stream:
-        response = await engine.generate_chat(chat_body["messages"], options=options, stream=False)
+        response = await engine.generate_chat_with_router(chat_body["messages"], tools=tools, options=options, stream=False, preferred_provider=body.get("provider"))
         if "error" in response:
             return JSONResponse(status_code=500, content={"error": response["error"]})
 
@@ -1019,6 +1117,26 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
         state.total_completion_tokens += response.get("usage", {}).get("completion_tokens", 0)
 
         choice = response["choices"][0]["message"]
+
+        # ── Tool calling loop (non-stream) ──
+        tool_calls = choice.get("tool_calls", [])
+        if tool_calls:
+            # Lazy: ConfirmationManager solo se servono tool calls
+            if confirmation_mgr is None:
+                confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
+            enriched.append(dict(choice))
+            for tc in tool_calls:
+                tool_res = await execute_tool_call(tc, confirmation_mgr=confirmation_mgr)
+                enriched.append({
+                    "role": "tool", "content": tool_res,
+                    "name": tc.get("function", {}).get("name", "unknown")
+                })
+            # Ricorsione per risposta finale dopo i tool
+            response = await engine.generate_chat_with_router(enriched, tools=tools, options=options, stream=False, preferred_provider=body.get("provider"))
+            if "error" in response:
+                return JSONResponse(status_code=500, content={"error": response["error"]})
+            choice = response["choices"][0]["message"]
+
         content = choice.get("content", "")
         cleaned = await process_response_tags(content, user_id=current_user_id)
         # Se process_response_tags rimuove tutto, mantieni il contenuto originale
@@ -1043,7 +1161,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
         }
     else:
         async def openai_stream_gen():
-            gen = await engine.generate_chat(chat_body["messages"], options=options, stream=True)
+            gen = await engine.generate_chat_with_router(chat_body["messages"], tools=tools, options=options, stream=True, preferred_provider=body.get("provider"))
             if isinstance(gen, dict) and "error" in gen:
                 yield f"data: {json.dumps({'error': gen['error']})}\n\n"
                 return
