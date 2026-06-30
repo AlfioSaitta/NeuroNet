@@ -7,7 +7,7 @@ import logging
 import httpx
 from concurrent.futures import ThreadPoolExecutor
 
-from config import LLM_THINKING_MODE, MODEL_PROFILE, EXTERNAL_GPU_URL, MODEL_ID, LLM_MAX_TOKENS
+from config import LLM_THINKING_MODE, MODEL_PROFILE, EXTERNAL_GPU_URL, MODEL_ID, LLM_MAX_TOKENS, EMBEDDING_DIMS
 
 try:
     from llama_cpp import Llama
@@ -399,12 +399,12 @@ class LlamaEngine:
                 lambda: self.embed_model.create_embedding(texts)
             )
             
-            # MRL (Matryoshka): tronca a 768 dim per retrocompatibilità con le collection Qdrant esistenti
+            # MRL (Matryoshka): tronca a EMBEDDING_DIMS dim per retrocompatibilità con le collection Qdrant esistenti
             if "data" in embeddings:
                 for item in embeddings["data"]:
                     emb = item.get("embedding", [])
-                    if len(emb) > 768:
-                        item["embedding"] = emb[:768]
+                    if len(emb) > EMBEDDING_DIMS:
+                        item["embedding"] = emb[:EMBEDDING_DIMS]
             
             return embeddings
 
