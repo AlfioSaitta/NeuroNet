@@ -3,6 +3,7 @@ OpenAI-compatible API endpoints per Jarvis Cognitive Proxy.
 Estratto da main.py per modularizzazione.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from config import (
 from llm_engine import engine
 from prompt_builder import build_omniscient_prompt
 from memory import process_response_tags
+from tag_processor import strip_action_tags
 from agent_tools import execute_tool_call
 from confirmation_manager import ApiTokenProvider, ConfirmationManager
 from classificatore import classify_confirmation
@@ -224,7 +226,17 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             choice = response["choices"][0]["message"]
 
         content = choice.get("content", "")
-        cleaned = await process_response_tags(content, user_id=current_user_id)
+        try:
+            cleaned = await asyncio.wait_for(
+                process_response_tags(content, user_id=current_user_id),
+                timeout=15.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("⏱️ process_response_tags timed out (15s) — returning raw text")
+            cleaned = content
+        except Exception as e:
+            logger.warning(f"⚠️ process_response_tags error: {e}")
+            cleaned = content
         if not cleaned and content:
             cleaned = content
         return {
@@ -262,13 +274,16 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                     content = delta.get("content", "")
                     finish_reason = chunk["choices"][0].get("finish_reason")
 
+                    # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
+                    cleaned_content = strip_action_tags(content) if content else ""
+
                     if not role_sent:
                         role_sent = True
                         yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
-                        if content:
-                            yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': {'content': content}, 'finish_reason': None}]})}\n\n"
+                        if cleaned_content:
+                            yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': {'content': cleaned_content}, 'finish_reason': None}]})}\n\n"
                     else:
-                        delta_dict = {"content": content} if content else {}
+                        delta_dict = {"content": cleaned_content} if cleaned_content else {}
                         yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': delta_dict, 'finish_reason': finish_reason}]})}\n\n"
 
                     if content:
@@ -278,7 +293,15 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
             full_text = "".join(full_chunks)
             if full_text:
-                await process_response_tags(full_text, user_id=current_user_id)
+                try:
+                    await asyncio.wait_for(
+                        process_response_tags(full_text, user_id=current_user_id),
+                        timeout=15.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("⏱️ process_response_tags timed out (15s) — skipping tag processing")
+                except Exception as e:
+                    logger.warning(f"⚠️ process_response_tags error: {e}")
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(openai_stream_gen(), media_type="text/event-stream")

@@ -53,6 +53,7 @@ import state
 from rag import ingest_local_documents, rag_queue_worker, generate_project_tree, search_documents
 from rag_cache import semantic_cache_search, semantic_cache_store
 from memory import init_mem0_delayed, extract_memories, save_to_memory, process_response_tags, reindex_graph_connections
+from tag_processor import strip_action_tags
 from prompt_builder import build_omniscient_prompt
 from llm_engine import engine, extract_content
 from agent_tools import TOOLS_SCHEMA, execute_tool_call
@@ -745,7 +746,17 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             choice = response["choices"][0]["message"]
             ollama_resp["message"] = {"role": choice.get("role", "assistant"), "content": choice.get("content", "")}
         content = ollama_resp["message"].get("content", "")
-        cleaned = await process_response_tags(content, user_id=current_user_id)
+        try:
+            cleaned = await asyncio.wait_for(
+                process_response_tags(content, user_id=current_user_id),
+                timeout=15.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("⏱️ process_response_tags timed out (15s) — returning raw text")
+            cleaned = content
+        except Exception as e:
+            logger.warning(f"⚠️ process_response_tags error: {e}")
+            cleaned = content
         ollama_resp["message"]["content"] = cleaned
         return JSONResponse(status_code=200, content=ollama_resp)
         
@@ -764,12 +775,15 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                     content = delta.get("content", "")
                     full_chunks.append(content)
 
+                    # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
+                    cleaned_content = strip_action_tags(content) if content else ""
+
                     ollama_chunk = {
                         "model": body["model"],
                         "created_at": datetime.now(UTC).isoformat() + "Z",
                         "message": {
                             "role": "assistant",
-                            "content": content
+                            "content": cleaned_content
                         },
                         "done": False
                     }
@@ -778,7 +792,17 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             # Processa TUTTI i tag dalla risposta completa (MEMORY, SCHEDULE, SSH, ecc.)
             full_text = "".join(full_chunks)
             if full_text:
-                cleaned = await process_response_tags(full_text, user_id=current_user_id)
+                try:
+                    cleaned = await asyncio.wait_for(
+                        process_response_tags(full_text, user_id=current_user_id),
+                        timeout=15.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("⏱️ process_response_tags timed out (15s) — skipping tag processing")
+                    cleaned = full_text
+                except Exception as e:
+                    logger.warning(f"⚠️ process_response_tags error: {e}")
+                    cleaned = full_text
                 if not cleaned:
                     cleaned = full_text  # fallback: mantieni originale se la pulizia svuota tutto
                 full_text = cleaned
@@ -850,7 +874,17 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
         content = extract_content(response)
         
         # Processa i tag PRIMA di salvare in cache, per non memorizzare tag non processati
-        cleaned = await process_response_tags(content, user_id=current_user_id)
+        try:
+            cleaned = await asyncio.wait_for(
+                process_response_tags(content, user_id=current_user_id),
+                timeout=15.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("⏱️ process_response_tags timed out (15s) on /api/generate non-streaming")
+            cleaned = content
+        except Exception as e:
+            logger.warning(f"⚠️ process_response_tags error on /api/generate: {e}")
+            cleaned = content
         asyncio.create_task(semantic_cache_store(prompt, cleaned))
         
         # Salva prompt utente in memoria (endpoint generate non usa build_omniscient_prompt)
@@ -870,25 +904,38 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
                 if "choices" in chunk and len(chunk["choices"]) > 0:
                     content = chunk["choices"][0].get("delta", {}).get("content", "")
                     full_resp.append(content)
-                    
+
+                    # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
+                    cleaned_content = strip_action_tags(content) if content else ""
+
                     yield json.dumps({
                         "model": body["model"],
                         "created_at": datetime.now(UTC).isoformat() + "Z",
-                        "response": content,
+                        "response": cleaned_content,
                         "done": False
                     }).encode() + b"\n"
-                    
+
             final_content = "".join(full_resp)
-            
+
             # Salva prompt utente + processa tag in background
             asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
             cleaned = final_content
             if final_content:
-                cleaned = await process_response_tags(final_content, user_id=current_user_id)
+                try:
+                    cleaned = await asyncio.wait_for(
+                        process_response_tags(final_content, user_id=current_user_id),
+                        timeout=15.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("⏱️ process_response_tags timed out (15s) on /api/generate stream")
+                    cleaned = final_content
+                except Exception as e:
+                    logger.warning(f"⚠️ process_response_tags error on /api/generate stream: {e}")
+                    cleaned = final_content
                 if not cleaned:
                     cleaned = final_content  # fallback: mantieni originale se la pulizia svuota
                 asyncio.create_task(semantic_cache_store(prompt, cleaned))
-            
+
             yield json.dumps({
                 "model": body["model"],
                 "created_at": datetime.now(UTC).isoformat() + "Z",

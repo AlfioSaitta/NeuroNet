@@ -182,7 +182,39 @@ HTML_CONTENT = r"""
         .close-modal { color: #fff; font-size: 28px; cursor: pointer; transition: 0.2s; line-height: 1;}
         .close-modal:hover { color: var(--danger); transform: scale(1.1);}
         
-        #graph-container { width: 100%; height: 100%; }
+        #graph-container { width: 100%; height: 100%; 
+            background-image: radial-gradient(circle at 1px 1px, rgba(0, 255, 204, 0.06) 1px, transparent 0);
+            background-size: 20px 20px;
+        }
+        #graph-tooltip {
+            position: fixed; padding: 6px 10px; border-radius: 6px; pointer-events: none; z-index: 1020;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; line-height: 1.4;
+            background: rgba(10, 15, 25, 0.92); border: 1px solid var(--primary);
+            color: var(--text-main); display: none;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5), 0 0 12px rgba(0,255,204,0.08);
+            max-width: 320px; white-space: nowrap;
+        }
+        #graph-controls { display: flex; align-items: center; gap: 8px; }
+        #graph-controls button {
+            background: rgba(0, 255, 204, 0.1); color: var(--primary);
+            border: 1px solid rgba(0, 255, 204, 0.3); border-radius: 6px;
+            padding: 2px 8px; cursor: pointer; transition: 0.2s;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; font-weight: 600;
+        }
+        #graph-controls button:hover { background: var(--primary); color: #000; box-shadow: 0 0 10px var(--primary); }
+        #graph-status { font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); }
+        #graph-stats {
+            position: absolute; top: 56px; right: 12px; z-index: 1010;
+            background: rgba(10, 15, 25, 0.85); border: 1px solid rgba(255,255,255,0.08);
+            padding: 6px 10px; border-radius: 6px; font-family: 'JetBrains Mono', monospace;
+            font-size: 0.6rem; color: var(--text-muted); display: none; line-height: 1.6;
+        }
+        #filter-count { font-size: 0.6rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-left: 8px; display: none; }
+        #min-degree-input {
+            background: rgba(0,0,0,0.8); color: #fff; padding: 2px 6px; width: 40px;
+            border: 1px solid var(--glass-border); border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.65rem;
+        }
         #filter-container { display: none; align-items: center; gap: 8px; background: rgba(0,0,0,0.5); padding: 4px 12px; border-radius: 8px; border: 1px solid var(--glass-border); }
         #filter-container input, #filter-container select {
             background: rgba(0,0,0,0.8); color: #fff; padding: 3px 8px;
@@ -482,16 +514,26 @@ HTML_CONTENT = r"""
     <div id="graph-modal" class="modal">
         <div class="modal-header">
             <h2><span class="dot dot-primary pulsing"></span> <span id="modal-title">Vector Network</span></h2>
+            <div id="graph-controls" style="display:none;">
+                <button id="btn-pause-fa2" onclick="toggleFA2()" title="Pause/Resume simulation">⏸</button>
+                <button onclick="zoomToFitGraph()" title="Zoom to fit">⊞</button>
+                <span id="graph-status"></span>
+            </div>
             <div id="filter-container">
                 <input type="text" id="node-search" placeholder="Search..." onkeyup="applyGraphFilter()">
                 <label style="color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; font-family: 'JetBrains Mono', monospace;">Type:</label>
                 <select id="file-type-filter" onchange="applyGraphFilter()">
                     <option value="ALL">All Files</option>
                 </select>
+                <label style="color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; font-family: 'JetBrains Mono', monospace;">Min deg:</label>
+                <input type="number" id="min-degree-input" value="0" min="0" onchange="applyGraphFilter()">
+                <span id="filter-count"></span>
             </div>
             <div class="close-modal" onclick="closeModal()">&times;</div>
         </div>
         <div id="graph-container"></div>
+        <div id="graph-tooltip"></div>
+        <div id="graph-stats"></div>
         <div class="node-info" id="node-info">
             <h3>NODE DETAILS</h3>
             <div id="node-content"></div>
@@ -526,8 +568,137 @@ HTML_CONTENT = r"""
         let selectedNodeId = null;
         let allNodes = [];
         let allLinks = [];
+        let hoveredNode = null;
+        let graphResizeObserver = null;
+        let fa2AutoPauseTimer = null;
 
-        const graphFilter = { ext: 'ALL', query: '' };
+        const graphFilter = { ext: 'ALL', query: '', minDegree: 0, group: 'ALL' };
+
+        function toggleFA2() {
+            if (!fa2Layout) return;
+            const btn = document.getElementById('btn-pause-fa2');
+            const status = document.getElementById('graph-status');
+            if (fa2Layout.running) {
+                fa2Layout.stop();
+                btn.textContent = '▶';
+                status.textContent = '⏸ Paused';
+                status.style.color = 'var(--warning)';
+            } else {
+                fa2Layout.start();
+                btn.textContent = '⏸';
+                status.textContent = '⚡ Simulating';
+                status.style.color = 'var(--primary)';
+            }
+        }
+
+        function zoomToFitGraph() {
+            if (!sigmaInstance) return;
+            sigmaInstance.getCamera().animatedReset({ duration: 300 });
+        }
+
+        function computeGraphStats(sigmaGraph) {
+            const n = sigmaGraph.order;
+            const e = sigmaGraph.size;
+            const avgDeg = n > 0 ? (2 * e / n) : 0;
+            const density = n > 1 ? (2 * e / (n * (n - 1))) : 0;
+            return { nodes: n, edges: e, avgDegree: avgDeg.toFixed(1), density: (density * 100).toFixed(2) };
+        }
+
+        function updateGraphStats(containerId, stats) {
+            const el = document.getElementById(containerId || 'graph-stats');
+            if (!el) return;
+            el.style.display = 'block';
+            el.innerHTML = `N: ${stats.nodes} | E: ${stats.edges} | Avg Deg: ${stats.avgDegree} | ρ: ${stats.density}%`;
+        }
+
+        function getNodeDegree(nodeId, links) {
+            let deg = 0;
+            links.forEach(l => {
+                const sId = l.source?.id || l.source;
+                const tId = l.target?.id || l.target;
+                if (sId === nodeId || tId === nodeId) deg++;
+            });
+            return deg;
+        }
+
+        function computeDegreeMap(links) {
+            const deg = {};
+            links.forEach(l => {
+                const sId = l.source?.id || l.source;
+                const tId = l.target?.id || l.target;
+                deg[sId] = (deg[sId] || 0) + 1;
+                deg[tId] = (deg[tId] || 0) + 1;
+            });
+            return deg;
+        }
+
+        function getConnectedNodeIds(nodeId, links) {
+            const connected = new Set();
+            connected.add(nodeId);
+            links.forEach(l => {
+                const sId = l.source?.id || l.source;
+                const tId = l.target?.id || l.target;
+                if (sId === nodeId) connected.add(tId);
+                if (tId === nodeId) connected.add(sId);
+            });
+            return connected;
+        }
+
+        function buildGroupLayout(nodes, getGroupFn) {
+            const groups = {};
+            nodes.forEach(n => {
+                const g = getGroupFn(n);
+                if (!groups[g]) groups[g] = [];
+                groups[g].push(n.id);
+            });
+            const groupKeys = Object.keys(groups).sort();
+            const positions = {};
+            groupKeys.forEach((g, gi) => {
+                const ids = groups[g];
+                const radius = (gi + 1) * 35;
+                ids.forEach((id, ni) => {
+                    const angle = (2 * Math.PI * ni) / ids.length;
+                    positions[id] = {
+                        x: radius * Math.cos(angle) + (Math.random() - 0.5) * 5,
+                        y: radius * Math.sin(angle) + (Math.random() - 0.5) * 5,
+                    };
+                });
+            });
+            return positions;
+        }
+
+        function setupResizeObserver(containerId, renderer) {
+            if (graphResizeObserver) graphResizeObserver.disconnect();
+            const container = document.getElementById(containerId);
+            if (!container || !renderer) return;
+            graphResizeObserver = new ResizeObserver(() => {
+                try { renderer.getCamera().animatedReset({ duration: 200 }); } catch(e) {}
+            });
+            graphResizeObserver.observe(container);
+        }
+
+        function showGraphTooltip(e, text) {
+            const tt = document.getElementById('graph-tooltip');
+            if (!tt) return;
+            tt.textContent = text;
+            tt.style.display = 'block';
+            tt.style.left = (e.pageX + 12) + 'px';
+            tt.style.top = (e.pageY + 12) + 'px';
+        }
+
+        function hideGraphTooltip() {
+            const tt = document.getElementById('graph-tooltip');
+            if (tt) tt.style.display = 'none';
+        }
+
+        function updateFilterCount(sigmaGraph) {
+            const el = document.getElementById('filter-count');
+            if (!el || !sigmaGraph) return;
+            let visible = 0, total = sigmaGraph.order;
+            sigmaGraph.forEachNode(n => { if (!sigmaGraph.getNodeAttribute(n, 'hidden')) visible++; });
+            el.textContent = `${visible}/${total}`;
+            el.style.display = total > 0 ? 'inline' : 'none';
+        }
 
         function escapeHtml(unsafe) {
             return String(unsafe)
@@ -554,6 +725,10 @@ HTML_CONTENT = r"""
             if (!sigmaInstance) return;
             graphFilter.ext = document.getElementById('file-type-filter').value;
             graphFilter.query = document.getElementById('node-search').value.toLowerCase();
+            const minDegInput = document.getElementById('min-degree-input');
+            graphFilter.minDegree = minDegInput ? parseInt(minDegInput.value) || 0 : 0;
+            const groupFilter = document.getElementById('group-type-filter');
+            graphFilter.group = groupFilter ? groupFilter.value : 'ALL';
             document.getElementById('node-info').style.display = "none";
             selectedNodeId = null;
             sigmaInstance.refresh();
@@ -647,16 +822,16 @@ HTML_CONTENT = r"""
 
                 allLinks = data.links || [];
 
-                // Compute node degree (connection count)
-                const degree = {};
-                allLinks.forEach(l => {
-                    const sId = l.source?.id || l.source;
-                    const tId = l.target?.id || l.target;
-                    degree[sId] = (degree[sId] || 0) + 1;
-                    degree[tId] = (degree[tId] || 0) + 1;
-                });
+                // Compute degree and group positions
+                const degree = computeDegreeMap(allLinks);
                 const maxDeg = Math.max(1, ...Object.values(degree));
                 const nodeCount = allNodes.length;
+
+                // Calculate avg degree for hub labeling
+                const degValues = Object.values(degree);
+                const avgDeg = degValues.reduce((a, b) => a + b, 0) / Math.max(1, degValues.length);
+                const stdDeg = Math.sqrt(degValues.reduce((sq, d) => sq + (d - avgDeg) ** 2, 0) / Math.max(1, degValues.length));
+                const hubThreshold = avgDeg + stdDeg;
 
                 // Build legend
                 const legendEl = document.getElementById('graph-legend');
@@ -673,19 +848,29 @@ HTML_CONTENT = r"""
                     legendEl.appendChild(row);
                 });
 
+                // --- Smart initial positions by group ---
+                const positions = buildGroupLayout(allNodes, n => n.ext);
+
                 // --- Build graphology graph ---
                 const sigmaGraph = new window.__graphology();
 
                 data.points.forEach(p => {
                     const ext = allNodes.find(n => n.id === p.id)?.ext || 'Unknown';
-                    const size = Math.max(3, Math.min(20, 1 + (degree[p.id] || 0) / maxDeg * 4));
+                    const pdeg = degree[p.id] || 0;
+                    const size = Math.max(3, Math.min(20, 1 + pdeg / maxDeg * 4));
+                    const pos = positions[p.id] || { x: Math.random() * 200 - 100, y: Math.random() * 200 - 100 };
+                    const isHub = pdeg > hubThreshold;
+                    const labelHint = p.payload?.text || p.payload?.data || '';
                     sigmaGraph.addNode(p.id, {
-                        label: `${EXT_NAMES[ext] || ext} — ${degree[p.id] || 0} connections`,
-                        x: Math.random() * 200 - 100,
-                        y: Math.random() * 200 - 100,
+                        label: isHub
+                            ? `${EXT_NAMES[ext] || ext} — ${pdeg} connections`
+                            : (nodeCount < 200 ? `${EXT_NAMES[ext] || ext} — ${pdeg} conn` : ''),
+                        x: pos.x,
+                        y: pos.y,
                         size: nodeCount > 500 ? size * 0.6 : size,
                         color: EXT_COLORS[ext] || '#888888',
                         ext: ext,
+                        degree: pdeg,
                         payload: p.payload || {},
                     });
                 });
@@ -694,11 +879,13 @@ HTML_CONTENT = r"""
                     const source = l.source?.id || l.source;
                     const target = l.target?.id || l.target;
                     if (sigmaGraph.hasNode(source) && sigmaGraph.hasNode(target)) {
-                        const width = Math.max(0.3, (l.similarity - 0.35) * 8);
-                        const alpha = Math.max(0.1, (l.similarity - 0.35) * 2);
+                        const sim = l.similarity || 0.5;
+                        const alpha = Math.max(0.15, Math.min(0.8, (sim - 0.35) * 3));
+                        const width = Math.max(0.5, Math.min(3, sim * 4));
                         sigmaGraph.addEdge(source, target, {
                             color: `rgba(0, 255, 204, ${alpha})`,
                             size: width,
+                            similarity: sim,
                         });
                     }
                 });
@@ -724,86 +911,180 @@ HTML_CONTENT = r"""
                 layout.start();
                 fa2Layout = layout;
 
-                // Create sigma renderer
-                const renderer = new window.__sigma(sigmaGraph, document.getElementById('graph-container'), {
-                    renderEdgeLabels: false,
-                    enableEdgeEvents: true,
-                    labelRenderedSizeThreshold: 6,
-                    labelDensity: 0.3,
-                    minCameraRatio: 0.05,
-                    maxCameraRatio: 10,
-                    nodeReducer: (node, data) => {
-                        if (graphFilter.ext !== 'ALL' && data.ext !== graphFilter.ext) {
-                            return { ...data, hidden: true };
-                        }
-                        if (graphFilter.query) {
-                            const payload = data.payload || {};
-                            const txt = (payload.text || payload.data || JSON.stringify(payload)).toLowerCase();
-                            if (!txt.includes(graphFilter.query) && !String(node).toLowerCase().includes(graphFilter.query)) {
+                // Auto-pause after 30 seconds
+                if (fa2AutoPauseTimer) clearTimeout(fa2AutoPauseTimer);
+                fa2AutoPauseTimer = setTimeout(() => {
+                    if (fa2Layout && fa2Layout.running) {
+                        fa2Layout.stop();
+                        document.getElementById('btn-pause-fa2').textContent = '▶';
+                        document.getElementById('graph-status').textContent = '✓ Stabilized';
+                        document.getElementById('graph-status').style.color = 'var(--primary)';
+                    }
+                }, 30000);
+
+                // Show FA2 controls
+                document.getElementById('graph-controls').style.display = 'flex';
+                document.getElementById('btn-pause-fa2').textContent = '⏸';
+                document.getElementById('graph-status').textContent = '⚡ Simulating';
+                document.getElementById('graph-status').style.color = 'var(--primary)';
+
+                // Create sigma renderer with error recovery
+                let renderer;
+                try {
+                    renderer = new window.__sigma(sigmaGraph, document.getElementById('graph-container'), {
+                        renderEdgeLabels: false,
+                        enableEdgeEvents: true,
+                        labelRenderedSizeThreshold: 6,
+                        labelDensity: 0.3,
+                        minCameraRatio: 0.05,
+                        maxCameraRatio: 10,
+                        nodeReducer: (node, data) => {
+                            const pdeg = sigmaGraph.getNodeAttribute(node, 'degree') || 0;
+                            if (graphFilter.minDegree > 0 && pdeg < graphFilter.minDegree) {
                                 return { ...data, hidden: true };
                             }
-                        }
-                        if (node === selectedNodeId) {
-                            return { ...data, color: '#ff00ff', size: data.size * 1.5 };
-                        }
-                        return data;
-                    },
-                    edgeReducer: (edge, data) => {
-                        const [src, tgt] = sigmaGraph.extremities(edge);
-                        const srcAttrs = sigmaGraph.getNodeAttributes(src);
-                        const tgtAttrs = sigmaGraph.getNodeAttributes(tgt);
-                        if (srcAttrs.hidden || tgtAttrs.hidden) return { ...data, hidden: true };
-                        return data;
-                    },
-                });
-
-                sigmaInstance = renderer;
-
-                // Node click
-                renderer.on('clickNode', ({ node }) => {
-                    selectedNodeId = node;
-                    const attrs = sigmaGraph.getNodeAttributes(node);
-
-                    const infoBox = document.getElementById('node-info');
-                    const contentBox = document.getElementById('node-content');
-                    infoBox.style.display = "block";
-
-                    let htmlContent = `<div class="property-row"><div class="property-label">Vector ID</div><div class="property-value">${escapeHtml(node)}</div></div>`;
-
-                    if(attrs.payload.text || attrs.payload.data) {
-                        const mainText = attrs.payload.text || attrs.payload.data;
-                        htmlContent += `<div class="property-row"><div class="property-label">Primary Text</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(mainText)}</code></pre></div></div>`;
-                    }
-
-                    const payloadStr = JSON.stringify(attrs.payload, null, 2);
-                    htmlContent += `<div class="property-row"><div class="property-label">Raw Payload (JSON)</div><pre><code class="language-json" style="padding: 8px; border-radius: 4px;">${escapeHtml(payloadStr)}</code></pre></div>`;
-
-                    contentBox.innerHTML = htmlContent;
-                    contentBox.querySelectorAll('pre code').forEach((block) => {
-                        hljs.highlightElement(block);
+                            if (graphFilter.ext !== 'ALL' && data.ext !== graphFilter.ext) {
+                                return { ...data, hidden: true };
+                            }
+                            if (graphFilter.query) {
+                                const payload = data.payload || {};
+                                const txt = (payload.text || payload.data || JSON.stringify(payload)).toLowerCase();
+                                if (!txt.includes(graphFilter.query) && !String(node).toLowerCase().includes(graphFilter.query)) {
+                                    return { ...data, hidden: true };
+                                }
+                            }
+                            if (hoveredNode) {
+                                const connected = getConnectedNodeIds(hoveredNode, allLinks);
+                                if (!connected.has(node)) {
+                                    return { ...data, color: '#444', size: data.size * 0.5, label: '' };
+                                }
+                                if (node === hoveredNode) {
+                                    return { ...data, color: '#ff00ff', size: data.size * 2.0 };
+                                }
+                                return { ...data, size: data.size * 1.3 };
+                            }
+                            if (node === selectedNodeId) {
+                                return { ...data, color: '#ff00ff', size: data.size * 1.5 };
+                            }
+                            return data;
+                        },
+                        edgeReducer: (edge, data) => {
+                            const [src, tgt] = sigmaGraph.extremities(edge);
+                            const srcAttrs = sigmaGraph.getNodeAttributes(src);
+                            const tgtAttrs = sigmaGraph.getNodeAttributes(tgt);
+                            if (srcAttrs.hidden || tgtAttrs.hidden) return { ...data, hidden: true };
+                            if (hoveredNode) {
+                                const connected = getConnectedNodeIds(hoveredNode, allLinks);
+                                const sOk = connected.has(src);
+                                const tOk = connected.has(tgt);
+                                if (sOk && tOk) {
+                                    return { ...data, color: 'rgba(0, 255, 204, 0.7)', size: 2 };
+                                }
+                                return { ...data, color: 'rgba(100, 100, 100, 0.05)', size: 0.3 };
+                            }
+                            return data;
+                        },
                     });
 
-                    renderer.refresh();
-                });
+                    sigmaInstance = renderer;
 
-                renderer.on('enterNode', ({ node }) => {
-                    document.getElementById('graph-container').style.cursor = 'pointer';
-                });
+                    // Show stats
+                    const stats = computeGraphStats(sigmaGraph);
+                    updateGraphStats('graph-stats', stats);
 
-                renderer.on('leaveNode', () => {
-                    document.getElementById('graph-container').style.cursor = '';
-                });
+                    // Resize observer
+                    setupResizeObserver('graph-container', renderer);
 
-                renderer.on('clickStage', () => {
-                    selectedNodeId = null;
-                    document.getElementById('node-info').style.display = "none";
-                    renderer.refresh();
-                });
+                    // Node click
+                    renderer.on('clickNode', ({ node }) => {
+                        selectedNodeId = node;
+                        const attrs = sigmaGraph.getNodeAttributes(node);
 
-                // Fit view
-                setTimeout(() => {
-                    renderer.getCamera().animatedReset({ duration: 400 });
-                }, 200);
+                        const infoBox = document.getElementById('node-info');
+                        const contentBox = document.getElementById('node-content');
+                        infoBox.style.display = "block";
+
+                        let htmlContent = `<div class="property-row"><div class="property-label">Vector ID</div><div class="property-value">${escapeHtml(node)}</div></div>`;
+
+                        if(attrs.payload.text || attrs.payload.data) {
+                            const mainText = attrs.payload.text || attrs.payload.data;
+                            htmlContent += `<div class="property-row"><div class="property-label">Primary Text</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(mainText)}</code></pre></div></div>`;
+                        }
+
+                        const payloadStr = JSON.stringify(attrs.payload, null, 2);
+                        htmlContent += `<div class="property-row"><div class="property-label">Raw Payload (JSON)</div><pre><code class="language-json" style="padding: 8px; border-radius: 4px;">${escapeHtml(payloadStr)}</code></pre></div>`;
+
+                        contentBox.innerHTML = htmlContent;
+                        contentBox.querySelectorAll('pre code').forEach((block) => {
+                            hljs.highlightElement(block);
+                        });
+
+                        renderer.refresh();
+                    });
+
+                    // Hover events
+                    renderer.on('enterNode', ({ node }) => {
+                        document.getElementById('graph-container').style.cursor = 'pointer';
+                        hoveredNode = node;
+                        const attrs = sigmaGraph.getNodeAttributes(node);
+                        const pdeg = attrs.degree || 0;
+                        const label = `${EXT_NAMES[attrs.ext] || attrs.ext} — ${pdeg} connections`;
+                        showGraphTooltip(
+                            window.event || { pageX: 0, pageY: 0 },
+                            `${label}\nID: ${node.substring(0, 24)}...`
+                        );
+                        renderer.refresh();
+                    });
+
+                    renderer.on('leaveNode', () => {
+                        document.getElementById('graph-container').style.cursor = '';
+                        hoveredNode = null;
+                        hideGraphTooltip();
+                        renderer.refresh();
+                    });
+
+                    renderer.on('clickStage', () => {
+                        selectedNodeId = null;
+                        document.getElementById('node-info').style.display = "none";
+                        renderer.refresh();
+                    });
+
+                    renderer.on('clickEdge', ({ edge }) => {
+                        const [src, tgt] = sigmaGraph.extremities(edge);
+                        const sim = sigmaGraph.getEdgeAttribute(edge, 'similarity') || '?';
+                        selectedNodeId = null;
+                        const infoBox = document.getElementById('node-info');
+                        const contentBox = document.getElementById('node-content');
+                        infoBox.style.display = "block";
+                        contentBox.innerHTML = `
+                            <div class="property-row"><div class="property-label">Source</div><div class="property-value">${escapeHtml(src)}</div></div>
+                            <div class="property-row"><div class="property-label">Target</div><div class="property-value">${escapeHtml(tgt)}</div></div>
+                            <div class="property-row"><div class="property-label">Similarity</div><div class="property-value" style="color:var(--primary)">${typeof sim === 'number' ? (sim * 100).toFixed(1) + '%' : sim}</div></div>
+                        `;
+                        renderer.refresh();
+                    });
+
+                    // Mousemove for tooltip
+                    document.getElementById('graph-container').addEventListener('mousemove', (e) => {
+                        if (hoveredNode) {
+                            const attrs = sigmaGraph.getNodeAttributes(hoveredNode);
+                            const pdeg = attrs.degree || 0;
+                            showGraphTooltip(e, `${EXT_NAMES[attrs.ext] || attrs.ext} — ${pdeg} connections\nID: ${hoveredNode.substring(0, 24)}...`);
+                        }
+                    });
+
+                    // Fit view
+                    setTimeout(() => {
+                        renderer.getCamera().animatedReset({ duration: 400 });
+                    }, 200);
+
+                    // Update filter count
+                    updateFilterCount(sigmaGraph);
+
+                } catch(e) {
+                    console.error(e);
+                    document.getElementById('modal-title').innerText = `⚠️ Graph render error: ${e.message}`;
+                }
 
             } catch(e) {
                 console.error(e);
@@ -815,6 +1096,18 @@ HTML_CONTENT = r"""
             document.getElementById('graph-modal').style.display = "none";
             document.getElementById('node-info').style.display = "none";
             document.getElementById('graph-legend').style.display = "none";
+            document.getElementById('graph-controls').style.display = "none";
+            document.getElementById('graph-stats').style.display = "none";
+            document.getElementById('filter-count').style.display = "none";
+            hideGraphTooltip();
+            if(fa2AutoPauseTimer) {
+                clearTimeout(fa2AutoPauseTimer);
+                fa2AutoPauseTimer = null;
+            }
+            if(graphResizeObserver) {
+                graphResizeObserver.disconnect();
+                graphResizeObserver = null;
+            }
             if(fa2Layout) {
                 fa2Layout.kill();
                 fa2Layout = null;
@@ -824,6 +1117,7 @@ HTML_CONTENT = r"""
                 sigmaInstance = null;
             }
             document.getElementById('graph-container').innerHTML = '';
+            hoveredNode = null;
             isModalOpen = false;
         }
 
@@ -866,15 +1160,30 @@ HTML_CONTENT = r"""
                 `;
 
                 // Compute degree
-                const degree = {};
-                allLinks.forEach(l => {
-                    const sId = l.source?.id || l.source;
-                    const tId = l.target?.id || l.target;
-                    degree[sId] = (degree[sId] || 0) + 1;
-                    degree[tId] = (degree[tId] || 0) + 1;
-                });
+                const degree = computeDegreeMap(allLinks);
                 const maxDeg = Math.max(1, ...Object.values(degree));
                 const nodeCount = allNodes.length;
+
+                // Degree stats for hub labels
+                const degValues = Object.values(degree);
+                const avgDeg = degValues.reduce((a, b) => a + b, 0) / Math.max(1, degValues.length);
+                const stdDeg = Math.sqrt(degValues.reduce((sq, d) => sq + (d - avgDeg) ** 2, 0) / Math.max(1, degValues.length));
+                const hubThreshold = avgDeg + stdDeg;
+
+                // Add group filter for memory graph
+                const filterSelect = document.getElementById('file-type-filter');
+                filterSelect.innerHTML = '<option value="ALL">All Types</option><option value="entity">Entity</option><option value="memory">Memory</option>';
+
+                // Show min-degree filter
+                const minDegContainer = document.getElementById('min-degree-input');
+                if (minDegContainer) minDegContainer.style.display = 'inline-block';
+
+                if (nodeCount > 0) {
+                    document.getElementById('filter-container').style.display = "flex";
+                }
+
+                // --- Smart positions by group ---
+                const positions = buildGroupLayout(allNodes, n => n.group || 'memory');
 
                 // --- Build graphology graph ---
                 const sigmaGraph = new window.__graphology();
@@ -882,18 +1191,24 @@ HTML_CONTENT = r"""
                 allNodes.forEach(p => {
                     const group = p.group || 'memory';
                     const isEntity = group === 'entity';
+                    const pdeg = degree[p.id] || 0;
                     const size = isEntity
-                        ? Math.max(5, Math.min(25, 2 + (degree[p.id] || 0) / maxDeg * 6))
-                        : Math.max(3, Math.min(15, 1 + (degree[p.id] || 0) / maxDeg * 4));
+                        ? Math.max(5, Math.min(25, 2 + pdeg / maxDeg * 6))
+                        : Math.max(3, Math.min(15, 1 + pdeg / maxDeg * 4));
+                    const pos = positions[p.id] || { x: Math.random() * 200 - 100, y: Math.random() * 200 - 100 };
+                    const isHub = pdeg > hubThreshold;
+                    const entityName = p.payload?.entity_name || '';
+                    const label = isEntity
+                        ? (isHub ? `Entity: ${entityName} (${pdeg})` : (nodeCount < 200 ? `Entity: ${entityName}` : ''))
+                        : (isHub ? `Memory (${pdeg} connections)` : (nodeCount < 200 ? `Memory (${pdeg})` : ''));
                     sigmaGraph.addNode(p.id, {
-                        label: isEntity
-                            ? `Entity: ${p.payload.entity_name} (${degree[p.id] || 0} connections)`
-                            : `Memory (${degree[p.id] || 0} connections)`,
-                        x: Math.random() * 200 - 100,
-                        y: Math.random() * 200 - 100,
+                        label: label,
+                        x: pos.x,
+                        y: pos.y,
                         size: nodeCount > 500 ? size * 0.7 : size,
                         color: isEntity ? '#b388ff' : '#00e5ff',
                         group: group,
+                        degree: pdeg,
                         payload: p.payload || {},
                     });
                 });
@@ -903,8 +1218,9 @@ HTML_CONTENT = r"""
                     const target = l.target?.id || l.target;
                     if (sigmaGraph.hasNode(source) && sigmaGraph.hasNode(target)) {
                         sigmaGraph.addEdge(source, target, {
-                            color: 'rgba(0, 255, 204, 0.3)',
-                            size: 1,
+                            color: 'rgba(179, 136, 255, 0.35)',
+                            size: 1.2,
+                            similarity: l.similarity || 0.5,
                         });
                     }
                 });
@@ -930,78 +1246,189 @@ HTML_CONTENT = r"""
                 layout.start();
                 fa2Layout = layout;
 
-                // Create sigma renderer
-                const renderer = new window.__sigma(sigmaGraph, document.getElementById('graph-container'), {
-                    renderEdgeLabels: false,
-                    enableEdgeEvents: true,
-                    labelRenderedSizeThreshold: 6,
-                    labelDensity: 0.3,
-                    minCameraRatio: 0.05,
-                    maxCameraRatio: 10,
-                    nodeReducer: (node, data) => {
-                        if (node === selectedNodeId) {
-                            return { ...data, color: '#ff00ff', size: data.size * 1.5 };
-                        }
-                        return data;
-                    },
-                });
-
-                sigmaInstance = renderer;
-
-                // Node click
-                renderer.on('clickNode', ({ node }) => {
-                    selectedNodeId = node;
-                    const attrs = sigmaGraph.getNodeAttributes(node);
-                    const isEntity = attrs.group === 'entity';
-
-                    const infoBox = document.getElementById('node-info');
-                    const contentBox = document.getElementById('node-content');
-                    infoBox.style.display = "block";
-
-                    let htmlContent = `<div class="property-row"><div class="property-label">Type</div><div class="property-value">${isEntity ? '🔮 Entity' : '🧠 Memory'}</div></div>`;
-
-                    if (isEntity) {
-                        htmlContent += `<div class="property-row"><div class="property-label">Entity Name</div><div class="property-value">${escapeHtml(attrs.payload.entity_name)}</div></div>`;
-                        htmlContent += `<div class="property-row"><div class="property-label">Connected Memories</div><div class="property-value">${attrs.payload.connected_memories || 0}</div></div>`;
-                        if (attrs.payload.entity_type) {
-                            htmlContent += `<div class="property-row"><div class="property-label">Entity Type</div><div class="property-value">${escapeHtml(attrs.payload.entity_type)}</div></div>`;
-                        }
-                    } else {
-                        const memText = attrs.payload.memory || '';
-                        htmlContent += `<div class="property-row"><div class="property-label">Memory Excerpt</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(memText)}</code></pre></div></div>`;
-                        if (attrs.payload.entity_count) {
-                            htmlContent += `<div class="property-row"><div class="property-label">Connected Entities</div><div class="property-value">${attrs.payload.entity_count}</div></div>`;
-                        }
+                // Auto-pause after 30 seconds
+                if (fa2AutoPauseTimer) clearTimeout(fa2AutoPauseTimer);
+                fa2AutoPauseTimer = setTimeout(() => {
+                    if (fa2Layout && fa2Layout.running) {
+                        fa2Layout.stop();
+                        document.getElementById('btn-pause-fa2').textContent = '▶';
+                        document.getElementById('graph-status').textContent = '✓ Stabilized';
+                        document.getElementById('graph-status').style.color = 'var(--primary)';
                     }
+                }, 30000);
 
-                    htmlContent += `<div class="property-row"><div class="property-label">Node ID</div><div class="property-value" style="font-size:0.7rem;color:var(--text-muted);">${escapeHtml(node)}</div></div>`;
-                    contentBox.innerHTML = htmlContent;
+                // Show FA2 controls
+                document.getElementById('graph-controls').style.display = 'flex';
+                document.getElementById('btn-pause-fa2').textContent = '⏸';
+                document.getElementById('graph-status').textContent = '⚡ Simulating';
+                document.getElementById('graph-status').style.color = 'var(--primary)';
 
-                    contentBox.querySelectorAll('pre code').forEach((block) => {
-                        hljs.highlightElement(block);
+                // Create sigma renderer with error recovery
+                let renderer;
+                try {
+                    renderer = new window.__sigma(sigmaGraph, document.getElementById('graph-container'), {
+                        renderEdgeLabels: false,
+                        enableEdgeEvents: true,
+                        labelRenderedSizeThreshold: 6,
+                        labelDensity: 0.3,
+                        minCameraRatio: 0.05,
+                        maxCameraRatio: 10,
+                        nodeReducer: (node, data) => {
+                            const pdeg = sigmaGraph.getNodeAttribute(node, 'degree') || 0;
+                            if (graphFilter.minDegree > 0 && pdeg < graphFilter.minDegree) {
+                                return { ...data, hidden: true };
+                            }
+                            if (graphFilter.ext !== 'ALL' && data.group !== graphFilter.ext) {
+                                return { ...data, hidden: true };
+                            }
+                            if (hoveredNode) {
+                                const connected = getConnectedNodeIds(hoveredNode, allLinks);
+                                if (!connected.has(node)) {
+                                    return { ...data, color: '#444', size: data.size * 0.5, label: '' };
+                                }
+                                if (node === hoveredNode) {
+                                    return { ...data, color: '#ff00ff', size: data.size * 2.0 };
+                                }
+                                return { ...data, size: data.size * 1.3 };
+                            }
+                            if (node === selectedNodeId) {
+                                return { ...data, color: '#ff00ff', size: data.size * 1.5 };
+                            }
+                            return data;
+                        },
+                        edgeReducer: (edge, data) => {
+                            const [src, tgt] = sigmaGraph.extremities(edge);
+                            const srcAttrs = sigmaGraph.getNodeAttributes(src);
+                            const tgtAttrs = sigmaGraph.getNodeAttributes(tgt);
+                            if (srcAttrs.hidden || tgtAttrs.hidden) return { ...data, hidden: true };
+                            if (hoveredNode) {
+                                const connected = getConnectedNodeIds(hoveredNode, allLinks);
+                                const sOk = connected.has(src);
+                                const tOk = connected.has(tgt);
+                                if (sOk && tOk) {
+                                    return { ...data, color: 'rgba(179, 136, 255, 0.7)', size: 2 };
+                                }
+                                return { ...data, color: 'rgba(100, 100, 100, 0.05)', size: 0.3 };
+                            }
+                            return data;
+                        },
                     });
 
-                    renderer.refresh();
-                });
+                    sigmaInstance = renderer;
 
-                renderer.on('enterNode', ({ node }) => {
-                    document.getElementById('graph-container').style.cursor = 'pointer';
-                });
+                    // Show stats
+                    const stats = computeGraphStats(sigmaGraph);
+                    updateGraphStats('graph-stats', stats);
 
-                renderer.on('leaveNode', () => {
-                    document.getElementById('graph-container').style.cursor = '';
-                });
+                    // Resize observer
+                    setupResizeObserver('graph-container', renderer);
 
-                renderer.on('clickStage', () => {
-                    selectedNodeId = null;
-                    document.getElementById('node-info').style.display = "none";
-                    renderer.refresh();
-                });
+                    // Node click
+                    renderer.on('clickNode', ({ node }) => {
+                        selectedNodeId = node;
+                        const attrs = sigmaGraph.getNodeAttributes(node);
+                        const isEntity = attrs.group === 'entity';
 
-                // Fit view
-                setTimeout(() => {
-                    renderer.getCamera().animatedReset({ duration: 400 });
-                }, 200);
+                        const infoBox = document.getElementById('node-info');
+                        const contentBox = document.getElementById('node-content');
+                        infoBox.style.display = "block";
+
+                        let htmlContent = `<div class="property-row"><div class="property-label">Type</div><div class="property-value">${isEntity ? '🔮 Entity' : '🧠 Memory'}</div></div>`;
+
+                        if (isEntity) {
+                            htmlContent += `<div class="property-row"><div class="property-label">Entity Name</div><div class="property-value">${escapeHtml(attrs.payload.entity_name)}</div></div>`;
+                            htmlContent += `<div class="property-row"><div class="property-label">Connected Memories</div><div class="property-value">${attrs.payload.connected_memories || 0}</div></div>`;
+                            if (attrs.payload.entity_type) {
+                                htmlContent += `<div class="property-row"><div class="property-label">Entity Type</div><div class="property-value">${escapeHtml(attrs.payload.entity_type)}</div></div>`;
+                            }
+                        } else {
+                            const memText = attrs.payload.memory || '';
+                            htmlContent += `<div class="property-row"><div class="property-label">Memory Excerpt</div><div class="property-value"><pre><code class="language-javascript" style="white-space: pre-wrap; padding: 8px; border-radius: 4px;">${escapeHtml(memText)}</code></pre></div></div>`;
+                            if (attrs.payload.entity_count) {
+                                htmlContent += `<div class="property-row"><div class="property-label">Connected Entities</div><div class="property-value">${attrs.payload.entity_count}</div></div>`;
+                            }
+                        }
+
+                        htmlContent += `<div class="property-row"><div class="property-label">Node ID</div><div class="property-value" style="font-size:0.7rem;color:var(--text-muted);">${escapeHtml(node)}</div></div>`;
+                        contentBox.innerHTML = htmlContent;
+
+                        contentBox.querySelectorAll('pre code').forEach((block) => {
+                            hljs.highlightElement(block);
+                        });
+
+                        renderer.refresh();
+                    });
+
+                    // Hover events
+                    renderer.on('enterNode', ({ node }) => {
+                        document.getElementById('graph-container').style.cursor = 'pointer';
+                        hoveredNode = node;
+                        const attrs = sigmaGraph.getNodeAttributes(node);
+                        const isEntity = attrs.group === 'entity';
+                        const pdeg = attrs.degree || 0;
+                        const label = isEntity
+                            ? `Entity: ${attrs.payload.entity_name || '?'} — ${pdeg} connections`
+                            : `Memory — ${pdeg} connections`;
+                        showGraphTooltip(
+                            window.event || { pageX: 0, pageY: 0 },
+                            `${label}\nID: ${node.substring(0, 24)}...`
+                        );
+                        renderer.refresh();
+                    });
+
+                    renderer.on('leaveNode', () => {
+                        document.getElementById('graph-container').style.cursor = '';
+                        hoveredNode = null;
+                        hideGraphTooltip();
+                        renderer.refresh();
+                    });
+
+                    renderer.on('clickStage', () => {
+                        selectedNodeId = null;
+                        document.getElementById('node-info').style.display = "none";
+                        renderer.refresh();
+                    });
+
+                    renderer.on('clickEdge', ({ edge }) => {
+                        const [src, tgt] = sigmaGraph.extremities(edge);
+                        const sim = sigmaGraph.getEdgeAttribute(edge, 'similarity') || '?';
+                        selectedNodeId = null;
+                        const infoBox = document.getElementById('node-info');
+                        const contentBox = document.getElementById('node-content');
+                        infoBox.style.display = "block";
+                        contentBox.innerHTML = `
+                            <div class="property-row"><div class="property-label">Source</div><div class="property-value">${escapeHtml(src)}</div></div>
+                            <div class="property-row"><div class="property-label">Target</div><div class="property-value">${escapeHtml(tgt)}</div></div>
+                            <div class="property-row"><div class="property-label">Similarity</div><div class="property-value" style="color:var(--primary)">${typeof sim === 'number' ? (sim * 100).toFixed(1) + '%' : sim}</div></div>
+                        `;
+                        renderer.refresh();
+                    });
+
+                    // Mousemove for tooltip
+                    document.getElementById('graph-container').addEventListener('mousemove', (e) => {
+                        if (hoveredNode) {
+                            const attrs = sigmaGraph.getNodeAttributes(hoveredNode);
+                            const isEntity = attrs.group === 'entity';
+                            const pdeg = attrs.degree || 0;
+                            const label = isEntity
+                                ? `Entity: ${attrs.payload.entity_name || '?'} — ${pdeg} connections`
+                                : `Memory — ${pdeg} connections`;
+                            showGraphTooltip(e, `${label}\nID: ${hoveredNode.substring(0, 24)}...`);
+                        }
+                    });
+
+                    // Fit view
+                    setTimeout(() => {
+                        renderer.getCamera().animatedReset({ duration: 400 });
+                    }, 200);
+
+                    // Update filter count
+                    updateFilterCount(sigmaGraph);
+
+                } catch(e) {
+                    console.error(e);
+                    document.getElementById('modal-title').innerText = `⚠️ Graph render error: ${e.message}`;
+                }
 
             } catch(e) {
                 console.error(e);

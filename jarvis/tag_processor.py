@@ -579,6 +579,14 @@ def strip_all_tags(text: str) -> str:
     return _STRIP_ALL_RE.sub("", text).strip()
 
 
+def strip_action_tags(text: str) -> str:
+    """
+    Come strip_all_tags ma SENZA .strip() — preserva spazi e whitespace.
+    Utile nello streaming dove un chunk può essere solo " " (spazio tra parole).
+    """
+    return _STRIP_ALL_RE.sub("", text)
+
+
 async def process_all_tags(
     text: str,
     context: Optional[TagContext] = None,
