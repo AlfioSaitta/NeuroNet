@@ -226,19 +226,22 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             choice = response["choices"][0]["message"]
 
         content = choice.get("content", "")
-        try:
-            cleaned = await asyncio.wait_for(
-                process_response_tags(content, user_id=current_user_id),
-                timeout=15.0
-            )
-        except asyncio.TimeoutError:
-            logger.warning("⏱️ process_response_tags timed out (15s) — returning raw text")
-            cleaned = content
-        except Exception as e:
-            logger.warning(f"⚠️ process_response_tags error: {e}")
-            cleaned = content
-        if not cleaned and content:
-            cleaned = content
+
+        # Strip tag veloce (regex, senza handler) per la risposta immediata.
+        # Il processaggio completo dei tag va in background.
+        clean_content = strip_action_tags(content) if content else ""
+        result_content = clean_content or content
+
+        # Processa i tag in BACKGROUND per effetti collaterali
+        if content:
+            try:
+                bg_task = asyncio.create_task(
+                    process_response_tags(content, user_id=current_user_id)
+                )
+                state.background_tasks.add(bg_task)
+                bg_task.add_done_callback(state.background_tasks.discard)
+            except Exception as e:
+                logger.warning(f"⚠️ Background tag processing error: {e}")
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion",
@@ -249,7 +252,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                     "index": 0,
                     "message": {
                         "role": choice.get("role", "assistant"),
-                        "content": cleaned
+                        "content": result_content
                     },
                     "finish_reason": "stop"
                 }
@@ -294,17 +297,20 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                         break
 
             full_text = "".join(full_chunks)
+
+            # Invia SUBITO [DONE] per non bloccare il client
+            yield "data: [DONE]\n\n"
+
+            # Processa i tag in BACKGROUND per effetti collaterali (MEMORY, SCHEDULE, SSH, ecc.)
             if full_text:
                 try:
-                    await asyncio.wait_for(
-                        process_response_tags(full_text, user_id=current_user_id),
-                        timeout=15.0
+                    bg_task = asyncio.create_task(
+                        process_response_tags(full_text, user_id=current_user_id)
                     )
-                except asyncio.TimeoutError:
-                    logger.warning("⏱️ process_response_tags timed out (15s) — skipping tag processing")
+                    state.background_tasks.add(bg_task)
+                    bg_task.add_done_callback(state.background_tasks.discard)
                 except Exception as e:
-                    logger.warning(f"⚠️ process_response_tags error: {e}")
-            yield "data: [DONE]\n\n"
+                    logger.warning(f"⚠️ Background tag processing error: {e}")
 
         return StreamingResponse(openai_stream_gen(), media_type="text/event-stream")
 
