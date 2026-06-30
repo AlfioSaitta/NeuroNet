@@ -20,13 +20,13 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, ConfigDict
 
 from config import (
-    logger, OLLAMA_MODEL, API_RATE_LIMIT_DEFAULT,
+    logger, MODEL_ID, API_RATE_LIMIT_DEFAULT,
     API_RATE_LIMIT_HEAVY, API_RATE_LIMIT_EMBED,
 )
 from llm_engine import engine
 from prompt_builder import build_omniscient_prompt
 from memory import process_response_tags
-from tag_processor import strip_action_tags
+from tag_processor import strip_action_tags, TagSafeStream
 from agent_tools import execute_tool_call
 from confirmation_manager import ApiTokenProvider, ConfirmationManager
 from classificatore import classify_confirmation
@@ -108,7 +108,7 @@ async def openai_models():
         "object": "list",
         "data": [
             {
-                "id": OLLAMA_MODEL,
+                "id": MODEL_ID,
                 "object": "model",
                 "created": 1710000000,
                 "owned_by": "ollama"
@@ -161,7 +161,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                 "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
                 "object": "chat.completion",
                 "created": int(datetime.now(UTC).timestamp()),
-                "model": OLLAMA_MODEL,
+                "model": MODEL_ID,
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."}, "finish_reason": "stop"}],
                 "usage": {}
             }
@@ -179,7 +179,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
                         "object": "chat.completion",
                         "created": int(datetime.now(UTC).timestamp()),
-                        "model": OLLAMA_MODEL,
+                        "model": MODEL_ID,
                         "choices": [{"index": 0, "message": {"role": "assistant", "content": status_text}, "finish_reason": "stop"}],
                         "usage": {}
                     }
@@ -188,7 +188,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
                         "object": "chat.completion",
                         "created": int(datetime.now(UTC).timestamp()),
-                        "model": OLLAMA_MODEL,
+                        "model": MODEL_ID,
                         "choices": [{"index": 0, "message": {"role": "assistant", "content": "⚠️ Token di conferma non valido o scaduto."}, "finish_reason": "stop"}],
                         "usage": {}
                     }
@@ -243,7 +243,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion",
             "created": int(datetime.now(UTC).timestamp()),
-            "model": OLLAMA_MODEL,
+            "model": MODEL_ID,
             "choices": [
                 {
                     "index": 0,
@@ -266,6 +266,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
             response_created = int(datetime.now(UTC).timestamp())
 
+            safe_stream = TagSafeStream()
             full_chunks = []
             role_sent = False
             async for chunk in gen:
@@ -275,16 +276,17 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                     finish_reason = chunk["choices"][0].get("finish_reason")
 
                     # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
-                    cleaned_content = strip_action_tags(content) if content else ""
+                    # Usa TagSafeStream per gestire tag spalmati su piu' chunk
+                    cleaned_content = safe_stream.process(content) if content else ""
 
                     if not role_sent:
                         role_sent = True
-                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
+                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
                         if cleaned_content:
-                            yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': {'content': cleaned_content}, 'finish_reason': None}]})}\n\n"
+                            yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': {'content': cleaned_content}, 'finish_reason': None}]})}\n\n"
                     else:
                         delta_dict = {"content": cleaned_content} if cleaned_content else {}
-                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'delta': delta_dict, 'finish_reason': finish_reason}]})}\n\n"
+                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': delta_dict, 'finish_reason': finish_reason}]})}\n\n"
 
                     if content:
                         full_chunks.append(content)
@@ -352,7 +354,7 @@ async def openai_completions(payload: CompletionRequestOpenAI, request: Request)
             "id": f"cmpl-{uuid.uuid4().hex[:12]}",
             "object": "text_completion",
             "created": int(datetime.now(UTC).timestamp()),
-            "model": OLLAMA_MODEL,
+            "model": MODEL_ID,
             "choices": [
                 {
                     "text": echo_prefix + content,
@@ -379,7 +381,7 @@ async def openai_completions(payload: CompletionRequestOpenAI, request: Request)
                     content = delta.get("content", "")
                     finish_reason = chunk["choices"][0].get("finish_reason")
 
-                    yield f"data: {json.dumps({'id': response_id, 'object': 'text_completion', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'text': content, 'logprobs': None, 'finish_reason': finish_reason}]})}\n\n"
+                    yield f"data: {json.dumps({'id': response_id, 'object': 'text_completion', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'text': content, 'logprobs': None, 'finish_reason': finish_reason}]})}\n\n"
 
                     if finish_reason:
                         break
@@ -427,7 +429,7 @@ async def openai_embeddings(payload: EmbeddingRequestOpenAI, request: Request):
     return {
         "object": "list",
         "data": embeddings_data,
-        "model": body.get("model", OLLAMA_MODEL),
+        "model": body.get("model", MODEL_ID),
         "usage": {
             "prompt_tokens": total_tokens or len(data_list),
             "total_tokens": total_tokens or len(data_list)

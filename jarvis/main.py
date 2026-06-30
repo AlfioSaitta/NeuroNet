@@ -40,7 +40,7 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import VectorParams, Distance
 
 from config import (
-    logger, OLLAMA_MODEL, QDRANT_HOST,
+    logger, MODEL_ID, QDRANT_HOST,
     DOC_COLLECTION, DOC_DIR, HOST_FS_PREFIX,
     TELEGRAM_TOKEN, ALLOWED_USERS, MEM0_CONFIG, STATE_FILE,
     TELEGRAM_ENABLED, WATCHDOG_ENABLED, WATCHDOG_TIMEOUT, WATCHDOG_WATCH_MODE,
@@ -53,7 +53,7 @@ import state
 from rag import ingest_local_documents, rag_queue_worker, generate_project_tree, search_documents
 from rag_cache import semantic_cache_search, semantic_cache_store
 from memory import init_mem0_delayed, extract_memories, save_to_memory, process_response_tags, reindex_graph_connections
-from tag_processor import strip_action_tags
+from tag_processor import strip_action_tags, TagSafeStream
 from prompt_builder import build_omniscient_prompt
 from llm_engine import engine, extract_content
 from agent_tools import TOOLS_SCHEMA, execute_tool_call
@@ -184,8 +184,14 @@ async def lifespan(app: FastAPI):
     state.background_tasks.add(task_mem0)
     task_mem0.add_done_callback(state.background_tasks.discard)
 
-    # Ingestion iniziale documenti
-    task_ingest = asyncio.create_task(ingest_local_documents())
+    # Ingestion iniziale documenti — ATTENDE il completamento del warmup Mem0
+    # (spaCy/BM25 lazy init) prima di processare workspace e aggiornare nodi.
+    # Questo evita race condition in cui RAG scrive chunk prima che Mem0 sia pronto.
+    async def _ingest_after_mem0():
+        await task_mem0
+        await ingest_local_documents()
+
+    task_ingest = asyncio.create_task(_ingest_after_mem0())
     state.background_tasks.add(task_ingest)
     task_ingest.add_done_callback(state.background_tasks.discard)
 
@@ -637,7 +643,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
     from datetime import datetime, UTC
     
     body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
-    body["model"] = OLLAMA_MODEL
+    body["model"] = MODEL_ID
     
     raw_messages = body.get("messages", [])
     
@@ -768,6 +774,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                 yield json.dumps({"error": gen["error"]}).encode() + b"\n"
                 return
 
+            safe_stream = TagSafeStream()
             full_chunks = []
             async for chunk in gen:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
@@ -776,7 +783,8 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                     full_chunks.append(content)
 
                     # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
-                    cleaned_content = strip_action_tags(content) if content else ""
+                    # Usa TagSafeStream per gestire tag spalmati su piu' chunk
+                    cleaned_content = safe_stream.process(content) if content else ""
 
                     ollama_chunk = {
                         "model": body["model"],
@@ -824,7 +832,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
     """Endpoint generate Ollama simulato con iniezione RAG."""
     from datetime import datetime, UTC
     body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
-    body["model"] = OLLAMA_MODEL
+    body["model"] = MODEL_ID
     prompt = body.get("prompt", "")
     is_stream = body.get("stream", True)
     
@@ -899,6 +907,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
     else:
         async def stream_gen():
             full_resp = []
+            safe_stream = TagSafeStream()
             gen = await engine.generate_chat(messages, stream=True)
             async for chunk in gen:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
@@ -906,7 +915,8 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
                     full_resp.append(content)
 
                     # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
-                    cleaned_content = strip_action_tags(content) if content else ""
+                    # Usa TagSafeStream per gestire tag spalmati su piu' chunk
+                    cleaned_content = safe_stream.process(content) if content else ""
 
                     yield json.dumps({
                         "model": body["model"],
@@ -1006,8 +1016,8 @@ async def ollama_tags():
     return {
         "models": [
             {
-                "name": OLLAMA_MODEL,
-                "model": OLLAMA_MODEL,
+                "name": MODEL_ID,
+                "model": MODEL_ID,
                 "details": {"families": ["gemma"]}
             },
             {
@@ -1028,8 +1038,8 @@ async def ollama_ps():
     return {
         "models": [
             {
-                "name": OLLAMA_MODEL,
-                "model": OLLAMA_MODEL,
+                "name": MODEL_ID,
+                "model": MODEL_ID,
                 "size": 2438740416,
                 "size_vram": 2438740416,
                 "details": {"families": ["gemma"]}
