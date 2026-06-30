@@ -752,18 +752,24 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             choice = response["choices"][0]["message"]
             ollama_resp["message"] = {"role": choice.get("role", "assistant"), "content": choice.get("content", "")}
         content = ollama_resp["message"].get("content", "")
-        try:
-            cleaned = await asyncio.wait_for(
-                process_response_tags(content, user_id=current_user_id),
-                timeout=15.0
-            )
-        except asyncio.TimeoutError:
-            logger.warning("⏱️ process_response_tags timed out (15s) — returning raw text")
-            cleaned = content
-        except Exception as e:
-            logger.warning(f"⚠️ process_response_tags error: {e}")
-            cleaned = content
-        ollama_resp["message"]["content"] = cleaned
+
+        # Strip tag veloce (regex, senza handler) per la risposta immediata.
+        # Il processaggio completo dei tag (MEMORY, SCHEDULE, SSH, ecc.) va in background
+        # per non bloccare la risposta (può impiegare 15s+ con loopback Mem0).
+        clean_content = strip_action_tags(content) if content else ""
+        ollama_resp["message"]["content"] = clean_content or content
+
+        # Processa i tag in BACKGROUND per effetti collaterali
+        if content:
+            try:
+                bg_task = asyncio.create_task(
+                    process_response_tags(content, user_id=current_user_id)
+                )
+                state.background_tasks.add(bg_task)
+                bg_task.add_done_callback(state.background_tasks.discard)
+            except Exception as e:
+                logger.warning(f"⚠️ Background tag processing error: {e}")
+
         return JSONResponse(status_code=200, content=ollama_resp)
         
     else:
@@ -802,31 +808,29 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             if final_flush:
                 full_chunks.append(final_flush)
 
-            # Processa TUTTI i tag dalla risposta completa (MEMORY, SCHEDULE, SSH, ecc.)
             full_text = "".join(full_chunks)
-            if full_text:
-                try:
-                    cleaned = await asyncio.wait_for(
-                        process_response_tags(full_text, user_id=current_user_id),
-                        timeout=15.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning("⏱️ process_response_tags timed out (15s) — skipping tag processing")
-                    cleaned = full_text
-                except Exception as e:
-                    logger.warning(f"⚠️ process_response_tags error: {e}")
-                    cleaned = full_text
-                if not cleaned:
-                    cleaned = full_text  # fallback: mantieni originale se la pulizia svuota tutto
-                full_text = cleaned
 
-            # Send final done message con testo pulito dai tag
+            # Invia SUBITO il messaggio done (con strip veloce regex, senza handler)
+            # per non bloccare il client con process_response_tags (che può impiegare 15s+).
+            clean_text = strip_action_tags(full_text) if full_text else ""
             yield json.dumps({
                 "model": body["model"],
                 "created_at": datetime.now(UTC).isoformat() + "Z",
-                "message": {"role": "assistant", "content": full_text},
+                "message": {"role": "assistant", "content": clean_text or full_text},
                 "done": True
             }).encode() + b"\n"
+
+            # Processa i tag in BACKGROUND per effetti collaterali (MEMORY, SCHEDULE, SSH, ecc.)
+            # Non blocca la risposta — il client ha già ricevuto done=true.
+            if full_text:
+                try:
+                    bg_task = asyncio.create_task(
+                        process_response_tags(full_text, user_id=current_user_id)
+                    )
+                    state.background_tasks.add(bg_task)
+                    bg_task.add_done_callback(state.background_tasks.discard)
+                except Exception as e:
+                    logger.warning(f"⚠️ Background tag processing error: {e}")
 
         return StreamingResponse(stream_gen(), media_type="application/x-ndjson")
 
@@ -886,19 +890,20 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
         
         content = extract_content(response)
         
-        # Processa i tag PRIMA di salvare in cache, per non memorizzare tag non processati
-        try:
-            cleaned = await asyncio.wait_for(
-                process_response_tags(content, user_id=current_user_id),
-                timeout=15.0
-            )
-        except asyncio.TimeoutError:
-            logger.warning("⏱️ process_response_tags timed out (15s) on /api/generate non-streaming")
-            cleaned = content
-        except Exception as e:
-            logger.warning(f"⚠️ process_response_tags error on /api/generate: {e}")
-            cleaned = content
-        asyncio.create_task(semantic_cache_store(prompt, cleaned))
+        # Strip tag veloce (regex, senza handler) per risposta immediata
+        clean_resp = strip_action_tags(content) if content else ""
+
+        # Processa i tag in BACKGROUND per effetti collaterali
+        if content:
+            try:
+                bg_task = asyncio.create_task(
+                    process_response_tags(content, user_id=current_user_id)
+                )
+                state.background_tasks.add(bg_task)
+                bg_task.add_done_callback(state.background_tasks.discard)
+            except Exception as e:
+                logger.warning(f"⚠️ Background tag processing error: {e}")
+        asyncio.create_task(semantic_cache_store(prompt, content))
         
         # Salva prompt utente in memoria (endpoint generate non usa build_omniscient_prompt)
         asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
@@ -906,7 +911,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
         return JSONResponse(status_code=200, content={
             "model": body["model"],
             "created_at": datetime.now(UTC).isoformat() + "Z",
-            "response": cleaned,
+            "response": clean_resp or content,
             "done": True
         })
     else:
@@ -937,31 +942,30 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
 
             final_content = "".join(full_resp)
 
-            # Salva prompt utente + processa tag in background
+            # Salva prompt utente in background
             asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
-            cleaned = final_content
-            if final_content:
-                try:
-                    cleaned = await asyncio.wait_for(
-                        process_response_tags(final_content, user_id=current_user_id),
-                        timeout=15.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning("⏱️ process_response_tags timed out (15s) on /api/generate stream")
-                    cleaned = final_content
-                except Exception as e:
-                    logger.warning(f"⚠️ process_response_tags error on /api/generate stream: {e}")
-                    cleaned = final_content
-                if not cleaned:
-                    cleaned = final_content  # fallback: mantieni originale se la pulizia svuota
-                asyncio.create_task(semantic_cache_store(prompt, cleaned))
+
+            # Strip tag veloce (regex, senza handler) per risposta immediata
+            clean_resp = strip_action_tags(final_content) if final_content else ""
 
             yield json.dumps({
                 "model": body["model"],
                 "created_at": datetime.now(UTC).isoformat() + "Z",
-                "response": cleaned,
+                "response": clean_resp or final_content,
                 "done": True
             }).encode() + b"\n"
+
+            # Processa i tag in BACKGROUND per effetti collaterali (MEMORY, SCHEDULE, SSH, ecc.)
+            if final_content:
+                try:
+                    bg_task = asyncio.create_task(
+                        process_response_tags(final_content, user_id=current_user_id)
+                    )
+                    state.background_tasks.add(bg_task)
+                    bg_task.add_done_callback(state.background_tasks.discard)
+                except Exception as e:
+                    logger.warning(f"⚠️ Background tag processing error: {e}")
+                asyncio.create_task(semantic_cache_store(prompt, final_content))
 
         return StreamingResponse(stream_gen(), media_type="application/x-ndjson")
 
