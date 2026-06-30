@@ -587,6 +587,161 @@ def strip_action_tags(text: str) -> str:
     return _STRIP_ALL_RE.sub("", text)
 
 
+class TagSafeStream:
+    """
+    Stream-safe action tag stripper — previene la fuga di tag XML incompleti
+    quando il LLM genera token uno alla volta.
+
+    Il problema: strip_action_tags() usa una regex che matcha solo tag COMPLETI
+    (<TAG>...</TAG>). Nello streaming, il tag è quasi sempre spalmato su più chunk:
+    ``<NOTIFY_ONCE>`` in un chunk e ``</NOTIFY_ONCE>`` in un altro. La regex non
+    matcha mai, e i frammenti di tag grezzi arrivano al client.
+
+    Soluzione: mantiene uno stato ``_in_tag`` attraverso i chunk. Quando rileva
+    l'apertura di un tag action noto (es. <NOTIFY_ONCE), trattiene TUTTO in un
+    buffer fino a quando non arriva il tag di chiusura. Solo il contenuto che NON
+    fa parte di tag viene yieldato.
+
+    Uso:
+        safe = TagSafeStream()
+        for chunk in stream_dal_llm:
+            safe_chunk = safe.process(chunk)
+            if safe_chunk:
+                yield safe_chunk
+        finale = safe.flush()
+        if finale:
+            yield finale
+    """
+
+    def __init__(self):
+        self._buffer = ""
+        # Stato per tag con coppia apertura/chiusura: in attesa di </TAG>
+        self._in_tag: bool = False
+        self._tag_name: Optional[str] = None
+        # Stato per tag auto-chiudenti: in attesa di /> o >
+        self._sc_pending: bool = False
+        self._sc_name: Optional[str] = None
+        self._sc_pattern: Optional[re.Pattern] = None
+
+        # Pre-costruisce strutture di lookup (una volta sola)
+        self._openings: list[tuple[str, str, bool]] = []  # (prefix_upper, name, is_self_closing)
+        self._closings: dict[str, str] = {}               # name -> </TAG>_upper
+        self._sc_patterns: dict[str, re.Pattern] = {}     # name -> regex
+
+        for name, td in _TAG_REGISTRY.items():
+            if td.visibility in ("hidden", "action"):
+                self._openings.append((f"<{name}".upper(), name, td.is_self_closing))
+                if td.is_self_closing:
+                    self._sc_patterns[name] = re.compile(rf"<{name}\s*/?\s*>", re.IGNORECASE)
+                else:
+                    self._closings[name] = f"</{name}>".upper()
+
+    def process(self, chunk: str) -> str:
+        """Processa un chunk dello stream, restituisce solo testo safe (senza tag)."""
+        self._buffer += chunk
+        return self._drain()
+
+    def flush(self) -> str:
+        """Svuota il buffer residuo (solo contenuto NON dentro un tag)."""
+        if not self._in_tag and not self._sc_pending and self._buffer:
+            result = self._buffer
+            self._buffer = ""
+            return result
+        return ""
+
+    # ── helper interno ──
+
+    def _drain(self) -> str:
+        """Cuore dello state machine: processa il buffer finché possibile."""
+        output: list[str] = []
+
+        while self._buffer:
+            # ── Caso 1: stiamo aspettando la chiusura di un tag normale ──
+            if self._in_tag:
+                closing = self._closings.get(self._tag_name or "")
+                if closing:
+                    idx = self._buffer.upper().find(closing)
+                    if idx >= 0:
+                        end = idx + len(closing)
+                        self._buffer = self._buffer[end:]
+                        self._in_tag = False
+                        self._tag_name = None
+                        continue  # Rivela il buffer per altri tag
+                break  # Non ancora arrivato </TAG>
+
+            # ── Caso 2: stiamo aspettando la chiusura di un tag auto-chiudente ──
+            if self._sc_pending:
+                pat = self._sc_pattern
+                if pat:
+                    m = pat.match(self._buffer)
+                    if m:
+                        self._buffer = self._buffer[m.end():]
+                        self._sc_pending = False
+                        self._sc_name = None
+                        self._sc_pattern = None
+                        continue
+                break  # Non ancora completo
+
+            # ── Caso 3: non dentro un tag, cerca la prossima apertura ──
+            buf_upper = self._buffer.upper()
+            best_pos: Optional[int] = None
+            best_name: Optional[str] = None
+            best_sc = False
+
+            for prefix, name, is_sc in self._openings:
+                pos = buf_upper.find(prefix)
+                if pos >= 0 and (best_pos is None or pos < best_pos):
+                    best_pos = pos
+                    best_name = name
+                    best_sc = is_sc
+
+            if best_pos is None:
+                # Nessun tag trovato — yielda tutto
+                output.append(self._buffer)
+                self._buffer = ""
+            else:
+                # Testo safe prima del tag
+                if best_pos > 0:
+                    output.append(self._buffer[:best_pos])
+
+                # Taglia via il safe prefix, tieni il tag in buffer
+                self._buffer = self._buffer[best_pos:]
+
+                if best_sc:
+                    pat = self._sc_patterns.get(best_name or "")
+                    if pat:
+                        m = pat.match(self._buffer)
+                        if m:
+                            # Tag auto-chiudente completo — stripalo
+                            self._buffer = self._buffer[m.end():]
+                            continue
+                    # Deve aspettare altro contenuto
+                    self._sc_pending = True
+                    self._sc_name = best_name
+                    self._sc_pattern = pat
+                    break
+                else:
+                    closing = self._closings.get(best_name or "")
+                    if closing:
+                        idx = self._buffer.upper().find(closing)
+                        if idx >= 0:
+                            # Tag completo in un colpo solo — stripalo
+                            end = idx + len(closing)
+                            self._buffer = self._buffer[end:]
+                            continue
+                    # Deve aspettare </TAG>
+                    self._in_tag = True
+                    self._tag_name = best_name
+                    break
+
+        return "".join(output)
+
+
+# ======================================================================
+# Core tag processing
+# ======================================================================
+
+
 async def process_all_tags(
     text: str,
     context: Optional[TagContext] = None,
