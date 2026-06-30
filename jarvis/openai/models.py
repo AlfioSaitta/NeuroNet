@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
-from config import OLLAMA_MODEL, LLAMA_MODEL_PATH, LLAMA_EMBED_MODEL_PATH
+from config import MODEL_ID, LLAMA_MODEL_PATH, LLAMA_EMBED_MODEL_PATH
 
 router = APIRouter()
 
@@ -112,7 +112,7 @@ async def openai_models():
     models = []
 
     # Primary chat model
-    models.append(_model_entry(OLLAMA_MODEL, "jarvis"))
+    models.append(_model_entry(MODEL_ID, "jarvis"))
 
     # Embedding model (infer name from path)
     embed_name = os.path.splitext(os.path.basename(LLAMA_EMBED_MODEL_PATH))[0]
@@ -131,7 +131,7 @@ async def openai_models():
         from config import LLAMA_MODEL_PATH as _lm_path
         if _lm_path and os.path.exists(_lm_path):
             basename = os.path.splitext(os.path.basename(_lm_path))[0]
-            if basename != OLLAMA_MODEL and basename != embed_name:
+            if basename != MODEL_ID and basename != embed_name:
                 models.append(_model_entry(basename, "jarvis"))
     except Exception:
         pass

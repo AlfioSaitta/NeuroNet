@@ -12,7 +12,7 @@ import pytest
 
 # ── Mock modules before import ───────────────────────────────────────────────
 config_mock = types.ModuleType("config")
-config_mock.OLLAMA_MODEL = "test-chat-model"
+config_mock.MODEL_ID = "test-chat-model"
 config_mock.LLAMA_MODEL_PATH = ""
 config_mock.LLAMA_EMBED_MODEL_PATH = ""
 config_mock.EXTERNAL_PROVIDERS = []

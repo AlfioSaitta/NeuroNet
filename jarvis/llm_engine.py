@@ -7,7 +7,7 @@ import logging
 import httpx
 from concurrent.futures import ThreadPoolExecutor
 
-from config import LLM_THINKING_MODE, MODEL_PROFILE, EXTERNAL_GPU_URL, OLLAMA_MODEL, LLM_MAX_TOKENS
+from config import LLM_THINKING_MODE, MODEL_PROFILE, EXTERNAL_GPU_URL, MODEL_ID, LLM_MAX_TOKENS
 
 try:
     from llama_cpp import Llama
@@ -131,9 +131,9 @@ class LlamaEngine:
             flash_attn = _cfg_flash
             logger.info(f"Caricamento Chat Model: {chat_model_path}")
             logger.info(f"⚙️ n_gpu_layers={n_gpu_layers} n_ctx={n_ctx} n_batch={n_batch} n_ubatch={n_ubatch} flash_attn={flash_attn}")
-            # chat_format: auto dal profilo modello, sovrascrivibile via LLM_CHAT_FORMAT
-            from config import MODEL_PROFILE as _init_profile, LLM_CHAT_FORMAT as _cfg_chat_format
-            _chat_format = _cfg_chat_format if _cfg_chat_format else _init_profile.chat_format
+            # chat_format: determinato automaticamente dai metadati GGUF in model_profiles.py
+            from config import MODEL_PROFILE as _init_profile
+            _chat_format = _init_profile.chat_format
             logger.info(f"⚙️ chat_format={_chat_format} (family={_init_profile.family})")
 
             self.chat_model = Llama(
@@ -258,7 +258,7 @@ class LlamaEngine:
         if EXTERNAL_GPU_URL:
             try:
                 payload = {
-                    "model": OLLAMA_MODEL,
+                    "model": MODEL_ID,
                     "messages": messages,
                     "stream": stream,
                     "options": {"skip_rag": True, **opts}
@@ -415,12 +415,17 @@ class LlamaEngine:
     def init_provider_router(self):
         """Inizializza il ProviderRouter per provider esterni (Gemini, ecc.)."""
         try:
-            from external_providers import init_router
+            from external_providers import init_router, ROUTE_STRATEGY_DISABLED
             from config import PROVIDER_CONFIG
+            strategy = PROVIDER_CONFIG.get("strategy", ROUTE_STRATEGY_DISABLED)
+            if strategy == ROUTE_STRATEGY_DISABLED:
+                logger.info("ProviderRouter: disabilitato da EXTERNAL_PROVIDER_STRATEGY=disabled")
+                self.provider_router = None
+                return None
             router = init_router(PROVIDER_CONFIG)
             router.set_local_engine(self)
             self.provider_router = router
-            logger.info(f"ProviderRouter: inizializzato (strategia={PROVIDER_CONFIG.get('strategy')})")
+            logger.info(f"ProviderRouter: inizializzato (strategia={strategy})")
             return router
         except Exception as e:
             logger.warning(f"ProviderRouter: inizializzazione fallita: {e}")

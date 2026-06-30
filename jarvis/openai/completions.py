@@ -6,7 +6,7 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from config import OLLAMA_MODEL
+from config import MODEL_ID
 from llm_engine import engine
 from .models import CompletionRequestOpenAI
 import state
@@ -58,7 +58,7 @@ async def openai_completions(payload: CompletionRequestOpenAI, request: Request)
             "id": f"cmpl-{uuid.uuid4().hex[:12]}",
             "object": "text_completion",
             "created": int(datetime.now(UTC).timestamp()),
-            "model": OLLAMA_MODEL,
+            "model": MODEL_ID,
             "choices": [
                 {
                     "text": echo_prefix + content,
@@ -85,7 +85,7 @@ async def openai_completions(payload: CompletionRequestOpenAI, request: Request)
                     content = delta.get("content", "")
                     finish_reason = chunk["choices"][0].get("finish_reason")
 
-                    yield f"data: {json.dumps({'id': response_id, 'object': 'text_completion', 'created': response_created, 'model': OLLAMA_MODEL, 'choices': [{'index': 0, 'text': content, 'logprobs': None, 'finish_reason': finish_reason}]})}\n\n"
+                    yield f"data: {json.dumps({'id': response_id, 'object': 'text_completion', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'text': content, 'logprobs': None, 'finish_reason': finish_reason}]})}\n\n"
 
                     if finish_reason:
                         break

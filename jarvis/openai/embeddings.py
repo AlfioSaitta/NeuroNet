@@ -5,7 +5,7 @@ import struct
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from config import OLLAMA_MODEL
+from config import MODEL_ID
 from llm_engine import engine
 from .models import EmbeddingRequestOpenAI
 
@@ -49,7 +49,7 @@ async def openai_embeddings(payload: EmbeddingRequestOpenAI, request: Request):
     return {
         "object": "list",
         "data": embeddings_data,
-        "model": body.get("model", OLLAMA_MODEL),
+        "model": body.get("model", MODEL_ID),
         "usage": {
             "prompt_tokens": total_tokens or len(data_list),
             "total_tokens": total_tokens or len(data_list)
