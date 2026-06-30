@@ -223,6 +223,16 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                     # Usa TagSafeStream per gestire tag spalmati su piu' chunk
                     cleaned_content = safe_stream.process(content) if content else ""
 
+                    # Quando arriva finish_reason, rilascia eventuale buffer safe
+                    # che TagSafeStream ha trattenuto per sicurezza anti-frammentazione
+                    if finish_reason:
+                        final_flush = safe_stream.flush()
+                        if final_flush:
+                            if cleaned_content:
+                                cleaned_content += final_flush
+                            else:
+                                cleaned_content = final_flush
+
                     if not role_sent:
                         role_sent = True
                         yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"

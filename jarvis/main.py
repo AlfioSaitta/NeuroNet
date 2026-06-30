@@ -797,6 +797,11 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                     }
                     yield json.dumps(ollama_chunk).encode() + b"\n"
 
+            # Rilascia eventuale buffer safe (TagSafeStream anti-frammentazione)
+            final_flush = safe_stream.flush()
+            if final_flush:
+                full_chunks.append(final_flush)
+
             # Processa TUTTI i tag dalla risposta completa (MEMORY, SCHEDULE, SSH, ecc.)
             full_text = "".join(full_chunks)
             if full_text:
@@ -924,6 +929,11 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
                         "response": cleaned_content,
                         "done": False
                     }).encode() + b"\n"
+
+            # Rilascia eventuale buffer safe (TagSafeStream anti-frammentazione)
+            final_flush = safe_stream.flush()
+            if final_flush:
+                full_resp.append(final_flush)
 
             final_content = "".join(full_resp)
 

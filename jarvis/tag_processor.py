@@ -696,7 +696,37 @@ class TagSafeStream:
                     best_sc = is_sc
 
             if best_pos is None:
-                # Nessun tag trovato — yielda tutto
+                # Nessun tag noto riconosciuto. Potrebbe esserci un < isolato
+                # che forma un tag nel prossimo chunk (es. "<" + "CONFIDENCE>").
+                # Senza questa protezione i tag frammentati su piu' chunk leakano.
+                lt_idx = self._buffer.rfind("<")
+                if lt_idx >= 0:
+                    after = self._buffer[lt_idx + 1:]  # ciò che segue <
+                    might_be_tag = False
+                    if not after or not after.strip():
+                        # < in fondo al buffer o < seguito solo da whitespace
+                        might_be_tag = True
+                    elif after[0].isalpha():
+                        # < seguito da lettera — potrebbe essere nome tag
+                        # Estrai solo il nome del tag (caratteri alfabetici fino a non-alpha)
+                        tag_prefix = ""
+                        for c in after.strip():
+                            if c.isalpha() or c == '_':
+                                tag_prefix += c
+                            else:
+                                break
+                        might_be_tag = any(
+                            name.startswith(tag_prefix.upper()) for name in self._closings.keys()
+                        ) if tag_prefix else False
+                    
+                    if might_be_tag:
+                        # Potenziale inizio tag — bufferizza dalla < in poi
+                        if lt_idx > 0:
+                            output.append(self._buffer[:lt_idx])
+                        self._buffer = self._buffer[lt_idx:]
+                        break
+                
+                # Nessun < sospetto — sicuramente safe
                 output.append(self._buffer)
                 self._buffer = ""
             else:
