@@ -10,8 +10,121 @@ Rileva la famiglia del modello caricato dal nome del GGUF o dai metadati GGUF e 
 
 import os
 import re
+import struct
 from dataclasses import dataclass, field
 from typing import Optional
+
+
+# ── GGUF binary metadata reader ──
+# Legge i metadati dal HEADER del GGUF prima di caricare il modello completo,
+# così possiamo determinare chat_format, famiglia, ecc. in fase di config.
+
+_GGUF_MAGIC = b'GGUF'
+_GGUF_TYPE_UINT8 = 0
+_GGUF_TYPE_INT8 = 1
+_GGUF_TYPE_UINT16 = 2
+_GGUF_TYPE_INT16 = 3
+_GGUF_TYPE_UINT32 = 4
+_GGUF_TYPE_INT32 = 5
+_GGUF_TYPE_FLOAT32 = 6
+_GGUF_TYPE_BOOL = 7
+_GGUF_TYPE_STRING = 8
+_GGUF_TYPE_ARRAY = 9
+_GGUF_TYPE_UINT64 = 10
+_GGUF_TYPE_INT64 = 11
+_GGUF_TYPE_FLOAT64 = 12
+
+
+def read_gguf_metadata(filepath: str) -> dict:
+    """
+    Legge i metadati KV da un file GGUF leggendo solo l'header (senza caricare il modello).
+
+    Formato GGUF v3+:
+      magic(4) | version(u32) | tensor_count(u64) | metadata_kv_count(u64)
+      → per ogni KV: key(string) | value_type(u32) | value(...)
+
+    Returns:
+        dict con chiavi tipo ``general.architecture``, ``general.name``, ecc.
+        Vuoto se il file non è un GGUF valido o non è leggibile.
+    """
+    result: dict = {}
+    try:
+        with open(filepath, 'rb') as f:
+            magic = f.read(4)
+            if magic != _GGUF_MAGIC:
+                return result
+
+            version = struct.unpack('<I', f.read(4))[0]
+            tensor_count = struct.unpack('<Q', f.read(8))[0]
+            kv_count = struct.unpack('<Q', f.read(8))[0]
+
+            for _ in range(kv_count):
+                # Key: length-prefixed string
+                key_len = struct.unpack('<Q', f.read(8))[0]
+                key = f.read(key_len).decode('utf-8', errors='replace')
+
+                # Value type
+                val_type = struct.unpack('<I', f.read(4))[0]
+
+                if val_type == _GGUF_TYPE_STRING:
+                    val_len = struct.unpack('<Q', f.read(8))[0]
+                    value = f.read(val_len).decode('utf-8', errors='replace')
+                    result[key] = value
+
+                elif val_type == _GGUF_TYPE_BOOL:
+                    result[key] = bool(struct.unpack('<?', f.read(1))[0])
+
+                elif val_type in (_GGUF_TYPE_UINT8, _GGUF_TYPE_INT8):
+                    fmt = '<b' if val_type == _GGUF_TYPE_INT8 else '<B'
+                    result[key] = struct.unpack(fmt, f.read(1))[0]
+
+                elif val_type in (_GGUF_TYPE_UINT16, _GGUF_TYPE_INT16):
+                    fmt = '<h' if val_type == _GGUF_TYPE_INT16 else '<H'
+                    result[key] = struct.unpack(fmt, f.read(2))[0]
+
+                elif val_type in (_GGUF_TYPE_UINT32, _GGUF_TYPE_INT32):
+                    fmt = '<i' if val_type == _GGUF_TYPE_INT32 else '<I'
+                    result[key] = struct.unpack(fmt, f.read(4))[0]
+
+                elif val_type in (_GGUF_TYPE_UINT64, _GGUF_TYPE_INT64):
+                    fmt = '<q' if val_type == _GGUF_TYPE_INT64 else '<Q'
+                    result[key] = struct.unpack(fmt, f.read(8))[0]
+
+                elif val_type == _GGUF_TYPE_FLOAT32:
+                    result[key] = struct.unpack('<f', f.read(4))[0]
+
+                elif val_type == _GGUF_TYPE_FLOAT64:
+                    result[key] = struct.unpack('<d', f.read(8))[0]
+
+                elif val_type == _GGUF_TYPE_ARRAY:
+                    arr_type = struct.unpack('<I', f.read(4))[0]
+                    arr_len = struct.unpack('<Q', f.read(8))[0]
+                    arr = []
+                    for _ in range(arr_len):
+                        if arr_type == _GGUF_TYPE_STRING:
+                            s_len = struct.unpack('<Q', f.read(8))[0]
+                            arr.append(f.read(s_len).decode('utf-8', errors='replace'))
+                        elif arr_type == _GGUF_TYPE_BOOL:
+                            arr.append(bool(struct.unpack('<?', f.read(1))[0]))
+                        elif arr_type == _GGUF_TYPE_FLOAT32:
+                            arr.append(struct.unpack('<f', f.read(4))[0])
+                        elif arr_type == _GGUF_TYPE_FLOAT64:
+                            arr.append(struct.unpack('<d', f.read(8))[0])
+                        elif arr_type in (_GGUF_TYPE_UINT32, _GGUF_TYPE_INT32):
+                            fmt_arr = '<i' if arr_type == _GGUF_TYPE_INT32 else '<I'
+                            arr.append(struct.unpack(fmt_arr, f.read(4))[0])
+                        elif arr_type in (_GGUF_TYPE_UINT64, _GGUF_TYPE_INT64):
+                            fmt_arr = '<q' if arr_type == _GGUF_TYPE_INT64 else '<Q'
+                            arr.append(struct.unpack(fmt_arr, f.read(8))[0])
+                        else:
+                            pass  # skip unsupported array element types
+                    result[key] = arr
+
+                # else: skip unknown types
+    except Exception:
+        pass
+
+    return result
 
 
 @dataclass
@@ -58,6 +171,54 @@ def detect_model_family(model_path: Optional[str] = None) -> ModelProfile:
         re.search(r'[_-]uq[_-]', filename) or
         "unsloth" in filename
     )
+
+    # ── PRIORITÀ 1: rilevamento da metadati GGUF (header binario) ──
+    # Legge general.architecture direttamente dal file GGUF senza caricare
+    # il modello. Questo è più accurato del filename perché non dipende
+    # da convenzioni di naming.
+    _gguf_meta = read_gguf_metadata(model_path)
+    _arch = (_gguf_meta.get("general.architecture") or "").lower()
+    _name = _gguf_meta.get("general.name", "")
+
+    if _arch:
+        # Mappa architecture → famiglia (stessa mappa di detect_from_metadata)
+        _arch_map = [
+            ("qwen2.5", "qwen",  "qwen2.5", False),
+            ("qwen2",   "qwen",  "qwen2",   False),
+            ("qwen",    "qwen",  "qwen",    False),
+            ("gemma2",  "gemma", "gemma2",  True),
+            ("gemma",   "gemma", "gemma",   True),
+            ("llama",   "llama", "llama",   False),
+            ("mistral", "mistral","mistral", False),
+            ("mixtral", "mixtral","mixtral", False),
+            ("deepseek2","deepseek","deepseek2", True),
+            ("deepseek","deepseek","deepseek", True),
+            ("phi3",    "phi",   "phi3",    False),
+            ("phi",     "phi",   "phi",     False),
+            ("command", "command-r","command-r", False),
+            ("cohere",  "command-r","command-r", False),
+        ]
+        for _arch_key, _family, _variant, _thinking in _arch_map:
+            if _arch_key in _arch:
+                _d = _family_ctx_defaults(_family)
+                return ModelProfile(
+                    model_name=_name,
+                    family=_family,
+                    variant=_variant,
+                    chat_format=family_to_chat_format(_family, _variant),
+                    thinking_support=_thinking,
+                    unsloth_optimized=unsloth,
+                    default_ctx=_d.get("default_ctx", 16384),
+                    max_ctx=_d.get("max_ctx", 65536),
+                    default_temperature=_d.get("temperature", 0.7),
+                    default_top_p=_d.get("top_p", 0.9),
+                    default_repeat_penalty=_d.get("repeat_penalty", 1.1),
+                    description=_d.get("desc", f"{_family.capitalize()} — da metadati GGUF"),
+                )
+
+    # ── PRIORITÀ 2: fallback su rilevamento da filename ──
+    # Se il file non è GGUF (o l'architecture non è nella mappa),
+    # usa le euristiche tradizionali sul nome del file.
 
     if "qwq" in filename:
         return ModelProfile(
