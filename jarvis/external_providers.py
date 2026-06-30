@@ -14,6 +14,7 @@ logger = logging.getLogger("chameleon.providers")
 # ==============================================================================
 # STRATEGIE DI ROUTING
 # ==============================================================================
+ROUTE_STRATEGY_DISABLED = "disabled"          # Provider esterni completamente disattivati
 ROUTE_STRATEGY_FALLBACK = "fallback_only"    # Cloud solo se locale fallisce
 ROUTE_STRATEGY_SELECTIVE = "selective"       # Routing per tipo richiesta
 ROUTE_STRATEGY_PARALLEL = "parallel"         # Entrambi, sceglie migliore
@@ -234,6 +235,9 @@ class ProviderRouter:
             if provider:
                 return await provider.generate_chat(messages, options, stream)
             return {"error": f"Provider '{preferred_provider}' non trovato"}
+
+        if self.strategy == ROUTE_STRATEGY_DISABLED:
+            return {"error": "Provider esterni disabilitati (EXTERNAL_PROVIDER_STRATEGY=disabled)"}
 
         if self.strategy == ROUTE_STRATEGY_FALLBACK:
             return await self._route_fallback(messages, options, stream)
