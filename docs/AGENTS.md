@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-06-29 (Refactor OpenAI in pacchetto + DB race fix)
+> **Data ultimo aggiornamento:** 2026-06-30 (TagSafeStream + documentazione completa tag XML)
 
 ---
 
@@ -171,6 +171,7 @@ Master jarvis:8000
 | `openai_router.py` | Router legacy endpoint OpenAI (`/v1/*`) in main.py. | `config`, `llm_engine`, `prompt_builder` |
 | `rag_reranker.py` | Reranker modulare: Qwen3-Reranker (transformers, cpu fp16) + fallback FlashRank ONNX. | `config` |
 | `rag_cache.py` | Cache semantica Qdrant + Web Knowledge persistence (salva/ricerca conoscenza web). | `state`, `config` |
+| `tag_processor.py` | Registro e processing 21 tag XML d'azione: `TagSafeStream` (stream-safe), `process_all_tags()`, `strip_action_tags()`, `register_tag()`. | `re`, `memory`, `cron_agent`, `task_manager` |
 | `telegram_format.py` | Utility formattazione Telegram MarkdownV2 e Markdown legacy. | `re` |
 | `dashboard_template.py` | Template HTML/CSS/JS della dashboard web (Chart.js, Sigma.js, stile cyberpunk). | — |
 
@@ -246,8 +247,8 @@ LLM_TOP_P=0.9
 # Thinking mode (solo Gemma 4): inietta <|think|> nel system prompt
 LLM_THINKING_MODE=false
 
-# Etichetta testuale nel payload HTTP di offloading (NON avvia Ollama)
-OLLAMA_MODEL=nome-identificativo-worker
+# MODEL_ID: generato automaticamente dai metadati GGUF (general.name) in model_profiles.py.
+# Rimosso: OLLAMA_MODEL — ora ogni nodo produce il proprio MODEL_ID dal GGUF caricato.
 ```
 
 ### Parametri Interni LLM (hardcoded in llm_engine.py)
@@ -560,6 +561,8 @@ Assistants API (beta):
 - `POST /v1/assistants` — Crea Assistente
 - `GET /v1/assistants` — Lista Assistenti
 - `GET /v1/assistants/{id}` — Dettaglio Assistente
+- `POST /v1/assistants/{id}` — Modifica Assistente (partial update)
+- `DELETE /v1/assistants/{id}` — Cancella Assistente
 - `POST /v1/threads` — Crea Thread
 - `GET /v1/threads/{id}` — Dettaglio Thread
 - `POST /v1/threads/{id}/runs` — Esegui Run su Thread
@@ -579,6 +582,38 @@ Lo schema dei tool è definito in `agent_tools.py`. Per aggiungere un nuovo tool
 ### Skills Dinamiche
 
 Le skill in `jarvis/skills/` vengono caricate automaticamente a runtime da `skills_manager.py`. Ogni skill è un file Python con una classe che implementa l'interfaccia skill.
+
+### Tag XML d'Azione (21 tag registrati)
+
+I tag XML vengono intercettati dalla risposta del LLM e processati da `tag_processor.py` prima che il testo pulito arrivi all'utente. La visibilità determina se il tag e il suo contenuto vengono rimossi (`hidden`/`action`) o lasciati nel testo (`kept`). I tag `action` generano feedback visibile all'utente.
+
+| Tag | Formato | Visibilità | Self-Closing | Descrizione |
+|---|---|---|---|---|
+| `MEMORY` | `<MEMORY>testo</MEMORY>` | hidden | ❌ | Salva un fatto in memoria episodica (Mem0) |
+| `SCHEDULE` | `<SCHEDULE>cron_expr\|promemoria</SCHEDULE>` | action | ❌ | Crea un promemoria schedulato (cron) |
+| `NOTIFY_ONCE` | `<NOTIFY_ONCE>YYYY-MM-DD HH:MM\|testo</NOTIFY_ONCE>` | action | ❌ | Promemoria singolo a data fissa |
+| `NOTIFYONCE` | `<NOTIFYONCE>...</NOTIFYONCE>` | action | ❌ | Alias per NOTIFY_ONCE (senza underscore) |
+| `NOTIFY_IN` | `<NOTIFY_IN>minuti\|testo</NOTIFY_IN>` | action | ❌ | Timer relativo tra N minuti |
+| `NOTIFYIN` | `<NOTIFYIN>...</NOTIFYIN>` | action | ❌ | Alias per NOTIFY_IN (senza underscore) |
+| `SSH` | `<SSH>server\|comando</SSH>` | action | ❌ | Esecuzione comando SSH su server remoto |
+| `TODO_ADD` | `<TODO_ADD>desc\|prio\|scad\|tipo</TODO_ADD>` | action | ❌ | Aggiunge un task alla todo list |
+| `TODO_DONE` | `<TODO_DONE>id</TODO_DONE>` | action | ❌ | Segna un task come completato |
+| `WEB` | `<WEB>query</WEB>` | action | ❌ | Esegue una ricerca web e include i risultati |
+| `FILE` | `<FILE>path/file</FILE>` | action | ❌ | Legge e include contenuto di un file |
+| `EMOTION` | `<EMOTION>stato</EMOTION>` | hidden | ❌ | Imposta stato emotivo per l'interfaccia UI |
+| `THINK_DEEP` | `<THINK_DEEP/>` | hidden | ✅ | Attiva modalità ragionamento approfondito |
+| `CACHE_CLEAR` | `<CACHE_CLEAR/>` | action | ✅ | Resetta la cache semantica |
+| `CONFIDENCE` | `<CONFIDENCE>0.95</CONFIDENCE>` | hidden | ❌ | Autovalutazione confidenza della risposta |
+| `ASK` | `<ASK>domanda</ASK>` | action | ❌ | Il LLM fa una domanda all'utente (reverse interaction) |
+| `RAG` | `<RAG>project_name</RAG>` | action | ❌ | Forza RAG su un progetto specifico |
+| `SUMMARY` | `<SUMMARY target="user_id">testo</SUMMARY>` | action | ❌ | Salva un riepilogo nella memoria di un altro utente |
+| `BRANCH` | `<BRANCH>project\|branch</BRANCH>` | action | ❌ | Cambia branch git in un progetto |
+| `COMMIT` | `<COMMIT>message</COMMIT>` | action | ❌ | Crea un commit git con i cambiamenti locali |
+| `EXEC` | `<EXEC>timeout\|comando</EXEC>` | action | ❌ | Esegue un comando shell readonly (whitelist) |
+
+**Streaming:** `TagSafeStream` in `tag_processor.py` gestisce i tag che si estendono su più chunk tramite uno state machine `_in_tag`/`_sc_pending`. Ogni chunk viene passato a `TagSafeStream.process()`, e solo il contenuto safe viene yieldato al client. A fine stream, `process_response_tags()` elabora il testo completo (con tag) per effetti collaterali.
+
+**Estendibilità:** Nuovi tag registrabili a runtime via `register_tag(TagDef)`.
 
 ---
 

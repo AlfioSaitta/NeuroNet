@@ -19,7 +19,7 @@ L'inferenza avviene **interamente in-process** tramite `llama-cpp-python` su mod
 | **VPS Master** | ⏳ Da deployare | Piano completo pronto per deploy |
 | **Container CUDA** | ✅ **FUNZIONANTE** | CUDA 13.0 overlay su base 12.2 per driver NVIDIA 580.159.03 |
 | **GPU Inferenza** | ✅ **OK** | Chat: ~1036MiB (25%), Embed: ~400MiB (+10%), 86°C peak |
-| **OpenAI API** | ✅ **COMPLETA** | 15+ endpoint `/v1/*` tra cui Assistants/Threads/Runs, DB race fix |
+| **OpenAI API** | ✅ **COMPLETA** | 25 endpoint `/v1/*` — Chat, Audio, Assistants/Threads/Runs, DB race fix |
 | **Embedding** | ✅ **Qwen3-Embedding-0.6B** | 768d MRL, Q8_0, ~396MiB VRAM |
 | **Reranker** | ✅ **Qwen3-Reranker-0.6B** | CPU fp16, multilingua, MTEB-Code 73.42 |
 | **Memoria Mem0** | ✅ **ATTIVA** | Qdrant vector store, spaCy entity extraction |
@@ -400,14 +400,35 @@ Messaggio utente
 └─────────────────────┘
 ```
 
-**Tag d'Azione nella Risposta LLM:**
-- `<MEMORY>testo</MEMORY>` — Salva in Mem0
-- `<NOTIFY_ONCE>YYYY-MM-DD HH:MM|promemoria</NOTIFY_ONCE>` — Reminder singolo
-- `<NOTIFY_IN>minuti|promemoria</NOTIFY_IN>` — Timer relativo
-- `<SCHEDULE>cron_expr|promemoria</SCHEDULE>` — Task ricorrente
-- `<SSH>server|comando</SSH>` — Esecuzione remota SSH
-- `<TODO_ADD>desc|prio|scadenza|tipo</TODO_ADD>` — Nuovo task
-- `<TODO_DONE>id</TODO_DONE>` — Task completato
+**Tag d'Azione nella Risposta LLM — Registro Completo (21 tag):**
+
+I tag XML vengono intercettati dalla risposta del LLM e processati da `tag_processor.py` prima che il testo pulito arrivi all'utente. La visibilità determina se il tag e il suo contenuto vengono rimossi (`hidden`/`action`) o lasciati nel testo (`kept`). I tag `action` generano feedback visibile all'utente.
+
+| Tag | Formato | Visibilità | Self-Closing | Descrizione |
+|---|---|---|---|---|
+| `MEMORY` | `<MEMORY>testo</MEMORY>` | hidden | ❌ | Salva un fatto in memoria episodica (Mem0) |
+| `SCHEDULE` | `<SCHEDULE>cron_expr\|promemoria</SCHEDULE>` | action | ❌ | Crea un promemoria schedulato (cron) |
+| `NOTIFY_ONCE` | `<NOTIFY_ONCE>YYYY-MM-DD HH:MM\|testo</NOTIFY_ONCE>` | action | ❌ | Promemoria singolo a data fissa |
+| `NOTIFYONCE` | `<NOTIFYONCE>...</NOTIFYONCE>` | action | ❌ | Alias per NOTIFY_ONCE (senza underscore) |
+| `NOTIFY_IN` | `<NOTIFY_IN>minuti\|testo</NOTIFY_IN>` | action | ❌ | Timer relativo tra N minuti |
+| `NOTIFYIN` | `<NOTIFYIN>...</NOTIFYIN>` | action | ❌ | Alias per NOTIFY_IN (senza underscore) |
+| `SSH` | `<SSH>server\|comando</SSH>` | action | ❌ | Esecuzione comando SSH su server remoto |
+| `TODO_ADD` | `<TODO_ADD>desc\|prio\|scad\|tipo</TODO_ADD>` | action | ❌ | Aggiunge un task alla todo list |
+| `TODO_DONE` | `<TODO_DONE>id</TODO_DONE>` | action | ❌ | Segna un task come completato |
+| `WEB` | `<WEB>query</WEB>` | action | ❌ | Esegue una ricerca web e include i risultati |
+| `FILE` | `<FILE>path/file</FILE>` | action | ❌ | Legge e include contenuto di un file |
+| `EMOTION` | `<EMOTION>stato</EMOTION>` | hidden | ❌ | Imposta stato emotivo per l'interfaccia UI |
+| `THINK_DEEP` | `<THINK_DEEP/>` | hidden | ✅ | Attiva modalità ragionamento approfondito |
+| `CACHE_CLEAR` | `<CACHE_CLEAR/>` | action | ✅ | Resetta la cache semantica |
+| `CONFIDENCE` | `<CONFIDENCE>0.95</CONFIDENCE>` | hidden | ❌ | Autovalutazione confidenza della risposta |
+| `ASK` | `<ASK>domanda</ASK>` | action | ❌ | Il LLM fa una domanda all'utente (reverse interaction) |
+| `RAG` | `<RAG>project_name</RAG>` | action | ❌ | Forza RAG su un progetto specifico |
+| `SUMMARY` | `<SUMMARY target="user_id">testo</SUMMARY>` | action | ❌ | Salva un riepilogo nella memoria di un altro utente |
+| `BRANCH` | `<BRANCH>project\|branch</BRANCH>` | action | ❌ | Cambia branch git in un progetto |
+| `COMMIT` | `<COMMIT>message</COMMIT>` | action | ❌ | Crea un commit git con i cambiamenti locali |
+| `EXEC` | `<EXEC>timeout\|comando</EXEC>` | action | ❌ | Esegue un comando shell readonly (whitelist) |
+
+> **Nota Streaming:** Nello streaming, i tag che si estendono su più chunk vengono gestiti da `TagSafeStream` (stato `_in_tag`/`_sc_pending`), che trattiene il contenuto in buffer fino al completamento del tag. A fine stream, `process_response_tags()` elabora il testo completo (con tag) per gli effetti collaterali (memoria, scheduling, notifiche).
 
 ---
 
@@ -658,6 +679,12 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo 
 - Conferma Telegram per operazioni distruttive (timeout 5 min)
 - Integrazione SSH remota via `<SSH>` tag
 
+### Elaborazione Tag d'Azione XML
+- **21 tag XML** processati da `tag_processor.py` nella risposta del LLM: memoria (`<MEMORY>`), scheduling (`<SCHEDULE>`/`<NOTIFY_ONCE>`/`<NOTIFY_IN>`), esecuzione (`<SSH>`/`<EXEC>`), web (`<WEB>`), task (`<TODO_ADD>`/`<TODO_DONE>`), ragionamento (`<THINK_DEEP/>`), RAG (`<RAG>`), git (`<BRANCH>`/`<COMMIT>`), e altri
+- **TagSafeStream**: state machine anti-leak per streaming — impedisce la fuga di tag XML incompleti quando il LLM genera token uno alla volta, mantenendo lo stato `_in_tag`/`_sc_pending` tra chunk successivi
+- **process_response_tags()**: post-processo asincrono a fine stream che esegue gli handler dei tag (salvataggio memoria, scheduling notifiche, esecuzione comandi) sul testo completo con chiusura tag orfani
+- **Estendibilità**: nuovi tag registrabili a runtime via `register_tag(TagDef)`
+
 ### Endpoint API
 
 | Endpoint | Metodo | Funzione |
@@ -683,8 +710,11 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo 
 | `/v1/images/generations` | POST | Stub 400 (model not available) |
 | `/v1/images/edits` | POST | Stub 400 (model not available) |
 | `/v1/images/variations` | POST | Stub 400 (model not available) |
-| `/v1/assistants` | GET/POST | Lista/Crea Assistente |
+| `/v1/assistants` | GET | Lista Assistenti |
+| `/v1/assistants` | POST | Crea Assistente |
 | `/v1/assistants/{id}` | GET | Dettaglio Assistente |
+| `/v1/assistants/{id}` | POST | Modifica Assistente |
+| `/v1/assistants/{id}` | DELETE | Cancella Assistente |
 | `/v1/threads` | POST | Crea Thread |
 | `/v1/threads/{id}` | GET | Dettaglio Thread |
 | `/v1/threads/{id}/runs` | POST | Esegui Run su Thread |
@@ -795,6 +825,12 @@ tar -cvzf backup_ai_$(date +%Y%m%d).tar.gz ./data .env
 ---
 
 ## 📝 Changelog
+
+### v9.5.0 (2026-06-30) — TagSafeStream: fix leak tag XML nello streaming + documentazione completa
+- **TagSafeStream introdotto**: nuova classe state machine in `tag_processor.py` che previene la fuga di tag XML incompleti (`<NOTIFY_ONCE>`, `<CONFIDENCE>`, ecc.) quando il LLM genera token uno alla volta. Mantiene stato `_in_tag`/`_sc_pending` tra chunk successivi e yielda solo contenuto safe
+- **3 endpoint streaming aggiornati**: `openai_router.py`, `openai/chat.py`, `main.py` (entrambi `/api/chat` e `/api/generate`) ora usano `TagSafeStream.process()` invece di `strip_action_tags()` per ogni chunk
+- **Side effects preservati**: `process_response_tags(full_text)` a fine stream continua a ricevere il testo completo con tag per salvataggio memoria, scheduling notifiche, esecuzione comandi
+- **Documentazione espansa**: README.md e AGENTS.md aggiornati con tabella completa dei 21 tag XML (formato, visibilità, self-closing, descrizione), lista endpoint OpenAI completa (25 endpoint Assistants/Threads/Runs), e nota tecnica sul funzionamento dello streaming
 
 ### v9.4.0 (2026-06-29) — Refactor OpenAI in sottopacchetto + DB race fix
 - **Refactor OpenAI:** `openai_router.py` → pacchetto `openai/` con 17 moduli. Lazy import tramite `init_openai_routes()`, init ritardato nell'lifespan
