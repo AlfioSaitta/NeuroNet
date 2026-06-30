@@ -230,18 +230,38 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         except Exception as e:
             logger.warning(f"Errore memory add in prompt builder: {e}")
 
-        # Recupera memorie — SOLO se c'è un progetto attivo, altrimenti si salta
-        # per evitare di iniettare ricordi di progetti sbagliati in conversazioni generiche.
-        if active_project:
-            try:
-                loop = asyncio.get_running_loop()
-                mem_filters = {"user_id": current_user_id, "project": active_project}
-                _mem_limit = _user_override_mem_count if _user_override_mem_count > 0 else 5
-                search_func = partial(state.memory.search, query=clean_msg, filters=mem_filters, limit=_mem_limit)
-                mem_res = await loop.run_in_executor(state.mem0_executor, search_func)
-                mem_ctx = extract_memories(mem_res)
-            except Exception as e:
-                logger.warning(f"Errore memory search in prompt builder: {e}")
+        # Recupera memorie — SEMPRE (memorie personali) + progetto se attivo
+        # Le memorie personali (senza progetto) vengono cercate sempre in modo che
+        # informazioni come "il mio nome è Mario" siano recuperabili anche in
+        # conversazioni generiche dove non c'è un progetto attivo.
+        try:
+            loop = asyncio.get_running_loop()
+            _mem_limit = _user_override_mem_count if _user_override_mem_count > 0 else 5
+            memory_results = []
+
+            # Tier 1: memorie generali (senza filtro progetto) — sempre
+            general_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id}, limit=_mem_limit)
+            general_res = await loop.run_in_executor(state.mem0_executor, general_search)
+            if general_res:
+                memory_results.append(general_res)
+
+            # Tier 2: memorie specifiche del progetto (solo se progetto attivo)
+            if active_project:
+                project_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id, "project": active_project}, limit=_mem_limit)
+                project_res = await loop.run_in_executor(state.mem0_executor, project_search)
+                if project_res:
+                    memory_results.append(project_res)
+
+            # Unisce i risultati, estraendo solo testo leggibile
+            all_memories = []
+            if isinstance(memory_results, list):
+                for r in memory_results:
+                    extracted = extract_memories(r)
+                    if extracted:
+                        all_memories.append(extracted)
+            mem_ctx = "\n".join(all_memories) if all_memories else ""
+        except Exception as e:
+            logger.warning(f"Errore memory search in prompt builder: {e}")
 
     if latest_msg.startswith("/web "):
         rag_ctx = ""
