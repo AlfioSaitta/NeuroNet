@@ -4,6 +4,7 @@ Configurazione centralizzata — Costanti, variabili d'ambiente, hyperparameters
 
 import os
 import logging
+import re
 
 # ==============================================================================
 # LOGGING
@@ -66,9 +67,8 @@ logging.getLogger("uvicorn.access").addFilter(UvicornAccessFilter())
 logging.getLogger("telegram.ext.Updater").addFilter(TelegramNetworkErrorFilter())
 
 # ==============================================================================
-# URL DEI SERVIZI E OLLAMA
+# URL DEI SERVIZI
 # ==============================================================================
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:3b-instruct-q5_K_M")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "local")
 SEARXNG_HOST = os.getenv("SEARXNG_HOST", "http://searxng:8080").rstrip('/')
 CRAWL4AI_HOST = os.getenv("CRAWL4AI_HOST", "http://crawl4ai:11235").rstrip('/')
@@ -101,7 +101,7 @@ LLM_NUM_CTX = _llm_num_ctx
 LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "128"))
 LLM_UBATCH_SIZE = int(os.getenv("LLM_UBATCH_SIZE", "128"))
 LLM_FLASH_ATTN = os.getenv("LLM_FLASH_ATTN", "false").lower() == "true"
-LLM_CHAT_FORMAT = os.getenv("LLM_CHAT_FORMAT") or None
+# chat_format è determinato automaticamente dai metadati GGUF in model_profiles.py
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 # Raw env var flag per runtime checks (es. metadata override)
 LLM_THINKING_MODE_RAW = os.getenv("LLM_THINKING_MODE", "")
@@ -122,6 +122,16 @@ if _THINKING_ENV:
     LLM_THINKING_MODE: bool = _THINKING_ENV.lower() == "true"
 else:
     LLM_THINKING_MODE: bool = MODEL_PROFILE.thinking_support
+
+# MODEL_ID: identificativo univoco del modello per risposte API (OpenAI, legacy e Mem0).
+# Derivato dal nome reale estratto dai metadati GGUF (general.name).
+_model_name_raw = MODEL_PROFILE.model_name or ""
+if _model_name_raw:
+    _model_slug = re.sub(r'[^a-z0-9._-]+', '-', _model_name_raw.lower()).strip('-')
+    MODEL_ID = f"{MODEL_PROFILE.family}/{_model_slug}"
+else:
+    MODEL_ID = MODEL_PROFILE.family  # fallback: solo famiglia
+logger.info(f"🏷️ MODEL_ID={MODEL_ID}")
 
 # ==============================================================================
 # PERCORSI CENTRALIZZATI
@@ -257,7 +267,7 @@ MEM0_CONFIG = {
     },
     "llm": {
         "provider": "ollama",
-        "config": {"model": OLLAMA_MODEL, "temperature": 0.0, "ollama_base_url": "http://127.0.0.1:8000"}
+        "config": {"model": MODEL_ID, "temperature": 0.0, "ollama_base_url": "http://127.0.0.1:8000"}
     },
     "embedder": {
         "provider": "ollama",
@@ -354,7 +364,7 @@ except ImportError:
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro-exp-03-25")
-EXTERNAL_PROVIDER_STRATEGY = os.getenv("EXTERNAL_PROVIDER_STRATEGY", "fallback_only")
+EXTERNAL_PROVIDER_STRATEGY = os.getenv("EXTERNAL_PROVIDER_STRATEGY", "disabled")
 
 PROVIDER_CONFIG = {
     "strategy": EXTERNAL_PROVIDER_STRATEGY,
