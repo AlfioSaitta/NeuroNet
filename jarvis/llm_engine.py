@@ -93,9 +93,9 @@ STRICT RULES - YOUR OUTPUT MUST BE SHORTER THAN THE INPUT:
 - Output ONLY the compressed result. No explanations, no greetings, no meta-text."""
 
 CAVEMAN_RESPONSE_INSTRUCTION = (
-    "\n\nRespond in pure Caveman style: no preambles, no explanations, no greetings. "
-    "Go directly to code fixes, bullet-point facts, or direct answers. "
-    "If writing code: output ONLY the code block. If answering: 1-3 bullet facts max."
+    "\n\nRespond concisely and naturally. No templates, no bullet-point lists, "
+    "no greetings. Direct answers in plain prose. "
+    "If writing code: output ONLY the code block."
 )
 
 class PriorityLockContextManager:
