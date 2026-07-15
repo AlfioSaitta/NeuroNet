@@ -174,6 +174,9 @@ Master jarvis:8000
 | `tag_processor.py` | Registro e processing 21 tag XML d'azione: `TagSafeStream` (stream-safe), `process_all_tags()`, `strip_action_tags()`, `register_tag()`. | `re`, `memory`, `cron_agent`, `task_manager` |
 | `telegram_format.py` | Utility formattazione Telegram MarkdownV2 e Markdown legacy. | `re` |
 | `dashboard_template.py` | Template HTML/CSS/JS della dashboard web (Chart.js, Sigma.js, stile cyberpunk). | — |
+| `telemetry.py` | PipelineTracer per-request + GatekeeperStats cumulativi. Tracciamento step, LLM calls, tool calls. | `state` |
+| `mcp_server.py` | Server MCP stdio per diagnostica AI esterna. 9 tool + 7 resources. | `urllib` (HTTP proxy a Jarvis) |
+| `_mcp_handlers.py` | Handler MCP condivisi (in-process, usati da SSE e stdio). Evita dipendenze heavy. | `state`, `telemetry` |
 
 ### Sotto-pacchetto `jarvis/openai/`
 
@@ -452,6 +455,10 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/rag_cache.py` | ✅ Nuovo | Cache semantica Qdrant + Web Knowledge persistence |
 | `jarvis/telegram_format.py` | ✅ Nuovo | Utility formattazione Telegram MarkdownV2/Markdown |
 | `jarvis/dashboard_template.py` | ✅ Nuovo | Template HTML/CSS/JS dashboard estratto da `dashboard.py` |
+| `jarvis/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls, ring buffer 500 trace |
+| `jarvis/mcp_server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna |
+| `jarvis/_mcp_handlers.py` | ✅ Nuovo | Handler MCP condivisi (SSE + stdio), evita dipendenze heavy |
+| `MCP SSE Endpoint` | ✅ **ATTIVO** | `/api/mcp/sse` + `/api/mcp/message` per connessioni persistenti |
 | `jarvis/Dockerfile` | ✅ CUDA 13.0 | overlay cuda-compiler-13-0 + cudart-dev + cublas-dev su base 12.2; llama-cpp-python buildato con GGML_CUDA=on |
 | `docker-compose.vps.yml` | ✅ Pronto | Stack Master senza GPU (no sezione deploy) |
 | `docker-compose.worker.yml` | ✅ Pronto | QDRANT_HOST da .env, volumi mem0+documents montati |
@@ -670,6 +677,38 @@ tar -cvzf backup_ai_$(date +%Y%m%d).tar.gz ./data .env
 
 # Restore
 tar -xvzf backup_ai_YYYYMMDD.tar.gz
+```
+
+### MCP Server & Telemetry
+
+```bash
+# Test standalone MCP server (richiede Jarvis in esecuzione su localhost:8000)
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python -m jarvis.mcp_server
+
+# Lista tool MCP disponibili
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python -m jarvis.mcp_server | python3 -m json.tool
+
+# Test risorsa MCP (ultimi trace)
+echo '{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"jarvis://traces/recent"}}' | python -m jarvis.mcp_server
+
+# Puntare MCP server a Jarvis su host diverso
+JARVIS_URL=http://100.64.0.1:8000 python -m jarvis.mcp_server
+
+# Query REST Telemetry API
+curl -s http://localhost:8000/api/telemetry/status | python3 -m json.tool
+curl -s http://localhost:8000/api/telemetry/traces?limit=3 | python3 -m json.tool
+curl -s http://localhost:8000/api/telemetry/gatekeeper | python3 -m json.tool
+curl -s http://localhost:8000/api/telemetry/errors | python3 -m json.tool
+curl -s http://localhost:8000/api/telemetry/model | python3 -m json.tool
+curl -s http://localhost:8000/api/telemetry/pending_ops | python3 -m json.tool
+
+# Connessione MCP SSE (WebSocket-like, persistente)
+# Aprire una sessione:
+curl -N -s http://localhost:8000/api/mcp/sse
+# Inviare comandi su un'altra shell:
+curl -X POST "http://localhost:8000/api/mcp/message?session_id=<id_da_sse>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
 ---

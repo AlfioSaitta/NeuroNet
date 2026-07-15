@@ -11,7 +11,7 @@ L'inferenza avviene **interamente in-process** tramite `llama-cpp-python` su mod
 
 ---
 
-## 🚦 Stato del Sistema (al 2026-06-29)
+## 🚦 Stato del Sistema (al 2026-07-15)
 
 | Componente | Stato | Note |
 |---|---|---|
@@ -27,6 +27,9 @@ L'inferenza avviene **interamente in-process** tramite `llama-cpp-python` su mod
 | **SearXNG** | ✅ **ATTIVO** | Metasearch anonimo su :8081 |
 | **Crawl4AI** | ✅ **ATTIVO** | Scraper headless su :11235 |
 | **Telegram Bot** | ✅ **PRONTO** | Da attivare su Master (disabilitato su Worker) |
+| **Pipeline Telemetry** | ✅ **ATTIVA** | Tracciamento richieste: step, LLM calls, gatekeeper, tool calls |
+| **MCP Server (stdio)** | ✅ **ATTIVO** | 9 tools + 7 resources per diagnostica AI esterna |
+| **MCP SSE Endpoint** | ✅ **ATTIVO** | `/api/mcp/sse` + `/api/mcp/message` per connessioni persistenti |
 
 ---
 
@@ -127,6 +130,7 @@ ai-ecosystem/
 ├── .env.example                     # Template configurazione
 ├── docker-compose.vps.yml           # Stack Master VPS (no GPU)
 ├── docker-compose.worker.yml        # Stack Worker GPU locale
+├── .mcp.json                       # Config server MCP per agenti AI esterni
 ├── start_master.sh / start_worker.sh
 ├── deploy_vps.sh / sync_to_master.sh
 ├── docs/
@@ -165,6 +169,9 @@ ai-ecosystem/
     ├── model_profiles.py            # Auto-rilevamento famiglia modello (292 righe)
     ├── external_providers.py        # Provider cloud esterni (356 righe)
     ├── mcp_client.py                # Client MCP per tool esterni (634 righe)
+    ├── mcp_server.py                # Server MCP stdio per diagnostica AI (474 righe)
+    ├── _mcp_handlers.py             # Handler MCP condivisi (SSE + stdio) (250 righe)
+    ├── telemetry.py                 # PipelineTracer + GatekeeperStats (434 righe)
     ├── tag_processor.py             # Elaborazione tag XML nelle risposte (1043 righe)
     ├── telegram_format.py            # Utility formattazione Telegram Markdown (147 righe)
     ├── dashboard_template.py         # Template HTML/CSS/JS dashboard (cyberpunk, Chart.js, Sigma.js)
@@ -622,6 +629,71 @@ Rilevamento automatico della famiglia modello dal nome file GGUF:
 
 ---
 
+### 13. 🔍 Pipeline Telemetry & MCP Server (`telemetry.py`, `mcp_server.py`)
+
+Sistema di tracciamento strutturato che registra ogni richiesta utente attraverso i 4 step della pipeline (keyword bypass, gatekeeper LLM, context gathering, generazione LLM). I dati sono esposti tramite API REST HTTP, server MCP stdio, e endpoint MCP SSE.
+
+```
+Richiesta utente
+       │
+       ▼
+┌─────────────────────┐
+│  PipelineTracer     │──► start_step("keyword_bypass")
+│  (per-request)      │    ├── ok/skipped/error
+│                      │    └── duration_ms
+├─────────────────────┤
+│  GatekeeperStats    │──► record(intent, confidence, bypassed)
+│  (cumulativo)       │    ├── by_intent distribution
+│                      │    └── avg_confidence
+├─────────────────────┤
+│  PipelineTrace      │──► steps[] + llm_calls[] + gatekeeper
+│  (completato)       │    └── insert in state.pipeline_traces (ring buffer 500)
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────┐
+│  Canali di accesso                                   │
+│                                                      │
+│  ┌──────────────────┐  ┌──────────────────┐         │
+│  │ MCP stdio        │  │ MCP SSE (in-app) │         │
+│  │ jarvis/mcp_server│  │ /api/mcp/sse     │         │
+│  │ (subprocess)     │  │ (persistent conn)│         │
+│  └───────┬──────────┘  └───────┬──────────┘         │
+│          │                     │                     │
+│  ┌───────▼─────────────────────▼──────────┐          │
+│  │ HTTP REST API                          │          │
+│  │ /api/telemetry/traces                  │          │
+│  │ /api/telemetry/gatekeeper              │          │
+│  │ /api/telemetry/errors                  │          │
+│  │ /api/telemetry/status                  │          │
+│  │ /api/telemetry/model                   │          │
+│  │ /api/telemetry/pending_ops             │          │
+│  └──────────────────────────────────────────────────┘
+```
+
+**PipelineTracer** — per-request tracker:
+- Timeline step-by-step con misure di durata in millisecondi
+- Registrazione di tutte le chiamate LLM con token prompt/completion
+- Risultato del Gatekeeper (intento, confidence, bypass)
+- Conteggio tool calls
+- Errore finale se presente
+- Ogni trace completato finisce in `state.pipeline_traces` (ring buffer circolare, ultimi 500)
+
+**GatekeeperStats** — statistiche cumulative:
+- `total_classified`, `bypassed`, `llm_called`
+- `by_intent`: distribuzione degli intenti classificati
+- `avg_confidence`: confidenza media del Gatekeeper
+- `by_intent_with_bypass`: bypass rate per intento
+
+**File:**
+- `jarvis/telemetry.py` — Classi core (PipelineTracer, GatekeeperStats, LlmCallRecord, StepRecord, PipelineTrace)
+- `jarvis/mcp_server.py` — Server MCP stdio per agenti AI esterni
+- `jarvis/_mcp_handlers.py` — Handler MCP condivisi (usati da SSE e stdio)
+- `jarvis/state.py` — Ring buffer `pipeline_traces`, `gatekeeper_stats`, `error_counters`
+- `.mcp.json` — Config per Claude Code/Cursor
+
+---
+
 ## 🤖 Modelli LLM
 
 Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo Ollama.
@@ -697,6 +769,18 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo 
 | `/api/webhook/git` | POST | Git webhook → pull → re-ingestion |
 | `/api/reset-all` | GET/POST | Reset RAG + Mem0 |
 | `/docs` | GET | Swagger UI |
+| **Pipeline Telemetry** | | |
+| `/api/telemetry/traces` | GET | Ultimi N pipeline trace completati |
+| `/api/telemetry/traces/active` | GET | Trace correntemente in esecuzione |
+| `/api/telemetry/traces/{request_id}` | GET | Cerca trace per request_id |
+| `/api/telemetry/gatekeeper` | GET | Statistiche cumulative Gatekeeper |
+| `/api/telemetry/errors` | GET | Contatori di errore |
+| `/api/telemetry/status` | GET | Uptime, richieste, token, stato sistema |
+| `/api/telemetry/model` | GET | Informazioni modello LLM (family, GPU layers) |
+| `/api/telemetry/pending_ops` | GET | Background tasks, coda watchdog |
+| **MCP Server (SSE Transport)** | | |
+| `/api/mcp/sse` | GET | Connessione SSE persistente per MCP |
+| `/api/mcp/message` | POST | Invio messaggio JSON-RPC MCP |
 | **OpenAI-compatibili** | | |
 | `/v1/chat/completions` | POST | Chat completion (streaming SSE, tool-calling, confirmation tokens) |
 | `/v1/completions` | POST | Text completion legacy (streaming SSE, echo) |
@@ -722,6 +806,119 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo 
 | `/v1/vector_stores` | GET/POST | Lista/Crea Vector Store |
 | `/v1/files` | POST | Upload file |
 | `/v1/uploads` | POST | Upload large file in parti |
+
+---
+
+### Pipeline Telemetry & MCP per Diagnostica AI
+- **PipelineTracer**: tracciamento per-request con step timing, LLM calls, gatekeeper decisioni, tool calls
+- **GatekeeperStats**: statistiche cumulative di classificazione (bypass rate, confidence media, by_intent)
+- **Ring buffer 500 trace**: ultimi 500 trace completati sempre disponibili in memoria
+- **HTTP REST**: 8 endpoint `/api/telemetry/*` per query diretta
+- **MCP stdio**: server esterno per Claude Code / Cursor via `.mcp.json`
+- **MCP SSE**: endpoint in-app `/api/mcp/sse` per connessioni persistenti
+
+## 🔌 Connessione al Server MCP di Jarvis
+
+Jarvis espone due modalità di accesso MCP per permettere ad agenti AI esterni
+(Claude Code, Cursor, Continue, ecc.) di ispezionare lo stato interno del sistema
+a fini di diagnostica e debug.
+
+### Modalità 1: Server MCP stdio (per agenti esterni)
+
+Configura il tuo agente AI per lanciare il server MCP come subprocesso.
+Jarvis include già il file `.mcp.json` nella root del progetto:
+
+```json
+{
+  "mcpServers": {
+    "jarvis-telemetry": {
+      "command": "python",
+      "args": ["-m", "jarvis.mcp_server"],
+      "env": {
+        "JARVIS_URL": "http://localhost:8000"
+      },
+      "description": "Jarvis telemetry — espone pipeline trace, gatekeeper stats, error counters e stato del sistema per diagnostica AI."
+    }
+  }
+}
+```
+
+**Claude Code / Cursor** rilevano automaticamente `.mcp.json` nella root del progetto.
+L'agente può quindi usare i tool MCP per ispezionare Jarvis.
+
+**Uso standalone** (per test):
+```bash
+# Collega il server MCP a un'istanza Jarvis in esecuzione
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python -m jarvis.mcp_server
+```
+
+Se Jarvis è su un host diverso:
+```bash
+JARVIS_URL=http://192.168.1.100:8000 python -m jarvis.mcp_server
+```
+
+### Modalità 2: Endpoint MCP SSE (in-app)
+
+Jarvis espone un endpoint SSE direttamente via FastAPI. Utile per agenti
+che supportano il trasporto SSE persistente.
+
+1. Connessione SSE:
+   ```
+   GET /api/mcp/sse
+   ```
+   Il server risponde con un evento `endpoint` che specifica l'URL per i messaggi.
+
+2. Invio comandi JSON-RPC:
+   ```
+   POST /api/mcp/message?session_id=<id>
+   Content-Type: application/json
+
+   {"jsonrpc":"2.0","id":1,"method":"tools/list"}
+   ```
+
+### Elenco Completo Tool MCP
+
+| Tool | Descrizione | Parametri |
+|---|---|---|
+| `get_recent_traces` | Ultimi N pipeline trace completati | `limit` (int, default 10) |
+| `get_active_traces` | Trace correntemente in esecuzione | nessuno |
+| `get_trace_by_id` | Cerca un trace completato per request_id | `request_id` (stringa, required) |
+| `get_gatekeeper_stats` | Statistiche cumulative Gatekeeper | nessuno |
+| `get_errors` | Contatori di errore per diagnostica | nessuno |
+| `get_status` | Stato sistema: uptime, richieste, token | nessuno |
+| `get_model_info` | Info modello LLM: family, GPU layers | nessuno |
+| `get_pending_ops` | Operazioni pendenti: background tasks, coda watchdog | nessuno |
+| `get_llm_call_breakdown` | Analisi aggregata chiamate LLM da ultimi 100 trace | nessuno |
+
+### Risorse MCP (resources)
+
+| URI | Descrizione |
+|---|---|
+| `jarvis://traces/recent` | Ultimi 10 pipeline trace |
+| `jarvis://traces/active` | Trace attualmente in esecuzione |
+| `jarvis://gatekeeper/stats` | Statistiche cumulative Gatekeeper |
+| `jarvis://errors/counters` | Contatori di errore |
+| `jarvis://system/status` | Uptime, richieste, token |
+| `jarvis://model/info` | Informazioni modello LLM |
+| `jarvis://system/pending_ops` | Operazioni pendenti |
+
+### Esempio di Utilizzo
+
+**Debug di una richiesta lenta:**
+1. Chiama `get_recent_traces(limit=5)` per vedere gli ultimi trace
+2. Identifica il `request_id` del trace più lento
+3. Chiama `get_trace_by_id(request_id="abc123")` per vedere i dettagli
+4. Analizza gli step: `build_omniscient_prompt`, `gemma_generation`, `tool_execution`
+
+**Verifica dello stato del Gatekeeper:**
+1. Chiama `get_gatekeeper_stats()`
+2. Controlla `bypassed` vs `llm_called` — se il bypass rate è basso, il Gatekeeper sta funzionando correttamente
+3. Controlla `avg_confidence` — se < 0.7, il modello Gatekeeper potrebbe avere problemi
+
+**Diagnostica errori:**
+1. Chiama `get_errors()` per vedere i contatori errori
+2. Chiama `get_status()` per verificare uptime e richieste totali
+3. Se `total_requests` è alto ma non ci sono trace recenti, potrebbe esserci un problema di inizializzazione del tracer
 
 ---
 
