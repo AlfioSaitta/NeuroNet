@@ -174,6 +174,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 task.add_done_callback(state.background_tasks.discard)
             except Exception:
                 pass
+        # Saluti in concise: messaggio originale, niente caveman
+        if PURE_GREETING.match(clean_msg.strip().lower()):
+            logger.info("🗣️ Concise + saluto: skip caveman compression")
+            return messages
         # Compressione caveman anche in modalità concise
         compressed = await engine.compress_prompt(
             user_query=clean_msg,
@@ -285,6 +289,18 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         except Exception as e:
             logger.warning(f"Errore memory add: {e}")
 
+    # ════════════════════════════════════════════════════════════════
+    # GENERAL INTENT: skip RAG/memoria pesante/caveman — usa messaggio originale
+    # ════════════════════════════════════════════════════════════════
+    # Per intento general (saluti, conversazione, ringraziamenti) il sistema
+    # deve comportarsi naturalmente, NON in stile caveman. La compressione
+    # [CONTEXT]/[USER_QUERY]/[INSTRUCTION] + caveman system prompt inibisce
+    # le risposte conversazionali (es. "Salve" → risponde con istruzioni).
+    if gk.intent == "general":
+        logger.info(f"🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
+        return messages
+
+    if state.memory:
         try:
             loop = asyncio.get_running_loop()
             _mem_limit = _user_override_mem_count if _user_override_mem_count > 0 else 5
@@ -371,7 +387,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 task.add_done_callback(state.background_tasks.discard)
 
     # ════════════════════════════════════════════════════════════════
-    # STEP 3: QWEN3.5 CAVEMAN PROMPT COMPRESSION
+    # STEP 3: QWEN3.5 CAVEMAN PROMPT COMPRESSION (solo project/meta)
     # ════════════════════════════════════════════════════════════════
     # Budget dinamico del contesto per il materiale raw da comprimere
     num_ctx = int(LLM_OPTIONS.get("num_ctx", MODEL_PROFILE.default_ctx))
