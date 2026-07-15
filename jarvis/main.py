@@ -13,6 +13,7 @@ import warnings
 import sys
 import traceback
 import threading
+import uuid
 from contextlib import asynccontextmanager
 
 _default_showwarning = warnings.showwarning
@@ -55,6 +56,7 @@ from rag_cache import semantic_cache_search, semantic_cache_store
 from memory import init_mem0_delayed, extract_memories, save_to_memory, process_response_tags, reindex_graph_connections
 from tag_processor import strip_action_tags, TagSafeStream
 from prompt_builder import build_omniscient_prompt
+from telemetry import PipelineTracer
 from llm_engine import engine, extract_content
 from agent_tools import TOOLS_SCHEMA, execute_tool_call
 from confirmation_manager import ApiTokenProvider, PendingConfirmation, ConfirmationManager
@@ -652,6 +654,221 @@ async def git_webhook(request: Request):
     return JSONResponse({"status": "success", "message": "Git pull avviato, l'ingestion partirà a breve."})
 
 
+# ═══════════════════════════════════════════
+# Pipeline Telemetry Endpoints
+# ═══════════════════════════════════════════
+
+@app.get("/api/telemetry/traces")
+async def get_telemetry_traces(limit: int = 10):
+    """Ultimi N pipeline trace completati."""
+    from telemetry import get_recent_traces
+    traces = get_recent_traces(limit=limit)
+    return JSONResponse({"traces": traces, "count": len(traces)})
+
+
+@app.get("/api/telemetry/traces/active")
+async def get_telemetry_active_traces():
+    """Trace correntemente in esecuzione."""
+    active = PipelineTracer.get_all_active()
+    return JSONResponse({"active_traces": active, "count": len(active)})
+
+
+@app.get("/api/telemetry/traces/{request_id}")
+async def get_telemetry_trace_by_id(request_id: str):
+    """Cerca un trace completato per request_id."""
+    from telemetry import get_trace_by_id
+    trace = get_trace_by_id(request_id)
+    if trace is None:
+        return JSONResponse(status_code=404, content={"error": "Trace not found"})
+    return JSONResponse(trace)
+
+
+@app.get("/api/telemetry/gatekeeper")
+async def get_telemetry_gatekeeper_stats():
+    """Statistiche cumulative del Gatekeeper."""
+    stats = state.gatekeeper_stats
+    if stats is None:
+        return JSONResponse({"stats": None, "message": "GatekeeperStats non ancora inizializzato"})
+    return JSONResponse({"stats": stats.to_dict()})
+
+
+@app.get("/api/telemetry/errors")
+async def get_telemetry_errors():
+    """Contatori di errore per diagnostica."""
+    return JSONResponse({"errors": dict(state.error_counters)})
+
+
+@app.get("/api/telemetry/status")
+async def get_telemetry_status():
+    """Stato generale del sistema per diagnostica."""
+    total_duration_s = int(time.time() - state._start_time) if hasattr(state, '_start_time') else 0
+    uptime_h = total_duration_s / 3600 if total_duration_s else 0
+    return JSONResponse({
+        "uptime_seconds": total_duration_s,
+        "uptime_hours": round(uptime_h, 1),
+        "total_requests": state.total_requests,
+        "total_prompt_tokens": state.total_prompt_tokens,
+        "total_completion_tokens": state.total_completion_tokens,
+        "active_traces": len(PipelineTracer.get_all_active()),
+        "pipeline_traces_capacity": getattr(state.pipeline_traces, 'maxlen', 500),
+        "gatekeeper_initialized": state.gatekeeper_stats is not None,
+        "error_count": len(state.error_counters),
+    })
+
+
+@app.get("/api/telemetry/model")
+async def get_telemetry_model():
+    """Informazioni sul modello LLM caricato."""
+    from config import MODEL_ID as cfg_model_id
+    info = {
+        "model_id": cfg_model_id,
+    }
+    # Prova a leggere dal motore
+    try:
+        from llm_engine import engine
+        if hasattr(engine, 'model_path') and engine.chat_model is not None:
+            info["model_path"] = str(getattr(engine, 'model_path', ''))
+        info["n_gpu_layers"] = getattr(engine, 'n_gpu_layers', 0)
+        info["flash_attn"] = getattr(engine, 'flash_attn', False) or getattr(engine, 'llm_flash_attn', False)
+        if hasattr(engine, 'model_profiles'):
+            info["model_profile"] = str(getattr(engine, 'model_profiles', ''))
+    except Exception:
+        pass
+    # Leggi da model_profiles
+    try:
+        from model_profiles import detect_model_family
+        family = detect_model_family(cfg_model_id)
+        info["detected_family"] = family or "unknown"
+    except Exception:
+        info["detected_family"] = "unknown"
+    return JSONResponse(info)
+
+
+@app.get("/api/telemetry/pending_ops")
+async def get_telemetry_pending_ops():
+    """Operazioni pendenti: background tasks in esecuzione, coda eventi watchdog."""
+    bg_count = len(state.background_tasks)
+    queue_size = state.file_event_queue.qsize() if hasattr(state, 'file_event_queue') else 0
+    bg_task_names = []
+    # Raccogli i nomi dai task pendenti (dove accessibile)
+    for t in list(state.background_tasks)[:20]:
+        name = getattr(t, 'get_name', lambda: str(t))()
+        bg_task_names.append(str(name)[:80])
+    return JSONResponse({
+        "background_tasks_count": bg_count,
+        "background_tasks_sample": bg_task_names[:10],
+        "file_event_queue_size": queue_size,
+        "reindexing_in_progress": getattr(state, 'is_reindexing', False),
+    })
+
+
+# ═══════════════════════════════════════════
+# Init telemetry state in lifespan
+# ═══════════════════════════════════════════
+# gatekeeper_stats e pipeline_traces sono già definiti in state.py.
+# Inizializziamo il contatore errori e il timestamp di avvio qui.
+if not hasattr(state, '_start_time'):
+    state._start_time = time.time()
+
+
+# ═══════════════════════════════════════════
+# MCP SSE Transport Endpoint
+# ═══════════════════════════════════════════
+# Implementa il trasporto SSE per il Model Context Protocol.
+# Altri agenti AI (Claude Code, Cursor) possono connettersi via
+#   GET  /api/mcp/sse
+#   POST /api/mcp/message?session_id=<id>
+#
+# Per agenti che supportano solo stdio, usare jarvis/mcp_server.py
+# configurato in .mcp.json.
+# ═══════════════════════════════════════════
+
+_mcp_sse_sessions: dict[str, asyncio.Queue] = {}
+
+
+@app.get("/api/mcp/sse")
+async def mcp_sse_transport(request: Request):
+    """MCP SSE transport — connessione persistente per messaggi MCP."""
+    session_id = uuid.uuid4().hex[:12]
+    queue: asyncio.Queue = asyncio.Queue()
+    _mcp_sse_sessions[session_id] = queue
+
+    from telemetry import PipelineTracer as PT
+
+    async def event_stream():
+        try:
+            # Invia endpoint event (MCP spec: dice al client dove POSTare)
+            msg_endpoint = f"/api/mcp/message?session_id={session_id}"
+            yield f"event: endpoint\ndata: {msg_endpoint}\n\n"
+
+            # Invia initialized notification (MCP spec)
+            init_msg = json.dumps({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {"serverName": "jarvis-telemetry-sse"},
+            })
+            yield f"data: {init_msg}\n\n"
+
+            # Stream risposte
+            while True:
+                try:
+                    response = await asyncio.wait_for(queue.get(), timeout=30)
+                    yield f"data: {response}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _mcp_sse_sessions.pop(session_id, None)
+            logger.debug(f"[MCP-SSE] Session {session_id} ended")
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/mcp/message")
+async def mcp_sse_message(request: Request):
+    """MCP message endpoint — riceve JSON-RPC dal client e risponde via SSE."""
+    session_id = request.query_params.get("session_id", "")
+    if not session_id or session_id not in _mcp_sse_sessions:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Invalid session"}},
+            status_code=400,
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}},
+            status_code=400,
+        )
+
+    req_id = body.get("id", 0)
+    method = body.get("method", "")
+    params = body.get("params")
+
+    # Processa la richiesta
+    try:
+        result = handle_mcp_request(method, params)
+    except Exception as e:
+        result = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(e)}}
+        _mcp_sse_sessions[session_id] = result
+        return JSONResponse({"ok": True})
+
+    # Costruisci risposta JSON-RPC
+    if isinstance(result, dict) and "error" in result:
+        response = {"jsonrpc": "2.0", "id": req_id, "error": result["error"]}
+    else:
+        response = {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+    # Invia risposta al client via SSE
+    await _mcp_sse_sessions[session_id].put(json.dumps(response, ensure_ascii=False))
+    return JSONResponse({"ok": True})
+
+
+from _mcp_handlers import handle_mcp_request
+
+
 @app.post("/api/chat")
 @limiter.limit(API_RATE_LIMIT_DEFAULT)
 async def ollama_chat(payload: ChatRequest, request: Request):
@@ -716,25 +933,53 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                     })
         # Lazy: ConfirmationManager creato solo quando servono tool calls
 
+    # ── Pipeline Telemetry ──
+    request_id = str(uuid.uuid4())[:12] if not is_internal else None
+    tracer = PipelineTracer.begin(user_message=raw_messages[-1]["content"][:200] if raw_messages else "", user_id=current_user_id) if not is_internal else None
+
     if not is_internal:
+        tracer.start_step("build_omniscient_prompt")
         body["messages"] = await build_omniscient_prompt(
             raw_messages, user_id=current_user_id,
-            conversation_id=str(conversation_id), concise=concise
+            conversation_id=str(conversation_id), concise=concise,
+            request_id=tracer.request_id
         )
+        tracer.end_step("build_omniscient_prompt")
     
     is_stream = body.get("stream", True)
     
     if not is_stream:
         # Non-stream
+        if tracer:
+            tracer.start_step("gemma_generation")
         response = await engine.generate_chat_with_router(
             body["messages"], tools=body.get("tools"), options=body.get("options"),
             stream=False, preferred_provider=provider
         )
         if "error" in response:
+            if tracer:
+                tracer.set_error(response["error"])
+                tracer.finish()
             return JSONResponse(status_code=500, content={"error": response["error"]})
         
-        state.total_prompt_tokens += response.get("usage", {}).get("prompt_tokens", 0)
-        state.total_completion_tokens += response.get("usage", {}).get("completion_tokens", 0)
+        usage = response.get("usage", {})
+        state.total_prompt_tokens += usage.get("prompt_tokens", 0)
+        state.total_completion_tokens += usage.get("completion_tokens", 0)
+        
+        if tracer:
+            from telemetry import LlmCallRecord
+            tracer.add_llm_call(LlmCallRecord(
+                model="chat",
+                step="gemma_generation",
+                duration_ms=0,  # duration misurata da start_step/end_step
+                tokens_prompt=usage.get("prompt_tokens", 0),
+                tokens_completion=usage.get("completion_tokens", 0),
+                temperature=options.get("temperature", 1.0),
+            ))
+            tracer.end_step("gemma_generation", details={
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+            })
         
         # Mappa formato OpenAI a Ollama
         choice = response["choices"][0]["message"]
@@ -758,17 +1003,37 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                 confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
             body["messages"].append(ollama_resp["message"])
             for tc in tool_calls:
+                if tracer:
+                    tracer.start_step("tool_execution")
                 tool_res = await execute_tool_call(tc, confirmation_mgr=confirmation_mgr)
                 body["messages"].append({"role": "tool", "content": tool_res, "name": tc.get("function", {}).get("name", "unknown")})
+                if tracer:
+                    tracer.end_step("tool_execution", details={"tool": tc.get("function", {}).get("name", "unknown")})
+                    tracer.increment_tool_calls()
             
             # Ricorsione simulata per far generare la risposta finale dopo il tool
+            if tracer:
+                tracer.start_step("gemma_generation_tool_final")
             response = await engine.generate_chat_with_router(
                 body["messages"], tools=body.get("tools"), options=body.get("options"),
                 stream=False, preferred_provider=provider
             )
             choice = response["choices"][0]["message"]
             ollama_resp["message"] = {"role": choice.get("role", "assistant"), "content": choice.get("content", "")}
+            if tracer:
+                usage2 = response.get("usage", {})
+                tracer.add_llm_call(LlmCallRecord(
+                    model="chat",
+                    step="gemma_generation_tool_final",
+                    duration_ms=0,
+                    tokens_prompt=usage2.get("prompt_tokens", 0),
+                    tokens_completion=usage2.get("completion_tokens", 0),
+                ))
+                tracer.end_step("gemma_generation_tool_final")
+        
         content = ollama_resp["message"].get("content", "")
+        if tracer:
+            tracer.finish()
 
         # Strip tag veloce (regex, senza handler) per la risposta immediata.
         # Il processaggio completo dei tag (MEMORY, SCHEDULE, SSH, ecc.) va in background
@@ -792,8 +1057,13 @@ async def ollama_chat(payload: ChatRequest, request: Request):
     else:
         # Streaming
         async def stream_gen():
+            if tracer:
+                tracer.start_step("gemma_generation_stream")
             gen = await engine.generate_chat_with_router(body["messages"], tools=body.get("tools"), options=body.get("options"), stream=True, preferred_provider=provider)
             if isinstance(gen, dict) and "error" in gen:
+                if tracer:
+                    tracer.set_error(gen["error"])
+                    tracer.finish()
                 yield json.dumps({"error": gen["error"]}).encode() + b"\n"
                 return
 
@@ -827,6 +1097,17 @@ async def ollama_chat(payload: ChatRequest, request: Request):
 
             full_text = "".join(full_chunks)
 
+            if tracer:
+                from telemetry import LlmCallRecord
+                tracer.add_llm_call(LlmCallRecord(
+                    model="chat",
+                    step="gemma_generation_stream",
+                    duration_ms=0,
+                    tokens_prompt=0,
+                    tokens_completion=0,
+                ))
+                tracer.end_step("gemma_generation_stream", details={"char_count": len(full_text)})
+
             # Invia SUBITO il messaggio done (con strip veloce regex, senza handler)
             # per non bloccare il client con process_response_tags (che può impiegare 15s+).
             clean_text = strip_action_tags(full_text) if full_text else ""
@@ -848,6 +1129,9 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                     bg_task.add_done_callback(state.background_tasks.discard)
                 except Exception as e:
                     logger.warning(f"⚠️ Background tag processing error: {e}")
+
+            if tracer:
+                tracer.finish()
 
         return StreamingResponse(stream_gen(), media_type="application/x-ndjson")
 

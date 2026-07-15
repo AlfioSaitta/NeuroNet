@@ -22,6 +22,7 @@ from web_search import perform_web_search_and_crawl
 from tag_processor import build_tag_instructions
 from task_manager import get_open_tasks
 from llm_engine import engine, extract_content, GatekeeperResult
+from telemetry import PipelineTracer, GatekeeperStats
 import state
 
 # ════════════════════════════════════════════════════════════════
@@ -145,7 +146,17 @@ async def _run_gatekeeper(user_message: str, context: dict) -> GatekeeperResult:
     return await engine.classify_intent(user_message, context)
 
 
-async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False):
+def _record_gatekeeper_stats(intent: str, confidence: float, bypassed: bool, project: str | None = None):
+    """Aggiorna le statistiche cumulative del Gatekeeper (esposte via MCP)."""
+    try:
+        if state.gatekeeper_stats is None:
+            state.gatekeeper_stats = GatekeeperStats()
+        state.gatekeeper_stats.record(intent, confidence, bypassed, project)
+    except Exception as exc:
+        logger.warning(f"Errore aggiornamento gatekeeper_stats: {exc}")
+
+
+async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False, request_id=None):
     """
     Pipeline di arricchimento a 4 step con Caveman Compression.
 
@@ -156,11 +167,29 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
       STEP 4: Gemma 4 (GPU) → risposta caveman
 
     Se concise=True, salta RAG/memoria/web e usa compressed prompt minimo.
+
+    Args:
+        request_id: Se fornito, riusa un PipelineTracer esistente (da main.py).
+                    Altrimenti ne crea uno nuovo internamente.
     """
     user_messages = [m["content"] for m in messages if m["role"] == "user"]
     latest_msg = user_messages[-1] if user_messages else ""
     if not latest_msg:
+        if request_id:
+            tracer = PipelineTracer.get(request_id)
+            if tracer:
+                tracer.step("build_omniscient_prompt", status="skipped", details={"reason": "empty_message"})
+                tracer.finish()
         return messages
+
+    # ── Pipeline Telemetry ──
+    current_user_id = user_id if user_id else "alfio_dev"
+    tracer: PipelineTracer | None = None
+    if request_id:
+        tracer = PipelineTracer.get(request_id)
+    if tracer is None:
+        tracer = PipelineTracer.begin(user_message=latest_msg, user_id=current_user_id)
+    tracer.start_step("prompt_preprocessing")
 
     if len(messages) > 20:
         messages = messages[-20:]
@@ -174,10 +203,11 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     _now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
     messages.insert(0, {"role": "system", "content": f"Current date and time: {_now}. Today is {datetime.datetime.now().strftime('%A')}."})
 
-    current_user_id = user_id if user_id else "alfio_dev"
+    tracer.end_step("prompt_preprocessing", details={"msg_len": len(latest_msg), "history_len": len(messages)})
 
     # ── MODALITÀ CONCISE: compressione minima, skip RAG/memoria/web ──
     if concise:
+        tracer.start_step("concise_pipeline")
         _, clean_msg = await perform_web_search_and_crawl(latest_msg)
         if state.memory:
             try:
@@ -191,6 +221,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         # Saluti in concise: messaggio originale, niente caveman
         if PURE_GREETING.match(clean_msg.strip().lower()):
             logger.info("🗣️ Concise + saluto: skip caveman compression")
+            tracer.end_step("concise_pipeline", status="skipped", details={"reason": "greeting"})
+            tracer.finish()
             return messages
         # Compressione caveman anche in modalità concise
         compressed = await engine.compress_prompt(
@@ -199,18 +231,26 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             history="",
             active_project=None,
         )
+        comp_ok = bool(compressed and len(compressed) >= 20)
+        tracer.add_llm_call(compressed._as_llm_record("caveman_compression") if hasattr(compressed, '_as_llm_record') else
+                            __import__('telemetry', fromlist=['LlmCallRecord']).LlmCallRecord(
+                                model="gatekeeper", step="caveman_compression",
+                                duration_ms=0, temperature=0.0))
         # Se la compressione fallisce (output troppo corto o errore), usa raw
         if not compressed or len(compressed) < 20:
             logger.warning("⚠️ Caveman compress fallita in concise mode, fallback raw")
             user_content = f"Query: {clean_msg}"
+            tracer.end_step("concise_pipeline", status="error", details={"fallback": "raw", "comp_len": len(compressed) if compressed else 0})
         else:
             user_content = compressed
+            tracer.end_step("concise_pipeline", details={"comp_len": len(compressed)})
         # System prompt in messaggio system, non nella user query — previene echo
         messages.append({"role": "system", "content": CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM})
         for m in reversed(messages):
             if m["role"] == "user":
                 m["content"] = user_content
                 break
+        tracer.finish()
         return messages
 
     # ════════════════════════════════════════════════════════════════
@@ -256,18 +296,25 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         "projects_available": _all_projects,
         "recent_messages": _recent_user_msgs,
     }
+    tracer.start_step("keyword_bypass")
     gk = await _keyword_bypass(latest_msg, _gk_context)
+    _bypassed = gk is not None
+    if _bypassed:
+        tracer.end_step("keyword_bypass", details={"bypassed": True, "intent": gk.intent, "project": gk.project})
+    else:
+        tracer.end_step("keyword_bypass", details={"bypassed": False})
     
     # ════════════════════════════════════════════════════════════════
     # STEP 2: QWEN3.5 GATEKEEPER (solo se bypass fallisce)
     # ════════════════════════════════════════════════════════════════
     if gk is None:
+        tracer.start_step("gatekeeper_llm")
         gk = await _run_gatekeeper(latest_msg, _gk_context)
+        tracer.end_step("gatekeeper_llm", details={"intent": gk.intent, "project": gk.project, "confidence": gk.confidence})
     
-    logger.info(
-        f"🧠 Gatekeeper: {gk.intent} | project={gk.project} | "
-        f"conf={gk.confidence:.2f} | '{latest_msg[:40]}...'"
-    )
+    # Registra risultato gatekeeper nel tracer e nelle stats
+    tracer.set_gatekeeper(intent=gk.intent, project=gk.project, confidence=gk.confidence, bypassed=_bypassed)
+    _record_gatekeeper_stats(gk.intent, gk.confidence, _bypassed, gk.project)
     
     # ── ROUTING: project / meta / general ──
     active_project: str | None = None
@@ -314,6 +361,9 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     # le risposte conversazionali (es. "Salve" → risponde con istruzioni).
     if gk.intent == "general":
         logger.info(f"🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
+        tracer.step("context_gathering", status="skipped", details={"reason": "general_intent"})
+        tracer.step("caveman_compression", status="skipped", details={"reason": "general_intent"})
+        tracer.finish()
         return messages
 
     # ════════════════════════════════════════════════════════════════
@@ -331,7 +381,15 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             if m["role"] == "user":
                 m["content"] = meta_prompt
                 break
+        tracer.step("context_gathering", status="skipped", details={"reason": "meta_intent"})
+        tracer.step("caveman_compression", status="skipped", details={"reason": "meta_intent"})
+        tracer.finish()
         return messages
+
+    # ════════════════════════════════════════════════════════════════
+    # CONTEXT GATHERING: Memoria + RAG + Web
+    # ════════════════════════════════════════════════════════════════
+    tracer.start_step("context_gathering")
 
     if state.memory:
         try:
@@ -419,9 +477,20 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 state.background_tasks.add(task)
                 task.add_done_callback(state.background_tasks.discard)
 
+    # Log contesto raccolto
+    ctx_details = {
+        "rag_len": len(rag_ctx) if rag_ctx else 0,
+        "mem_len": len(mem_ctx) if mem_ctx else 0,
+        "web_len": len(web_ctx) if web_ctx else 0,
+        "project": active_project,
+    }
+    tracer.end_step("context_gathering", details=ctx_details)
+
     # ════════════════════════════════════════════════════════════════
     # STEP 3: QWEN3.5 CAVEMAN PROMPT COMPRESSION (solo project/meta)
     # ════════════════════════════════════════════════════════════════
+    tracer.start_step("caveman_compression")
+
     # Budget dinamico del contesto per il materiale raw da comprimere
     num_ctx = int(LLM_OPTIONS.get("num_ctx", MODEL_PROFILE.default_ctx))
     if num_ctx > MODEL_PROFILE.max_ctx:
@@ -472,6 +541,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     history_str = " | ".join(_recent_user_msgs) if _recent_user_msgs else ""
     if tasks_final:
         history_str = (history_str + "\n" + tasks_final) if history_str else tasks_final
+
+    # Assembla il contesto raw per il compressore
     rag_context_for_compress = rag_final
     if tree_ctx:
         rag_context_for_compress = tree_ctx + "\n" + rag_context_for_compress if rag_context_for_compress else tree_ctx
@@ -479,6 +550,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         rag_context_for_compress = rag_context_for_compress + "\n[WEB]\n" + web_final if rag_context_for_compress else "[WEB]\n" + web_final
     if mem_final:
         rag_context_for_compress = rag_context_for_compress + "\n[MEMORY]\n" + mem_final if rag_context_for_compress else "[MEMORY]\n" + mem_final
+
+    raw_size = len(rag_context_for_compress) + len(history_str) + len(clean_msg)
 
     # Esegue la compressione caveman su Qwen3.5 (CPU)
     compressed = await engine.compress_prompt(
@@ -513,9 +586,18 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         _compression_is_raw = True
         logger.warning("⚠️ Caveman compression fallback raw (raw_data labels)")
 
+    comp_details = {
+        "raw_size": raw_size,
+        "comp_size": len(compressed),
+        "is_raw_fallback": _compression_is_raw,
+        "budget": MAX_BUDGET,
+    }
+    tracer.end_step("caveman_compression", details=comp_details)
+
     # ════════════════════════════════════════════════════════════════
     # STEP 4: BUILD GEMMA 4 PROMPT
     # ════════════════════════════════════════════════════════════════
+    tracer.start_step("build_prompt")
     # Se la compressione è fallata (raw fallback), usa system prompt
     # conversazionale — evita che Gemma 4 echeggi le etichette raw
     # (es. "PROJECT: SlotBuilder. CONTEXT: ... INSTRUCTION: ...").
@@ -540,4 +622,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             m["content"] = user_content
             break
 
+    tracer.end_step("build_prompt", details={"system_prompt_len": len(system_prompt), "user_content_len": len(user_content)})
+
+    tracer.finish()
     return messages

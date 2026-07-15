@@ -226,3 +226,21 @@ def _bg_persist_project_context(
         task.add_done_callback(background_tasks.discard)
     except RuntimeError:
         pass  # Nessun event loop disponibile (es. test sincroni)
+
+
+# ════════════════════════════════════════════════════════════════
+# Pipeline Telemetry — ring buffer di trace esposto via MCP
+# ════════════════════════════════════════════════════════════════
+
+# Ring buffer degli ultimi 500 pipeline trace completati.
+# Popolato da PipelineTracer.finish() in telemetry.py.
+# Letto dal server MCP e dal dashboard.
+from collections import deque as _deque
+pipeline_traces: "_deque" = _deque(maxlen=500)
+
+# Statistiche cumulative del Gatekeeper.
+# Aggiornato da prompt_builder.py dopo ogni classificazione.
+gatekeeper_stats: dict | None = None  # Verrà inizializzato come GatekeeperStats()
+
+# Contatori di errore per diagnostica MCP
+error_counters: dict[str, int] = {}
