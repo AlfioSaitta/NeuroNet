@@ -481,8 +481,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
 
     # Se la compressione fallisce (Qwen3.5 non caricato o errore),
     # usa fallback raw limitato
+    _compression_is_raw = False
     if not compressed or len(compressed) < 20:
         logger.warning("⚠️ Caveman compression fallita, uso fallback raw")
+        _compression_is_raw = True
         fallback_parts = []
         if mem_final:
             fallback_parts.append(f"Memory: {mem_final[:500]}")
@@ -497,20 +499,34 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         fallback_parts.append(f"Query: {clean_msg}")
         compressed = "\n".join(fallback_parts)[:4096]
 
+    # Rileva fallback raw da compress_prompt (quando ratio≤0 restituisce raw_data)
+    if compressed.startswith("[PROJECT:") or compressed.startswith("[RAG_CONTEXT]"):
+        _compression_is_raw = True
+        logger.warning("⚠️ Caveman compression fallback raw (raw_data labels)")
+
     # ════════════════════════════════════════════════════════════════
-    # STEP 4: BUILD GEMMA 4 PROMPT (caveman system + compressed input)
+    # STEP 4: BUILD GEMMA 4 PROMPT
     # ════════════════════════════════════════════════════════════════
-    # Gemma 4 vede: system caveman + compressed prompt + caveman response instruction
-    # Non ci sono più tag XML — tutto è in puro stile caveman.
-    caveman_prompt = (
-        f"{CAVEMAN_GEMMA_SYSTEM}\n\n"
-        f"{compressed}\n\n"
-        f"{CAVEMAN_GEMMA_SYSTEM_ADDENDUM}"
-    )
+    # Se la compressione è fallata (raw fallback), usa system prompt
+    # conversazionale — evita che Gemma 4 echeggi le etichette raw
+    # (es. "PROJECT: SlotBuilder. CONTEXT: ... INSTRUCTION: ...").
+    # Se la compressione è riuscita, usa system prompt caveman per codice diretto.
+    if _compression_is_raw:
+        final_prompt = (
+            "You are Jarvis, a helpful coding assistant with access to project context.\n\n"
+            f"Context information:\n{compressed}\n\n"
+            "Please respond naturally and helpfully based on the context above."
+        )
+    else:
+        final_prompt = (
+            f"{CAVEMAN_GEMMA_SYSTEM}\n\n"
+            f"{compressed}\n\n"
+            f"{CAVEMAN_GEMMA_SYSTEM_ADDENDUM}"
+        )
 
     for m in reversed(messages):
         if m["role"] == "user":
-            m["content"] = caveman_prompt
+            m["content"] = final_prompt
             break
 
     return messages
