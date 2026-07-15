@@ -94,15 +94,35 @@ LLAMA_MODEL_PATH = os.getenv("LLAMA_MODEL_PATH", "./models/qwen2.5-coder-3b.gguf
 LLAMA_EMBED_MODEL_PATH = os.getenv("LLAMA_EMBED_MODEL_PATH", "./models/Qwen3-Embedding-0.6B-Q8_0.gguf")
 
 # ==============================================================================
-# CONFIGURAZIONE INFERENZA LLM
+# CONFIGURAZIONE INFERENZA LLM — Modello Principale (Gemma 4 su GPU)
 # ==============================================================================
-N_GPU_LAYERS = int(os.getenv("N_GPU_LAYERS", "20"))
-LLM_NUM_CTX = _llm_num_ctx
+# n_gpu_layers=-1 = tutti i layer su GPU (libera VRAM spostando embed).
+# La RTX 3050 Ti 4GB regge Gemma 4 E2B QAT (~2.1B attivi) interamente su GPU
+# con n_ctx=8192 senza crash.
+N_GPU_LAYERS = int(os.getenv("N_GPU_LAYERS", "-1"))
+LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "8192"))  # Ridotto da 32768 per VRAM 4GB
 LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "128"))
 LLM_UBATCH_SIZE = int(os.getenv("LLM_UBATCH_SIZE", "128"))
-LLM_FLASH_ATTN = os.getenv("LLM_FLASH_ATTN", "false").lower() == "true"
+LLM_FLASH_ATTN = os.getenv("LLM_FLASH_ATTN", "true").lower() == "true"
 # chat_format è determinato automaticamente dai metadati GGUF in model_profiles.py
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+
+# ==============================================================================
+# GATEKEEPER LLM (Qwen3.5-0.8B-Instruct su CPU)
+# ==============================================================================
+# Esegue SU CPU (n_gpu_layers=0): classificazione intenti + compressione prompt
+# in stile Caveman. Modello tiny (~0.8B) — n_ctx=2048 è sufficiente.
+GATEKEEPER_MODEL_PATH = os.getenv("GATEKEEPER_MODEL_PATH", "")
+GATEKEEPER_N_CTX = int(os.getenv("GATEKEEPER_N_CTX", "2048"))
+GATEKEEPER_N_THREADS = int(os.getenv("GATEKEEPER_N_THREADS", "4"))
+
+# ==============================================================================
+# EMBEDDING MODEL (Qwen3-Embedding su CPU)
+# ==============================================================================
+# n_gpu_layers=0 = interamente su CPU. Libera ~400MiB VRAM per Gemma 4.
+# La latenza embedding aumenta (CPU ~50ms vs GPU ~5ms) ma il throughput RAG
+# rimane accettabile perché le embedding sono in batch asincroni.
+EMBED_N_GPU_LAYERS = int(os.getenv("EMBED_N_GPU_LAYERS", "0"))
 # Raw env var flag per runtime checks (es. metadata override)
 LLM_THINKING_MODE_RAW = os.getenv("LLM_THINKING_MODE", "")
 

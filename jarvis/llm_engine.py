@@ -8,6 +8,8 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor
 
 from config import LLM_THINKING_MODE, MODEL_PROFILE, EXTERNAL_GPU_URL, MODEL_ID, LLM_MAX_TOKENS, EMBEDDING_DIMS
+from dataclasses import dataclass
+from typing import Literal, Optional
 
 try:
     from llama_cpp import Llama
@@ -69,6 +71,29 @@ class PriorityLock:
 class PriorityLockTimeoutError(Exception):
     pass
 
+
+@dataclass
+class GatekeeperResult:
+    """Risultato della classificazione intento a 3 stati."""
+    intent: str  # "project" | "meta" | "general"
+    project: str | None = None
+    confidence: float = 0.0
+
+
+CAVEMAN_COMPRESSOR_SYSTEM_PROMPT = """You are the Caveman Prompt Architect for Jarvis. Your job is to translate the raw input data (user request, context, history) into a hyper-dense, ultra-compressed prompt for a master coding LLM (Gemma 4).
+Rules:
+- Strip all filler words, articles (the, a, an, il, la, un), polite phrases, and transition verbs.
+- Convert long paragraphs into raw, dense fact-bullets and logical fragments.
+- STRICTLY KEEP intact all technical terms, file paths, variable names, function names, and code syntax.
+- Format the final output clearly using keys: [CONTEXT], [USER_QUERY], [INSTRUCTION].
+- Output ONLY the compressed prompt. No explanations, no greetings, no extra text."""
+
+CAVEMAN_RESPONSE_INSTRUCTION = (
+    "\n\nRespond in pure Caveman style: no preambles, no explanations, no greetings. "
+    "Go directly to code fixes, bullet-point facts, or direct answers. "
+    "If writing code: output ONLY the code block. If answering: 1-3 bullet facts max."
+)
+
 class PriorityLockContextManager:
     def __init__(self, lock: PriorityLock, priority: int, timeout: float = 0):
         self.lock = lock
@@ -101,14 +126,15 @@ class LlamaEngine:
         if self.initialized:
             return
             
-        self.chat_model = None
-        self.embed_model = None
+        self.chat_model = None       # Gemma 4 su GPU (main_brain)
+        self.embed_model = None      # Qwen3-Embedding su CPU
+        self.gatekeeper_model = None # Qwen3.5-0.8B su CPU (classify + compress)
         # Thread pool per non bloccare l'event loop di FastAPI (concurrency safe)
         self.executor = ThreadPoolExecutor(max_workers=8)
-        # Lock separati: chat e embedding usano modelli Llama diversi,
-        # non devono bloccarsi a vicenda
+        # Lock separati: ogni modello Llama è indipendente, non devono bloccarsi
         self.chat_lock = PriorityLock()
         self.embed_lock = PriorityLock()
+        self.gatekeeper_lock = PriorityLock()
         self.initialized = True
 
     def load_models(self):
@@ -116,11 +142,18 @@ class LlamaEngine:
             logger.error("Impossibile caricare i modelli: llama-cpp-python mancante.")
             return
 
-        from config import LLAMA_MODEL_PATH as _cfg_model_path, LLAMA_EMBED_MODEL_PATH as _cfg_embed_path
+        from config import (
+            LLAMA_MODEL_PATH as _cfg_model_path,
+            LLAMA_EMBED_MODEL_PATH as _cfg_embed_path,
+            GATEKEEPER_MODEL_PATH as _cfg_gk_path,
+        )
         chat_model_path = _cfg_model_path
         embed_model_path = _cfg_embed_path
+        gatekeeper_model_path = _cfg_gk_path
 
-        # 1. Caricamento del Modello Chat Principale (Spinge al limite la GPU)
+        # ════════════════════════════════════════════════════════════════
+        # 1. MAIN BRAIN — Gemma 4 su GPU (n_gpu_layers=-1 = full offload)
+        # ════════════════════════════════════════════════════════════════
         if os.path.exists(chat_model_path):
             from config import N_GPU_LAYERS as _cfg_gpu, LLM_NUM_CTX as _cfg_ctx, LLM_BATCH_SIZE as _cfg_batch
             from config import LLM_UBATCH_SIZE as _cfg_ubatch, LLM_FLASH_ATTN as _cfg_flash
@@ -129,9 +162,8 @@ class LlamaEngine:
             n_batch = _cfg_batch
             n_ubatch = _cfg_ubatch
             flash_attn = _cfg_flash
-            logger.info(f"Caricamento Chat Model: {chat_model_path}")
+            logger.info(f"Caricamento Chat Model (MAIN BRAIN): {chat_model_path}")
             logger.info(f"⚙️ n_gpu_layers={n_gpu_layers} n_ctx={n_ctx} n_batch={n_batch} n_ubatch={n_ubatch} flash_attn={flash_attn}")
-            # chat_format: determinato automaticamente dai metadati GGUF in model_profiles.py
             from config import MODEL_PROFILE as _init_profile
             _chat_format = _init_profile.chat_format
             logger.info(f"⚙️ chat_format={_chat_format} (family={_init_profile.family})")
@@ -148,7 +180,7 @@ class LlamaEngine:
                 chat_format=_chat_format,
                 verbose=False
             )
-            log_vram_usage("Dopo caricamento Chat Model")
+            log_vram_usage("Dopo caricamento Chat Model (Gemma 4)")
 
             # ── Estrazione metadati GGUF e aggiornamento MODEL_PROFILE ──
             try:
@@ -162,10 +194,8 @@ class LlamaEngine:
                     from model_profiles import detect_from_metadata
                     from config import MODEL_PROFILE as _old_profile
                     _new_profile = detect_from_metadata(_metadata, _old_profile)
-                    # Aggiorna globalmente config.MODEL_PROFILE
                     import config as _cfg
                     _cfg.MODEL_PROFILE = _new_profile
-                    # Aggiorna LLM_THINKING_MODE se non sovrascritto da env var
                     if not _cfg.LLM_THINKING_MODE_RAW:
                         _cfg.LLM_THINKING_MODE = _new_profile.thinking_support
                     logger.info(f"🧠 Modello rilevato: {_new_profile.model_name} "
@@ -177,47 +207,120 @@ class LlamaEngine:
             except Exception as _meta_err:
                 logger.warning(f"⚠️ Estrazione metadati modello fallita: {_meta_err}")
         else:
-            logger.warning(f"File {chat_model_path} non trovato!")
+            logger.warning(f"File chat model {chat_model_path} non trovato!")
 
-        # 2. Caricamento del Modello Embedding (Mini-modello delegato alla CPU o piccola porzione VRAM)
+        # ════════════════════════════════════════════════════════════════
+        # 2. EMBEDDING MODEL — Qwen3-Embedding su CPU (n_gpu_layers=0)
+        #    Libera ~400MiB VRAM per Gemma 4. La latenza passa da ~5ms a
+        #    ~50ms per batch, ma le embedding sono in coda asincrona e non
+        #    bloccano il flusso principale di chat.
+        # ════════════════════════════════════════════════════════════════
         if os.path.exists(embed_model_path):
-            logger.info(f"Caricamento Embed Model: {embed_model_path}")
+            from config import EMBED_N_GPU_LAYERS as _cfg_embed_gpu
+            logger.info(f"Caricamento Embed Model (CPU): {embed_model_path}")
+            logger.info(f"⚙️ n_gpu_layers={_cfg_embed_gpu} (CPU), n_ctx=8192, pooling=2")
             self.embed_model = Llama(
                 model_path=embed_model_path,
                 embedding=True,
-                n_gpu_layers=2,
+                n_gpu_layers=_cfg_embed_gpu,
                 n_ctx=8192,
                 n_batch=256,
-                n_threads=6,
+                n_threads=4,
                 verbose=False,
                 pooling=2
             )
-            log_vram_usage("Dopo caricamento Embed Model")
+            log_vram_usage("Dopo caricamento Embed Model (dovrebbe essere 0 incremento)")
 
-            # Warmup: prima chiamata di embedding per CUDA JIT compilation
-            # (evita ritardo di 30+s sulla prima richiesta utente)
+            # Warmup embedding su CPU (JIT non serve, ma first-call è lenta
+            # per la compilazione del grafo GGUF)
             try:
-                logger.info(f"🔄 Warmup Embed Model (CUDA JIT compilation)...")
+                logger.info(f"🔄 Warmup Embed Model (CPU first-call)...")
                 self.embed_model.create_embedding(["warmup"])
                 logger.info(f"✅ Embed Model warmup completato")
             except Exception as e:
                 logger.warning(f"⚠️ Embed Model warmup fallito (non critico): {e}")
         else:
-            logger.warning(f"File {embed_model_path} non trovato!")
+            logger.warning(f"File embed model {embed_model_path} non trovato!")
 
-    async def generate_chat(self, messages, tools=None, options=None, stream=False, grammar=None):
+        # ════════════════════════════════════════════════════════════════
+        # 3. GATEKEEPER LLM — Qwen3.5-0.8B-Instruct su CPU
+        #    n_gpu_layers=0, n_ctx=2048, n_threads=4
+        #    Usato per: classificazione intenti + compressione caveman prompt.
+        #    Modello tiny (~0.8B): inferenza ~100-200ms su CPU.
+        # ════════════════════════════════════════════════════════════════
+        if os.path.exists(gatekeeper_model_path):
+            from config import GATEKEEPER_N_CTX as _cfg_gk_ctx, GATEKEEPER_N_THREADS as _cfg_gk_threads
+            logger.info(f"Caricamento Gatekeeper Model (CPU): {gatekeeper_model_path}")
+            logger.info(f"⚙️ n_gpu_layers=0 n_ctx={_cfg_gk_ctx} n_threads={_cfg_gk_threads}")
+            self.gatekeeper_model = Llama(
+                model_path=gatekeeper_model_path,
+                n_gpu_layers=0,
+                n_ctx=_cfg_gk_ctx,
+                n_batch=128,
+                n_ubatch=128,
+                n_threads=_cfg_gk_threads,
+                flash_attn=False,
+                use_mmap=True,
+                chat_format="chatml",
+                verbose=False,
+            )
+            logger.info(f"✅ Gatekeeper Model caricato su CPU")
+
+            # Warmup: prima chiamata per compilazione grafo GGUF
+            try:
+                logger.info(f"🔄 Warmup Gatekeeper Model (CPU first-call)...")
+                self.gatekeeper_model.create_completion("warmup", max_tokens=1)
+                logger.info(f"✅ Gatekeeper Model warmup completato")
+            except Exception as e:
+                logger.warning(f"⚠️ Gatekeeper Model warmup fallito (non critico): {e}")
+        else:
+            logger.warning(
+                f"File gatekeeper model {gatekeeper_model_path} non trovato! "
+                "Gatekeeper e compressione disabilitati. "
+                "Imposta GATEKEEPER_MODEL_PATH nel .env per abilitare."
+            )
+
+        # Report VRAM finale
+        log_vram_usage("VRAM finale dopo caricamento tutti i modelli")
+
+    def _resolve_model(self, model: str):
+        """Seleziona il modello Llama in base al nome logico."""
+        if model == "gatekeeper":
+            if not self.gatekeeper_model:
+                raise RuntimeError("Gatekeeper model (Qwen3.5) non caricato — imposta GATEKEEPER_MODEL_PATH")
+            return self.gatekeeper_model
+        # default: main chat model (Gemma 4 GPU)
         if not self.chat_model:
-            return {"error": "Modello chat non caricato"}
+            raise RuntimeError("Chat model (Gemma 4) non caricato")
+        return self.chat_model
+
+    def _resolve_lock(self, model: str) -> PriorityLock:
+        """Seleziona il lock in base al modello."""
+        if model == "gatekeeper":
+            return self.gatekeeper_lock
+        return self.chat_lock
+
+    async def generate_chat(self, messages, tools=None, options=None, stream=False, grammar=None, model="chat"):
+        """Genera rispresa da un modello Llama.
+
+        Args:
+            messages: Lista di messaggi in formato OpenAI.
+            tools: Tool definitions per function calling.
+            options: Opzioni di generazione (temperature, max_tokens, ecc.).
+            stream: Se True, restituisce un generatore asincrono.
+            grammar: Grammatica GBNF per output strutturato.
+            model: "chat" (Gemma 4 GPU) o "gatekeeper" (Qwen3.5 CPU).
+        """
+        try:
+            llm = self._resolve_model(model)
+        except RuntimeError as e:
+            return {"error": str(e)}
 
         opts = options or {}
 
-        # --- Thinking Mode (Gemma/DeepSeek/QwQ) ---
-        # Verifica dal model profile se il modello caricato supporta <|think|>
-        _thinking_tag = "<|think|>"
-        # Se il chat_format è gemma, usa [Thinking] invece di <|think|>
-        if MODEL_PROFILE.chat_format == "gemma":
-            _thinking_tag = "[Thinking]"
-        if LLM_THINKING_MODE and MODEL_PROFILE.thinking_support and messages:
+        # --- Thinking Mode — solo per main chat model (Gemma) ---
+        if model == "chat" and LLM_THINKING_MODE and MODEL_PROFILE.thinking_support and messages:
+            _thinking_tag = "[Thinking]" if MODEL_PROFILE.chat_format == "gemma" else "<|think|>"
             processed_messages = []
             for msg in messages:
                 if isinstance(msg, dict) and msg.get("role") == "system":
@@ -236,15 +339,14 @@ class LlamaEngine:
         top_p = opts.get("top_p", 0.9)
         top_k = opts.get("top_k", 40)
         
-        # Mappiamo i tools Ollama in tools OpenAI compatibili con llama-cpp-python
+        # Tools disponibili solo per main chat model (Gemma)
         openai_tools = None
-        if tools:
+        if tools and model == "chat":
             openai_tools = []
             for t in tools:
                 if isinstance(t, dict) and "function" in t:
                     openai_tools.append(t)
                 elif isinstance(t, dict) and "name" in t:
-                    # Formato tools semplificato Ollama -> OpenAI
                     openai_tools.append({
                         "type": "function",
                         "function": {
@@ -254,8 +356,8 @@ class LlamaEngine:
                         }
                     })
 
-        # --- DELEGAZIONE EXTERNAL GPU (High-Availability Fallback) ---
-        if EXTERNAL_GPU_URL:
+        # --- DELEGAZIONE EXTERNAL GPU — solo per main chat model ---
+        if model == "chat" and EXTERNAL_GPU_URL:
             try:
                 payload = {
                     "model": MODEL_ID,
@@ -265,9 +367,7 @@ class LlamaEngine:
                 }
                 if tools: payload["tools"] = tools
 
-                # Ping veloce per verificare se il nodo GPU è online
                 async with httpx.AsyncClient(timeout=1.5) as client:
-                    # Effettuiamo una GET veloce per capire se il tunnel è su
                     await client.get(f"{EXTERNAL_GPU_URL.rstrip('/')}/")
                 
                 logger.info(f"🚀 Nodo GPU Esterno Raggiungibile! Offloading inferenza a {EXTERNAL_GPU_URL}...")
@@ -304,22 +404,21 @@ class LlamaEngine:
         # -----------------------------------------------------------
 
         loop = asyncio.get_running_loop()
+        lock = self._resolve_lock(model)
 
-        # Cap ragionevole: evita generazioni eccessivamente lunghe.
-        # Il default 2048 garantisce che i tag di coda (MEMORY, CONFIDENCE, ecc.)
-        # non vengano troncati prima della chiusura.
-        # Sovrascrivibile via LLM_MAX_TOKENS env var nel .env
-        _max_tokens_cap = LLM_MAX_TOKENS
-        max_tokens = min(max_tokens, _max_tokens_cap)
+        # Cap massimo tokens solo per chat model
+        if model == "chat":
+            _max_tokens_cap = LLM_MAX_TOKENS
+            max_tokens = min(max_tokens, _max_tokens_cap)
 
         if stream:
             async def async_generator():
-                async with PriorityLockContextManager(self.chat_lock, priority=0):
+                async with PriorityLockContextManager(lock, priority=0):
                     try:
                         generator = await asyncio.wait_for(
                             loop.run_in_executor(
                                 self.executor,
-                                lambda: self.chat_model.create_chat_completion(
+                                lambda: llm.create_chat_completion(
                                     messages=messages,
                                     tools=openai_tools,
                                     temperature=temperature,
@@ -356,12 +455,12 @@ class LlamaEngine:
                             break
             return async_generator()
         else:
-            async with PriorityLockContextManager(self.chat_lock, priority=0):
+            async with PriorityLockContextManager(lock, priority=0):
                 try:
                     response = await asyncio.wait_for(
                         loop.run_in_executor(
                             self.executor,
-                            lambda: self.chat_model.create_chat_completion(
+                            lambda: llm.create_chat_completion(
                                 messages=messages,
                                 tools=openai_tools,
                                 temperature=temperature,
@@ -381,6 +480,152 @@ class LlamaEngine:
                 except asyncio.TimeoutError:
                     logger.error(f"LLM inference timed out after 300s (max_tokens={max_tokens})")
                     return {"error": "LLM inference timed out", "choices": [{"message": {"role": "assistant", "content": "Mi dispiace, la generazione della risposta ha superato il tempo limite. Prova con una domanda più specifica."}}]}  # noqa
+
+    # ════════════════════════════════════════════════════════════════
+    # 3-CLASS INTENT CLASSIFIER (Qwen3.5 su CPU con LlamaGrammar)
+    # ════════════════════════════════════════════════════════════════
+
+    async def classify_intent(self, user_message: str, context: dict) -> GatekeeperResult:
+        """Classifica intento utente in project/meta/general usando Qwen3.5.
+
+        Args:
+            user_message: Query utente grezza.
+            context: Dict con active_project, projects_available, recent_messages.
+
+        Returns:
+            GatekeeperResult con intent, project (se project), confidence.
+        """
+        active_project = context.get("active_project") or "nessuno"
+        projects_str = ", ".join(context.get("projects_available", [])) or "nessuno"
+        recent_msgs = context.get("recent_messages", [])
+        recent_str = " | ".join(recent_msgs[-3:]) if recent_msgs else "nessuno"
+
+        prompt = f"""Contesto:
+- Progetto attivo: {active_project}
+- Progetti disponibili: {projects_str}
+- Messaggi recenti: {recent_str}
+
+Richiesta: "{user_message[:800]}"
+
+Classifica: project (codice/file/progetto), meta (lista/capacità/chi sei), general (conversazione).
+JSON esatto: {{"intent":"project|meta|general","project":"null|Nome","confidence":0.95}}
+"""
+        from llama_cpp import LlamaGrammar
+        grammar_str = r'''root ::= "{\"intent\": " intent ", \"project\": " projval ", \"confidence\": " number "}"
+intent ::= "\"project\"" | "\"meta\"" | "\"general\""
+projval ::= string | "null"
+string ::= "\"" word "\""
+word ::= [a-zA-Z] ([a-zA-Z0-9_.-])*
+number ::= [0-1] "." digit+ | "1" "." "0"+
+digit ::= [0-9]'''
+
+        try:
+            grammar_obj = LlamaGrammar.from_string(grammar_str)
+            messages = [{"role": "user", "content": prompt}]
+            response = await self.generate_chat(
+                messages, stream=False,
+                options={"temperature": 0.0, "num_predict": 60},
+                grammar=grammar_obj,
+                model="gatekeeper",
+            )
+            if "error" in response:
+                logger.warning(f"Gatekeeper: errore LLM → fallback general ({response['error']})")
+                return GatekeeperResult(intent="general", confidence=0.0)
+
+            content = extract_content(response)
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if not match:
+                logger.warning(f"Gatekeeper: JSON non trovato in '{content[:60]}...' → fallback general")
+                return GatekeeperResult(intent="general", confidence=0.0)
+
+            result = json.loads(match.group(0))
+            intent = result.get("intent", "general")
+            project = result.get("project")
+            confidence = float(result.get("confidence", 0.0))
+
+            available = context.get("projects_available", [])
+            if project and project not in available:
+                project = None
+            if intent not in ("project", "meta", "general"):
+                intent = "general"
+
+            logger.info(f"🧠 Gatekeeper Qwen3.5: {intent} | project={project} | conf={confidence:.2f}")
+            return GatekeeperResult(
+                intent=intent,
+                project=project if intent == "project" else None,
+                confidence=confidence,
+            )
+        except Exception as e:
+            logger.warning(f"Gatekeeper: eccezione → fallback general ({repr(e)})")
+            return GatekeeperResult(intent="general", confidence=0.0)
+
+    # ════════════════════════════════════════════════════════════════
+    # CAVEMAN PROMPT COMPRESSOR (Qwen3.5 su CPU)
+    # ════════════════════════════════════════════════════════════════
+
+    async def compress_prompt(
+        self,
+        user_query: str,
+        rag_context: str = "",
+        history: str = "",
+        active_project: Optional[str] = None,
+    ) -> str:
+        """Comprime dati grezzi (query + RAG + history) in prompt caveman
+        usando Qwen3.5 su CPU. Output ridotto del 40-60% in token.
+
+        Args:
+            user_query: Query utente originale.
+            rag_context: Frammenti RAG (codice, documenti) come stringa.
+            history: Cronologia recente sessione.
+            active_project: Nome progetto attivo o None.
+
+        Returns:
+            Stringa compressa con formato [CONTEXT], [USER_QUERY], [INSTRUCTION].
+        """
+        # Assembla il blocco raw da comprimere
+        raw_parts = []
+        if active_project:
+            raw_parts.append(f"[PROJECT: {active_project}]")
+        if history:
+            raw_parts.append(f"[HISTORY]\n{history[:1500]}")
+        if rag_context:
+            raw_parts.append(f"[RAG_CONTEXT]\n{rag_context[:3000]}")
+        raw_parts.append(f"[USER_QUERY]\n{user_query}")
+
+        raw_data = "\n\n".join(raw_parts)
+
+        messages = [
+            {"role": "system", "content": CAVEMAN_COMPRESSOR_SYSTEM_PROMPT},
+            {"role": "user", "content": raw_data},
+        ]
+
+        try:
+            response = await self.generate_chat(
+                messages,
+                stream=False,
+                options={"temperature": 0.0, "num_predict": 2048},
+                model="gatekeeper",
+            )
+            if "error" in response:
+                logger.warning(f"Compressore: errore → fallback raw ({response['error']})")
+                return raw_data[:4096]
+
+            compressed = extract_content(response)
+            if not compressed or len(compressed) < 10:
+                logger.warning("Compressore: output vuoto → fallback raw")
+                return raw_data[:4096]
+
+            # Log compression ratio
+            raw_len = len(raw_data)
+            comp_len = len(compressed)
+            ratio = (1 - comp_len / raw_len) * 100 if raw_len > 0 else 0
+            logger.info(f"🗜️ Caveman compression: {raw_len} → {comp_len} char ({ratio:.0f}% riduzione)")
+
+            return compressed.strip()
+
+        except Exception as e:
+            logger.warning(f"Compressore: eccezione → fallback raw ({repr(e)})")
+            return raw_data[:4096]
 
     async def get_embeddings(self, texts, priority=10):
         if not self.embed_model:

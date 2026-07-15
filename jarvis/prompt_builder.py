@@ -1,9 +1,14 @@
 """
-Prompt Builder — Gatekeeper LLM per classificazione intento + costruzione del super-prompt omnisciente.
+Prompt Builder — Pipeline di generazione prompt a 4 step con Caveman Compression.
+
+FLUSSO:
+  STEP 1: Keyword Bypass (regex, 0 LLM)
+  STEP 2: Qwen3.5 Gatekeeper (classificazione intento con grammar)
+  STEP 3: Qwen3.5 Caveman Prompt Architect (compressione 40-60%)
+  STEP 4: Gemma 4 su GPU → risposta in stile caveman
 """
 
 import datetime
-import json
 import os
 import re
 import asyncio
@@ -16,20 +21,12 @@ from memory import extract_memories, save_to_memory
 from web_search import perform_web_search_and_crawl
 from tag_processor import build_tag_instructions
 from task_manager import get_open_tasks
-from llm_engine import engine, extract_content
-from llama_cpp import LlamaGrammar
+from llm_engine import engine, extract_content, GatekeeperResult
 import state
 
-from dataclasses import dataclass
-from typing import Literal
-
-
-@dataclass
-class GatekeeperResult:
-    intent: str  # "project" | "meta" | "general"
-    project: str | None = None
-    confidence: float = 0.0
-
+# ════════════════════════════════════════════════════════════════
+# STEP 1: FAST PATHS — Keyword Bypass (0 LLM calls)
+# ════════════════════════════════════════════════════════════════
 
 META_PHRASES = re.compile(
     r'(quali\s+(sono\s+)?(i\s+)?progetti'
@@ -61,7 +58,6 @@ PURE_GREETING = re.compile(
     re.IGNORECASE
 )
 
-
 PROJECT_KEYWORDS = {
     'codice', 'progetto', 'file', 'script', 'funzione', 'classe', 'metodo',
     'bug', 'errore', 'riga', 'cartella', 'struttura', 'repo', 'repository',
@@ -76,145 +72,99 @@ PROJECT_KEYWORDS = {
     'versione', 'release', 'commit', 'branch', 'migrazione', 'backup'
 }
 
-async def llm_gatekeeper_v3(user_message: str, context: dict) -> GatekeeperResult:
-    """3-class intent classifier: project / meta / general.
+# System prompt per Gemma 4 in stile caveman
+CAVEMAN_GEMMA_SYSTEM = (
+    "You are a direct, no-fluff coding assistant. "
+    "Respond in pure Caveman style: no preambles, no greetings, no explanations. "
+    "Go directly to code fixes, bullet-point facts, or direct answers. "
+    "If writing code: output ONLY the code block with SEARCH/REPLACE format. "
+    "If answering: 1-3 bullet facts max. "
+    "Never say 'I think', 'I believe', 'I'd suggest'. Just state facts."
+)
 
-    Fast paths (0 LLM calls):
-      1. Project name in query → PROJECT (hard override)
-      2. Meta phrase match → META
-      3. Pure short greeting → GENERAL
-      4. Technical keywords → PROJECT
-    Slow path:
-      Context-injected LLM call with 3-class grammar → structured JSON.
+CAVEMAN_GEMMA_SYSTEM_ADDENDUM = (
+    "\n\n[RESPONSE RULES]\n"
+    "- Output ONLY the response. No thinking tags, no XML, no markdown wrappers.\n"
+    "- Code changes: SEARCH/REPLACE blocks only.\n"
+    "- Facts: raw bullet points.\n"
+    "- Questions: direct 1-sentence answer.\n"
+    "- Stop immediately after answering."
+)
+
+
+async def _keyword_bypass(user_message: str, context: dict) -> GatekeeperResult | None:
+    """STEP 1: Fast path bypass — 0 LLM calls.
+
+    Returns GatekeeperResult se matcha, None se deve passare a STEP 2.
     """
     msg_lower = user_message.lower().strip()
     if len(msg_lower) < 3:
         return GatekeeperResult(intent="general", confidence=1.0)
 
-    # ── Fast path 1: Project name mention (HARD OVERRIDE) ──
     projects = context.get("projects_available", [])
     for proj in projects:
         proj_lower = proj.lower()
         for variant in (proj_lower, proj_lower.replace('_', '-'), proj_lower.replace('_', ' ')):
             if variant in msg_lower:
-                logger.info(f"🧠 GatekeeperV3: PROJECT (project in query: {proj})")
+                logger.info(f"🧠 Bypass: PROJECT (nome progetto in query: {proj})")
                 return GatekeeperResult(intent="project", project=proj, confidence=1.0)
 
-    # ── Fast path 2: Meta query (liste, capacità, chi sei) ──
     if META_PHRASES.search(msg_lower):
-        logger.info(f"🧠 GatekeeperV3: META (phrase match)")
+        logger.info("🧠 Bypass: META (frase match)")
         return GatekeeperResult(intent="meta", confidence=1.0)
 
-    # ── Fast path 3: Pure greeting → general ──
     if PURE_GREETING.match(msg_lower):
-        logger.info(f"🧠 GatekeeperV3: GENERAL (pure greeting)")
+        logger.info("🧠 Bypass: GENERAL (saluto puro)")
         return GatekeeperResult(intent="general", confidence=1.0)
 
-    # ── Fast path 4: Technical keywords (codice, file, bug, ecc.) ──
     words = set(re.findall(r'\b\w+\b', msg_lower))
     if words.intersection(PROJECT_KEYWORDS):
-        logger.info(f"🧠 GatekeeperV3: PROJECT (keyword match)")
+        logger.info("🧠 Bypass: PROJECT (keyword match)")
         return GatekeeperResult(intent="project", confidence=1.0)
     if re.search(r'(\.[a-z]{1,4}\b|\b(src|app|lib|bin)/)', msg_lower):
-        logger.info(f"🧠 GatekeeperV3: PROJECT (regex path match)")
+        logger.info("🧠 Bypass: PROJECT (path regex match)")
         return GatekeeperResult(intent="project", confidence=1.0)
 
-    # ── Slow path: LLM with context injection ──
-    return await _llm_gatekeeper_classify(user_message, context)
+    return None  # Nessun bypass → STEP 2
 
 
-async def _llm_gatekeeper_classify(user_message: str, context: dict) -> GatekeeperResult:
-    """LLM-based 3-class gatekeeper with grammar constraint."""
-    active_project = context.get("active_project") or "nessuno"
-    projects_str = ", ".join(context.get("projects_available", [])) or "nessuno"
-    recent_msgs = context.get("recent_messages", [])
-    recent_str = " | ".join(recent_msgs[-3:]) if recent_msgs else "nessuno"
+async def _run_gatekeeper(user_message: str, context: dict) -> GatekeeperResult:
+    """STEP 2: Qwen3.5 Gatekeeper — classificazione intento con grammar.
 
-    prompt = f"""Contesto:
-- Progetto attivo: {active_project}
-- Progetti disponibili: {projects_str}
-- Messaggi recenti: {recent_str}
-
-Richiesta: "{user_message[:800]}"
-
-Classifica: project (codice/file/progetto), meta (lista/capacità/chi sei), general (conversazione).
-JSON esatto: {{"intent":"project|meta|general","project":"null|Nome","confidence":0.95}}
-"""
-    try:
-        grammar_str = r'''root ::= "{\"intent\": " intent ", \"project\": " projval ", \"confidence\": " number "}"
-intent ::= "\"project\"" | "\"meta\"" | "\"general\""
-projval ::= string | "null"
-string ::= "\"" word "\""
-word ::= [a-zA-Z] ([a-zA-Z0-9_.-])*
-number ::= [0-1] "." digit+ | "1" "." "0"+
-digit ::= [0-9]'''
-        grammar_obj = LlamaGrammar.from_string(grammar_str)
-        messages = [{"role": "user", "content": prompt}]
-        response = await engine.generate_chat(
-            messages, stream=False,
-            options={"temperature": 0.0, "num_predict": 60},
-            grammar=grammar_obj,
-        )
-        if "error" in response:
-            return GatekeeperResult(intent="general", confidence=0.0)
-
-        content = extract_content(response)
-        match = re.search(r'\{.*\}', content, re.DOTALL)
-        if not match:
-            logger.warning(f"🧠 GatekeeperV3: JSON non trovato in '{content[:60]}...' — fallback general")
-            return GatekeeperResult(intent="general", confidence=0.0)
-
-        result = json.loads(match.group(0))
-        intent = result.get("intent", "general")
-        project = result.get("project")
-        confidence = float(result.get("confidence", 0.0))
-
-        # Validate: project name must be real
-        available = context.get("projects_available", [])
-        if project and project not in available:
-            project = None
-        if intent not in ("project", "meta", "general"):
-            intent = "general"
-
-        logger.info(f"🧠 GatekeeperV3: LLM → {intent} | project={project} | conf={confidence:.2f}")
-        return GatekeeperResult(
-            intent=intent,
-            project=project if intent == "project" else None,
-            confidence=confidence,
-        )
-    except Exception as e:
-        logger.warning(f"🧠 GatekeeperV3: eccezione LLM → fallback general ({repr(e)})")
-        return GatekeeperResult(intent="general", confidence=0.0)
+    Usa engine.classify_intent() che invoca Qwen3.5 su CPU.
+    """
+    return await engine.classify_intent(user_message, context)
 
 
 async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False):
     """
-    Pipeline di arricchimento: fonde memoria episodica, RAG documentale e web intelligence
-    in un unico super-prompt con tag XML.
-    Timeout di 30s per evitare blocchi su gateway/model lenti.
+    Pipeline di arricchimento a 4 step con Caveman Compression.
 
-    Se concise=True, salta RAG/memoria/web e usa solo un system prompt minimo.
+    FLUSSO:
+      STEP 1: Keyword Bypass (regex, 0 LLM)
+      STEP 2: Qwen3.5 Gatekeeper (CPU, classificazione intento)
+      STEP 3: Qwen3.5 Caveman Compression (CPU, comprime RAG+history+query)
+      STEP 4: Gemma 4 (GPU) → risposta caveman
+
+    Se concise=True, salta RAG/memoria/web e usa compressed prompt minimo.
     """
     user_messages = [m["content"] for m in messages if m["role"] == "user"]
     latest_msg = user_messages[-1] if user_messages else ""
     if not latest_msg:
         return messages
 
-    # Manteniamo più storia per dare continuità al discorso.
-    # Con 16K token di contesto, 20 messaggi sono sostenibili senza esplodere.
     if len(messages) > 20:
         messages = messages[-20:]
-    
-    for m in messages[:-1]:  # Non tocchiamo l'ultimo messaggio dell'utente che riceverà l'iniezione
+
+    for m in messages[:-1]:
         if m.get("content") and len(m["content"]) > 1500:
             m["content"] = m["content"][:1500] + "\n...[TRUNCATED FOR CONTEXT LIMIT]..."
 
     current_user_id = user_id if user_id else "alfio_dev"
 
-    # ── MODALITÀ CONCISE: skip RAG, memoria, web, progetto ──
+    # ── MODALITÀ CONCISE: compressione minima, skip RAG/memoria/web ──
     if concise:
         _, clean_msg = await perform_web_search_and_crawl(latest_msg)
-        # Salva comunque in memoria il messaggio utente
         if state.memory:
             try:
                 async def _bg_add_concise():
@@ -224,27 +174,32 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 task.add_done_callback(state.background_tasks.discard)
             except Exception:
                 pass
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        system_directive = (
-            f"\n\n<system_instructions>\n"
-            f"Sei {BOT_NAME}, assistente AI di Alfio. Ora attuale: {now_str}.\n"
-            "Rispondi in modo estremamente CONCISO. Massimo 2-3 frasi. Vai dritto al punto.\n"
-            "Non usare tag XML, non elencare opzioni, non fare domande di follow-up.\n"
-            "Non menzionare il contesto o i tag.\n"
-            "</system_instructions>"
+        # Compressione caveman anche in modalità concise
+        compressed = await engine.compress_prompt(
+            user_query=clean_msg,
+            rag_context="",
+            history="",
+            active_project=None,
         )
-        super_prompt = system_directive + f"\n{clean_msg}"
+        # Se la compressione fallisce (output troppo corto o errore), usa raw
+        if not compressed or len(compressed) < 20:
+            logger.warning("⚠️ Caveman compress fallita in concise mode, fallback raw")
+            caveman_prompt = f"{CAVEMAN_GEMMA_SYSTEM}\n\nQuery: {clean_msg}\n\n{CAVEMAN_GEMMA_SYSTEM_ADDENDUM}"
+        else:
+            caveman_prompt = f"{CAVEMAN_GEMMA_SYSTEM}\n\n{compressed}\n\n{CAVEMAN_GEMMA_SYSTEM_ADDENDUM}"
         for m in reversed(messages):
             if m["role"] == "user":
-                m["content"] = super_prompt
+                m["content"] = caveman_prompt
                 break
         return messages
 
-    # ── MODALITÀ NORMALE ──
+    # ════════════════════════════════════════════════════════════════
+    # CONTEXT GATHERING (invariato rispetto a prima)
+    # ════════════════════════════════════════════════════════════════
     web_ctx, clean_msg = await perform_web_search_and_crawl(latest_msg)
     mem_ctx, rag_ctx = "", ""
 
-    # Super-prompt tag preprocessing (dall'input utente) — va QUI prima di qualsiasi uso
+    # Super-prompt tag preprocessing
     _user_override_persona = ""
     _user_override_focus = ""
     _user_override_lang = ""
@@ -252,7 +207,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     _super_tag_re = re.compile(r"<(PERSONA|FOCUS|LANG|MEMORY_COUNT)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
     for match in _super_tag_re.finditer(latest_msg):
         tag_name = match.group(1).upper()
-        _ = match.group(2)  # attrs (unused but captured)
+        _ = match.group(2)
         tag_content = match.group(3).strip()
         if tag_name == "PERSONA":
             _user_override_persona = tag_content
@@ -265,7 +220,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 _user_override_mem_count = max(0, int(tag_content))
             except ValueError:
                 pass
-    # Rimuove i super-prompt tag dal messaggio prima di inoltrarlo al LLM
     if _super_tag_re.search(latest_msg):
         latest_msg = _super_tag_re.sub("", latest_msg).strip()
 
@@ -274,14 +228,24 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     _all_projects = await list_rag_projects()
     _recent_user_msgs = [m["content"] for m in messages if m["role"] == "user"][-3:]
     
-    # ── RUN 3-CLASS GATEKEEPER ──
-    gk = await llm_gatekeeper_v3(latest_msg, {
+    # ════════════════════════════════════════════════════════════════
+    # STEP 1: KEYWORD BYPASS (0 LLM calls)
+    # ════════════════════════════════════════════════════════════════
+    _gk_context = {
         "active_project": _active_before,
         "projects_available": _all_projects,
         "recent_messages": _recent_user_msgs,
-    })
+    }
+    gk = await _keyword_bypass(latest_msg, _gk_context)
+    
+    # ════════════════════════════════════════════════════════════════
+    # STEP 2: QWEN3.5 GATEKEEPER (solo se bypass fallisce)
+    # ════════════════════════════════════════════════════════════════
+    if gk is None:
+        gk = await _run_gatekeeper(latest_msg, _gk_context)
+    
     logger.info(
-        f"🧠 GatekeeperV3: {gk.intent} | project={gk.project} | "
+        f"🧠 Gatekeeper: {gk.intent} | project={gk.project} | "
         f"conf={gk.confidence:.2f} | '{latest_msg[:40]}...'"
     )
     
@@ -294,11 +258,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         _is_meta_query = True
         if _all_projects:
             rag_ctx = "📚 Progetti indicizzati nel RAG:\n" + "\n".join(f"- {p}" for p in _all_projects)
-        logger.info(f"🗂️ Gatekeeper META: lista progetti iniettata, contesto progetto saltato")
+        logger.info("🗂️ Gatekeeper META: lista progetti, contesto progetto saltato")
     
     elif gk.intent == "project":
         _is_project_query = True
-        # Risoluzione progetto: LLM > detect_project > last_project
         if gk.project and gk.project in _all_projects:
             active_project = gk.project
         else:
@@ -306,48 +269,38 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if not active_project:
             active_project = state.get_last_project(current_user_id, conversation_id)
             if active_project:
-                logger.info(f"📁 Progetto ripristinato dal contesto: {active_project} | Query: '{latest_msg[:50]}...'")
+                logger.info(f"📁 Progetto ripristinato dal contesto: {active_project}")
         if active_project:
-            logger.info(f"📁 Progetto attivo: {active_project} | Query: '{latest_msg[:50]}...'")
+            logger.info(f"📁 Progetto attivo: {active_project}")
             state.set_last_project(current_user_id, conversation_id, active_project)
-    
-    # else: general — active_project resta None, last_project invariato
 
+    # Salva in memoria e recupera memorie
     if state.memory:
-        # Salva sempre in memoria il messaggio utente (con metadati di progetto se rilevato)
         try:
             async def _bg_add():
                 await save_to_memory(clean_msg, user_id=current_user_id, project=active_project)
-
             task = asyncio.create_task(_bg_add())
             state.background_tasks.add(task)
             task.add_done_callback(state.background_tasks.discard)
         except Exception as e:
-            logger.warning(f"Errore memory add in prompt builder: {e}")
+            logger.warning(f"Errore memory add: {e}")
 
-        # Recupera memorie — SEMPRE (memorie personali) + progetto se attivo
-        # Le memorie personali (senza progetto) vengono cercate sempre in modo che
-        # informazioni come "il mio nome è Mario" siano recuperabili anche in
-        # conversazioni generiche dove non c'è un progetto attivo.
         try:
             loop = asyncio.get_running_loop()
             _mem_limit = _user_override_mem_count if _user_override_mem_count > 0 else 5
             memory_results = []
 
-            # Tier 1: memorie generali (senza filtro progetto) — sempre
             general_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id}, limit=_mem_limit)
             general_res = await loop.run_in_executor(state.mem0_executor, general_search)
             if general_res:
                 memory_results.append(general_res)
 
-            # Tier 2: memorie specifiche del progetto (solo se progetto attivo)
             if active_project:
                 project_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id, "project": active_project}, limit=_mem_limit)
                 project_res = await loop.run_in_executor(state.mem0_executor, project_search)
                 if project_res:
                     memory_results.append(project_res)
 
-            # Unisce i risultati, estraendo solo testo leggibile
             all_memories = []
             if isinstance(memory_results, list):
                 for r in memory_results:
@@ -356,14 +309,14 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                         all_memories.append(extracted)
             mem_ctx = "\n".join(all_memories) if all_memories else ""
         except Exception as e:
-            logger.warning(f"Errore memory search in prompt builder: {e}")
+            logger.warning(f"Errore memory search: {e}")
 
+    # RAG context
     if latest_msg.startswith("/web "):
         rag_ctx = ""
     else:
         full_files_content = ""
         if _is_project_query:
-            # Trova nomi di file nel prompt (es. auth.py, src/main.go)
             matches = set(re.findall(r'\b([\w\.\-/]+\.(?:py|js|ts|jsx|tsx|go|c|cpp|h|hpp|rs|sql|yaml|yml|md|json))\b', latest_msg))
             if matches:
                 filt = GitignoreFilter(DOC_DIR)
@@ -380,7 +333,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                                         with open(fp, "r", encoding="utf-8", errors="ignore") as f:
                                             fc = f.read()
                                             full_files_content += f"\n\n📄 FILE COMPLETO RICHIESTO ({rp}):\n```\n{fc}\n```\n"
-                                    except Exception as e: logger.warning(f"Errore silenziato: {e}")
+                                    except Exception as e:
+                                        logger.warning(f"Errore silenziato: {e}")
 
         if not _is_meta_query:
             _rag_project = _user_override_focus if _user_override_focus else active_project
@@ -388,8 +342,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if full_files_content:
             rag_ctx = full_files_content + "\n" + rag_ctx
 
-    # Auto web discovery: per saluti e conversazione generica breve si salta
-    # (evita chiamate web inutili e lente per "ciao" o "grazie").
+    # Auto web discovery
     _is_short_greeting = len(clean_msg.strip()) < 20 and not _is_project_query
     if not _is_short_greeting and not rag_ctx.strip() and not web_ctx:
         search_query = clean_msg
@@ -417,36 +370,31 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 state.background_tasks.add(task)
                 task.add_done_callback(state.background_tasks.discard)
 
-    # Distribuzione dinamica del budget di contesto basata sul modello caricato
+    # ════════════════════════════════════════════════════════════════
+    # STEP 3: QWEN3.5 CAVEMAN PROMPT COMPRESSION
+    # ════════════════════════════════════════════════════════════════
+    # Budget dinamico del contesto per il materiale raw da comprimere
     num_ctx = int(LLM_OPTIONS.get("num_ctx", MODEL_PROFILE.default_ctx))
     if num_ctx > MODEL_PROFILE.max_ctx:
         num_ctx = MODEL_PROFILE.max_ctx
-        
-    # Teniamo 5000 token liberi per history, risposta e system prompt
     safe_tokens_for_prompt = num_ctx - 5000
-    
-    # Qwen tokenizza il codice densamente. 1 token = ~1.3 caratteri nei casi peggiori
     MAX_BUDGET = int(safe_tokens_for_prompt * 1.3)
     if MAX_BUDGET > 15000:
-        MAX_BUDGET = 15000  # Hard limit in caratteri per l'intero RAG (circa ~11k token)
+        MAX_BUDGET = 15000
     elif MAX_BUDGET < 4000:
         MAX_BUDGET = 4000
-    
-    # RAG prende la priorità nel budget per garantire risposte groundate.
-    # Mem0 e web si dividono lo spazio residuale.
+
     rag_budget = int(MAX_BUDGET * 0.55)
     rag_final = rag_ctx.strip()[:rag_budget] if rag_ctx and rag_ctx.strip() else ""
 
     remaining = MAX_BUDGET - len(rag_final)
-    # Filtra l'albero globale per mostrare SOLO il progetto attivo (evita leak di struttura progetti terzi)
     if rag_ctx and rag_ctx.strip() and active_project:
         _tree_lines = state.project_tree_cache.split('\n')
         _filtered = []
         _capture = None
         for _line in _tree_lines:
-            # Livello 1: 📁 NomeProgetto/ (inizio di un progetto)
             if _line.startswith('📁 ') and _line.endswith('/'):
-                _proj_name = _line[2:-1]  # Rimuove "📁 " e "/"
+                _proj_name = _line[2:-1]
                 _capture = _proj_name == active_project
             if _capture:
                 _filtered.append(_line)
@@ -462,7 +410,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     remaining -= len(web_final)
 
     mem_final = mem_ctx.strip()[:min(800, remaining)] if mem_ctx and mem_ctx.strip() else ""
-    
+
     open_tasks = get_open_tasks(user_id)
     tasks_final = ""
     if open_tasks:
@@ -470,118 +418,59 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         for k, v in open_tasks.items():
             t_type = "Progetto" if v.get("owner", "global") == "global" else "Personale"
             tasks_final += f"- [{k}] [{t_type}] {v['desc']} (Prio: {v['priority']}, Scad: {v['deadline']})\n"
-    
-    blocks = []
-    if mem_final:
-        blocks.append(f"<user_memory>\n{mem_final}\n</user_memory>")
+
+    # Nuova history string per il compressore
+    history_str = " | ".join(_recent_user_msgs) if _recent_user_msgs else ""
     if tasks_final:
-        blocks.append(f"<todo_list>\n{tasks_final}\n</todo_list>")
-    if rag_final:
-        blocks.append(
-            f"<project_tree>\n{tree_ctx}\n</project_tree>\n"
-            f"<retrieved_code>\n{rag_final}\n</retrieved_code>"
-        )
+        history_str = (history_str + "\n" + tasks_final) if history_str else tasks_final
+    rag_context_for_compress = rag_final
+    if tree_ctx:
+        rag_context_for_compress = tree_ctx + "\n" + rag_context_for_compress if rag_context_for_compress else tree_ctx
     if web_final:
-        blocks.append(f"<web_data>\n{web_final}\n</web_data>")
-    if active_project:
-        blocks.append(f"<active_project>\n{active_project}\n</active_project>")
+        rag_context_for_compress = rag_context_for_compress + "\n[WEB]\n" + web_final if rag_context_for_compress else "[WEB]\n" + web_final
+    if mem_final:
+        rag_context_for_compress = rag_context_for_compress + "\n[MEMORY]\n" + mem_final if rag_context_for_compress else "[MEMORY]\n" + mem_final
 
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    # ── Helper per costruire il system directive (deduplicato) ──
-    def _build_system_directive(
-        persona: str = "",
-        focus: str = "",
-        lang: str = "",
-        is_project_query: bool = False,
-    ) -> str:
-        """
-        Costruisce il blocco <system_instructions> in modo unificato.
-        Elimina la duplicazione dei 3 blocchi quasi identici.
-        """
-        # Progetto attivo: messaggio contestuale
-        if active_project:
-            if is_project_query:
-                proj_text = (
-                    f"\nCONTESTO ATTIVO: Sei nel progetto <active_project>{active_project}</active_project>.\n"
-                    "Limita TUTTE le tue risposte, analisi e modifiche al codice a QUESTO progetto specifico.\n"
-                    "NON confondere questo progetto con altri progetti di Collateral Studios.\n"
-                    "Se l'utente menziona file o path, verifica che appartengano a questo progetto.\n"
-                )
-            else:
-                proj_text = (
-                    f"\nCONTESTO ATTIVO: Stai parlando del progetto <active_project>{active_project}</active_project>.\n"
-                    "Tutte le tue risposte DEVONO essere relative a QUESTO progetto. Non mescolare informazioni di altri progetti.\n"
-                )
-        else:
-            if is_project_query:
-                proj_text = (
-                    "\nNESSUN PROGETTO ATTIVO: non c'è alcun progetto selezionato.\n"
-                    "Non fare supposizioni su quale progetto l'utente stia lavorando.\n"
-                    "Se l'utente non specifica un progetto, chiediglielo prima di procedere.\n"
-                )
-            else:
-                proj_text = (
-                    "\nNESSUN PROGETTO ATTIVO: non c'è alcun progetto selezionato.\n"
-                    "Non fare supposizioni su quale progetto l'utente stia lavorando.\n"
-                    "Se l'utente non specifica un progetto, rispondi in modo generico.\n"
-                )
-
-        persona_block = f"\nPERSONA: {persona}\n" if persona else ""
-        focus_block = f"\nFOCUS: {focus}\n" if focus else ""
-        lang_block = f"\nLINGUA RICHIESTA: rispondi sempre in {lang}.\n" if lang else ""
-
-        if is_project_query:
-            # Modalità codice/progetto: più strutturata, SEARCH/REPLACE
-            return f"""
-<system_instructions>
-Sei il Lead Software Engineer per Collateral Studios. Il tuo nome è {BOT_NAME}. Ora attuale: {now_str}.{proj_text}{persona_block}{focus_block}{lang_block}
-Regole assolute:
-0. Non identificarti mai come un modello LLM (come Qwen o OpenAI). Se ti chiedono chi sei, rispondi di essere {BOT_NAME}.
-1. Rispondi in modo DIRETTO e CONCISO, andando dritto al punto con elenchi puntati.
-2. Basati sui contenuti di <retrieved_code> e <user_memory>. Se non hai informazioni sufficienti, DILLO.
-3. Se nel <retrieved_code> sono presenti delle "📜 Regole del Progetto", SEGUILE ALLA LETTERA per qualsiasi frammento di codice che generi o revisioni.
-4. Se devi apportare modifiche a file esistenti o scrivere codice, usa ESCLUSIVAMENTE il formato SEARCH/REPLACE diff block:
-<<<<<<< SEARCH
-[codice esatto da sostituire]
-=======
-[nuovo codice]
->>>>>>> REPLACE
-5. NON menzionare MAI i tag XML o la parola "contesto" nella tua risposta.
-6. Usa i tag Azione solo quando necessario:
-{build_tag_instructions()}
-7. Appena hai finito, FERMATI IMMEDIATAMENTE.
-</system_instructions>
-"""
-        else:
-            # Modalità conversazione: più naturale
-            return (
-                f"\n\n<system_instructions>\n"
-                f"Sei l'IA tecnica e analitica di Collateral Studios. Il tuo nome è {BOT_NAME}. Ora attuale: {now_str}.\n"
-                f"0. Non identificarti mai come un modello LLM. Se ti chiedono chi sei, rispondi di essere {BOT_NAME}.{proj_text}{persona_block}{focus_block}{lang_block}"
-                "1. Rispondi in modo naturale ma non banale. Evita lunghi saluti. Agisci da vero assistente.\n"
-                "2. Utilizza in modo invisibile le informazioni fornite (memoria, task, codice, web). NON menzionare MAI esplicitamente i tag XML.\n"
-                "3. I tag Azione disponibili sono:\n"
-                f"{build_tag_instructions()}\n"
-                "4. NON ripetere frasi a vuoto e fermati appena hai risposto.\n"
-                "</system_instructions>\n"
-            )
-
-    system_directive = _build_system_directive(
-        persona=_user_override_persona,
-        focus=_user_override_focus,
-        lang=_user_override_lang,
-        is_project_query=_is_project_query,
+    # Esegue la compressione caveman su Qwen3.5 (CPU)
+    compressed = await engine.compress_prompt(
+        user_query=clean_msg,
+        rag_context=rag_context_for_compress,
+        history=history_str,
+        active_project=active_project,
     )
 
-    if blocks:
-        super_prompt = "\n\n".join(blocks) + system_directive + f"\nDomanda: {clean_msg}"
-    else:
-        super_prompt = system_directive + f"\nDomanda: {clean_msg}"
+    # Se la compressione fallisce (Qwen3.5 non caricato o errore),
+    # usa fallback raw limitato
+    if not compressed or len(compressed) < 20:
+        logger.warning("⚠️ Caveman compression fallita, uso fallback raw")
+        fallback_parts = []
+        if mem_final:
+            fallback_parts.append(f"Memory: {mem_final[:500]}")
+        if tasks_final:
+            fallback_parts.append(f"Tasks: {tasks_final[:300]}")
+        if active_project:
+            fallback_parts.append(f"Project: {active_project}")
+        if rag_final:
+            fallback_parts.append(f"Context:\n{rag_final[:2000]}")
+        if web_final:
+            fallback_parts.append(f"Web: {web_final[:500]}")
+        fallback_parts.append(f"Query: {clean_msg}")
+        compressed = "\n".join(fallback_parts)[:4096]
+
+    # ════════════════════════════════════════════════════════════════
+    # STEP 4: BUILD GEMMA 4 PROMPT (caveman system + compressed input)
+    # ════════════════════════════════════════════════════════════════
+    # Gemma 4 vede: system caveman + compressed prompt + caveman response instruction
+    # Non ci sono più tag XML — tutto è in puro stile caveman.
+    caveman_prompt = (
+        f"{CAVEMAN_GEMMA_SYSTEM}\n\n"
+        f"{compressed}\n\n"
+        f"{CAVEMAN_GEMMA_SYSTEM_ADDENDUM}"
+    )
 
     for m in reversed(messages):
         if m["role"] == "user":
-            m["content"] = super_prompt
+            m["content"] = caveman_prompt
             break
 
     return messages
