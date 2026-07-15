@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "jarvis-telemetry": {
+      "command": "python",
+      "args": ["-m", "jarvis.mcp_server"],
+      "env": {
+        "JARVIS_URL": "http://localhost:8000"
+      },
+      "description": "Jarvis telemetry — espone pipeline trace, gatekeeper stats, error counters e stato del sistema per diagnostica AI."
+    }
+  }
+}
