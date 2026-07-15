@@ -167,6 +167,11 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if m.get("content") and len(m["content"]) > 1500:
             m["content"] = m["content"][:1500] + "\n...[TRUNCATED FOR CONTEXT LIMIT]..."
 
+    # Inietta data/ora corrente come system message iniziale
+    # Il modello non ha accesso a datetime senza questo contesto esplicito.
+    _now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
+    messages.insert(0, {"role": "system", "content": f"Current date and time: {_now}. Today is {datetime.datetime.now().strftime('%A')}."})
+
     current_user_id = user_id if user_id else "alfio_dev"
 
     # ── MODALITÀ CONCISE: compressione minima, skip RAG/memoria/web ──
