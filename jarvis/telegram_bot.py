@@ -983,6 +983,17 @@ if TELEGRAM_ENABLED:
                 choice = response["choices"][0]["message"]
                 message_data = dict(choice)
                 
+                # ── Pulisci i blocchi di thinking dal contenuto grezzo ──
+                # Impedisce che <|think|>...</end|> leakino nella cronologia
+                # di sessione e nella memoria a lungo termine. Usa model_family="all"
+                # per coprire TUTTI i formati (Gemma, DeepSeek, QwQ, ecc.)
+                raw_content = message_data.get("content", "")
+                if raw_content:
+                    from tag_processor import strip_thinking_blocks
+                    cleaned = strip_thinking_blocks(raw_content, model_family="all")
+                    if cleaned != raw_content:
+                        message_data["content"] = cleaned
+                
                 # Aggiungiamo il messaggio dell'assistente alla cronologia per il prossimo loop (necessario per Ollama tools)
                 current_messages.append(message_data)
                 session["messages"].append(message_data)

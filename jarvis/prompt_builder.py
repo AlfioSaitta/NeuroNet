@@ -20,6 +20,47 @@ from llm_engine import engine, extract_content
 from llama_cpp import LlamaGrammar
 import state
 
+from dataclasses import dataclass
+from typing import Literal
+
+
+@dataclass
+class GatekeeperResult:
+    intent: str  # "project" | "meta" | "general"
+    project: str | None = None
+    confidence: float = 0.0
+
+
+META_PHRASES = re.compile(
+    r'(quali\s+(sono\s+)?(i\s+)?progetti'
+    r'|lista\s+(dei\s+)?progetti'
+    r'|che\s+progetti'
+    r'|progetti\s+in\s+(memoria|rag)'
+    r'|elenco\s+(dei\s+)?progetti'
+    r'|quanti\s+progetti'
+    r'|progetti\s+(hai|conosci|hai\s+in|in\s+corso)'
+    r'|a\s+quali\s+progetti'
+    r'|quali\s+sono\s+(i\s+)?(tuoi\s+)?progetti'
+    r'|which\s+(are\s+)?(the\s+)?projects'
+    r'|list\s+(of\s+)?projects'
+    r'|projects\s+in\s+(memory|rag)'
+    r'|cosa\s+sai\s+fare'
+    r'|what\s+can\s+you\s+do'
+    r'|come\s+funzioni'
+    r'|how\s+(do\s+)?you\s+work'
+    r'|quali\s+(sono\s+)?le\s+tue\s+capacit)',
+    re.IGNORECASE
+)
+
+PURE_GREETING = re.compile(
+    r'^(ciao|hello|hi|hey|buongiorno|buonasera|buonpomeriggio|salve|'
+    r'grazie|thanks|ok|okay|sì|si|no|'
+    r'come\s+stai|come\s+va|tutto\s+bene|che\s+si\s+fa|'
+    r'grazie\s+(mille|tante|tanto)|'
+    r'buona\s+(giornata|serata|notte))$',
+    re.IGNORECASE
+)
+
 
 PROJECT_KEYWORDS = {
     'codice', 'progetto', 'file', 'script', 'funzione', 'classe', 'metodo',
@@ -35,65 +76,115 @@ PROJECT_KEYWORDS = {
     'versione', 'release', 'commit', 'branch', 'migrazione', 'backup'
 }
 
-async def llm_gatekeeper_classify(user_message):
-    """Classifica l'intento dell'utente: è una domanda sul progetto/codice? (True/False)"""
-    if len(user_message.strip()) < 5 or user_message.startswith("/web "):
-        return False
+async def llm_gatekeeper_v3(user_message: str, context: dict) -> GatekeeperResult:
+    """3-class intent classifier: project / meta / general.
 
-    msg_lower = user_message.lower()
+    Fast paths (0 LLM calls):
+      1. Project name in query → PROJECT (hard override)
+      2. Meta phrase match → META
+      3. Pure short greeting → GENERAL
+      4. Technical keywords → PROJECT
+    Slow path:
+      Context-injected LLM call with 3-class grammar → structured JSON.
+    """
+    msg_lower = user_message.lower().strip()
+    if len(msg_lower) < 3:
+        return GatekeeperResult(intent="general", confidence=1.0)
+
+    # ── Fast path 1: Project name mention (HARD OVERRIDE) ──
+    projects = context.get("projects_available", [])
+    for proj in projects:
+        proj_lower = proj.lower()
+        for variant in (proj_lower, proj_lower.replace('_', '-'), proj_lower.replace('_', ' ')):
+            if variant in msg_lower:
+                logger.info(f"🧠 GatekeeperV3: PROJECT (project in query: {proj})")
+                return GatekeeperResult(intent="project", project=proj, confidence=1.0)
+
+    # ── Fast path 2: Meta query (liste, capacità, chi sei) ──
+    if META_PHRASES.search(msg_lower):
+        logger.info(f"🧠 GatekeeperV3: META (phrase match)")
+        return GatekeeperResult(intent="meta", confidence=1.0)
+
+    # ── Fast path 3: Pure greeting → general ──
+    if PURE_GREETING.match(msg_lower):
+        logger.info(f"🧠 GatekeeperV3: GENERAL (pure greeting)")
+        return GatekeeperResult(intent="general", confidence=1.0)
+
+    # ── Fast path 4: Technical keywords (codice, file, bug, ecc.) ──
     words = set(re.findall(r'\b\w+\b', msg_lower))
-    
-    # Livello 1: Keyword veloci (0ms)
     if words.intersection(PROJECT_KEYWORDS):
-        logger.info(f"🧠 Gatekeeper: True (Keyword Match) | Query: '{user_message[:30]}...'")
-        return True
-        
-    # Pattern regex per estensioni (es. .py) o path (src/)
+        logger.info(f"🧠 GatekeeperV3: PROJECT (keyword match)")
+        return GatekeeperResult(intent="project", confidence=1.0)
     if re.search(r'(\.[a-z]{1,4}\b|\b(src|app|lib|bin)/)', msg_lower):
-        logger.info(f"🧠 Gatekeeper: True (Regex Match) | Query: '{user_message[:30]}...'")
-        return True
+        logger.info(f"🧠 GatekeeperV3: PROJECT (regex path match)")
+        return GatekeeperResult(intent="project", confidence=1.0)
 
-    # Salta gatekeeper LLM per saluti e conversazione generica (troppo lento)
-    GREETING_WORDS = {'ciao', 'hello', 'hi', 'hey', 'buongiorno', 'buonasera', 'salve',
-                      'grazie', 'thanks', 'ok', 'okay', 'si', 'no', 'come', 'stai',
-                      'chi', 'che', 'cosa', 'quale', 'quanto', 'dove', 'quando'}
-    if words.intersection(GREETING_WORDS):
-        logger.info(f"🧠 Gatekeeper: False (Greeting Bypass) | Query: '{user_message[:30]}...'")
-        return False
+    # ── Slow path: LLM with context injection ──
+    return await _llm_gatekeeper_classify(user_message, context)
 
-    truncated_msg = user_message[:1000]
-    gatekeeper_prompt = f"""
-Sei un classificatore di intenti rapido. Il tuo unico scopo è decidere se la richiesta dell'utente necessita della lettura del codice sorgente o della documentazione tecnica dei suoi progetti.
-L'utente lavora a progetti software locali.
-Richiesta utente: "{truncated_msg}"
-Rispondi SOLO con un JSON valido in questo formato esatto, senza altre parole:
-{{"is_project": true}} oppure {{"is_project": false}}
+
+async def _llm_gatekeeper_classify(user_message: str, context: dict) -> GatekeeperResult:
+    """LLM-based 3-class gatekeeper with grammar constraint."""
+    active_project = context.get("active_project") or "nessuno"
+    projects_str = ", ".join(context.get("projects_available", [])) or "nessuno"
+    recent_msgs = context.get("recent_messages", [])
+    recent_str = " | ".join(recent_msgs[-3:]) if recent_msgs else "nessuno"
+
+    prompt = f"""Contesto:
+- Progetto attivo: {active_project}
+- Progetti disponibili: {projects_str}
+- Messaggi recenti: {recent_str}
+
+Richiesta: "{user_message[:800]}"
+
+Classifica: project (codice/file/progetto), meta (lista/capacità/chi sei), general (conversazione).
+JSON esatto: {{"intent":"project|meta|general","project":"null|Nome","confidence":0.95}}
 """
     try:
-        messages = [{"role": "user", "content": gatekeeper_prompt}]
-        grammar_str = r'''root ::= "{\"is_project\": " boolean "}"
-boolean ::= "true" | "false"'''
+        grammar_str = r'''root ::= "{\"intent\": " intent ", \"project\": " projval ", \"confidence\": " number "}"
+intent ::= "\"project\"" | "\"meta\"" | "\"general\""
+projval ::= string | "null"
+string ::= "\"" word "\""
+word ::= [a-zA-Z] ([a-zA-Z0-9_.-])*
+number ::= [0-1] "." digit+ | "1" "." "0"+
+digit ::= [0-9]'''
         grammar_obj = LlamaGrammar.from_string(grammar_str)
+        messages = [{"role": "user", "content": prompt}]
         response = await engine.generate_chat(
-            messages, 
-            stream=False, 
-            options={"temperature": 0.0, "num_predict": 15},
-            grammar=grammar_obj
+            messages, stream=False,
+            options={"temperature": 0.0, "num_predict": 60},
+            grammar=grammar_obj,
         )
-        if "error" not in response:
-            content = extract_content(response)
-            match = re.search(r'\{.*?\}', content, re.DOTALL)
-            if match:
-                try:
-                    result = json.loads(match.group(0))
-                    decision = result.get("is_project", False)
-                    logger.info(f"🧠 Gatekeeper: {decision} | Query: '{truncated_msg[:30]}...'")
-                    return decision
-                except json.JSONDecodeError:
-                    pass
+        if "error" in response:
+            return GatekeeperResult(intent="general", confidence=0.0)
+
+        content = extract_content(response)
+        match = re.search(r'\{.*\}', content, re.DOTALL)
+        if not match:
+            logger.warning(f"🧠 GatekeeperV3: JSON non trovato in '{content[:60]}...' — fallback general")
+            return GatekeeperResult(intent="general", confidence=0.0)
+
+        result = json.loads(match.group(0))
+        intent = result.get("intent", "general")
+        project = result.get("project")
+        confidence = float(result.get("confidence", 0.0))
+
+        # Validate: project name must be real
+        available = context.get("projects_available", [])
+        if project and project not in available:
+            project = None
+        if intent not in ("project", "meta", "general"):
+            intent = "general"
+
+        logger.info(f"🧠 GatekeeperV3: LLM → {intent} | project={project} | conf={confidence:.2f}")
+        return GatekeeperResult(
+            intent=intent,
+            project=project if intent == "project" else None,
+            confidence=confidence,
+        )
     except Exception as e:
-        logger.warning(f"🧠 Gatekeeper: FALLBACK False (errore LLM: {repr(e)})")
-    return False
+        logger.warning(f"🧠 GatekeeperV3: eccezione LLM → fallback general ({repr(e)})")
+        return GatekeeperResult(intent="general", confidence=0.0)
 
 
 async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False):
@@ -150,7 +241,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         return messages
 
     # ── MODALITÀ NORMALE ──
-    is_project_query = await llm_gatekeeper_classify(latest_msg)
     web_ctx, clean_msg = await perform_web_search_and_crawl(latest_msg)
     mem_ctx, rag_ctx = "", ""
 
@@ -179,44 +269,49 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     if _super_tag_re.search(latest_msg):
         latest_msg = _super_tag_re.sub("", latest_msg).strip()
 
-    # Rilevamento progetto: cerca in tutta la conversazione (dal più recente), una sola query Qdrant
-    active_project = await detect_project_in_conversation(user_messages)
+    # ── BUILD GATEKEEPER CONTEXT ──
+    _active_before = state.get_last_project(current_user_id, conversation_id)
+    _all_projects = await list_rag_projects()
+    _recent_user_msgs = [m["content"] for m in messages if m["role"] == "user"][-3:]
     
-    # Fallback: se il progetto non è stato menzionato in questa richiesta,
-    # ripristina l'ultimo progetto attivo SOLO per query di codice/progetto,
-    # NON per saluti o conversazione generica (evita contaminazione tra progetti).
-    if not active_project:
-        if is_project_query:
+    # ── RUN 3-CLASS GATEKEEPER ──
+    gk = await llm_gatekeeper_v3(latest_msg, {
+        "active_project": _active_before,
+        "projects_available": _all_projects,
+        "recent_messages": _recent_user_msgs,
+    })
+    logger.info(
+        f"🧠 GatekeeperV3: {gk.intent} | project={gk.project} | "
+        f"conf={gk.confidence:.2f} | '{latest_msg[:40]}...'"
+    )
+    
+    # ── ROUTING: project / meta / general ──
+    active_project: str | None = None
+    _is_project_query: bool = False
+    _is_meta_query: bool = False
+    
+    if gk.intent == "meta":
+        _is_meta_query = True
+        if _all_projects:
+            rag_ctx = "📚 Progetti indicizzati nel RAG:\n" + "\n".join(f"- {p}" for p in _all_projects)
+        logger.info(f"🗂️ Gatekeeper META: lista progetti iniettata, contesto progetto saltato")
+    
+    elif gk.intent == "project":
+        _is_project_query = True
+        # Risoluzione progetto: LLM > detect_project > last_project
+        if gk.project and gk.project in _all_projects:
+            active_project = gk.project
+        else:
+            active_project = await detect_project_in_conversation(user_messages)
+        if not active_project:
             active_project = state.get_last_project(current_user_id, conversation_id)
             if active_project:
                 logger.info(f"📁 Progetto ripristinato dal contesto: {active_project} | Query: '{latest_msg[:50]}...'")
-        else:
-            # Per conversazione generica, resetta il contesto progetto per non mescolare
-            active_project = None
+        if active_project:
+            logger.info(f"📁 Progetto attivo: {active_project} | Query: '{latest_msg[:50]}...'")
+            state.set_last_project(current_user_id, conversation_id, active_project)
     
-    if active_project:
-        logger.info(f"📁 Progetto attivo: {active_project} | Query: '{latest_msg[:50]}...'")
-        # Persiste il progetto attivo per il prossimo turno (isolato per conversazione)
-        state.set_last_project(current_user_id, conversation_id, active_project)
-
-    # Rilevamento query "lista progetti RAG": risponde con i nomi reali delle collezioni Qdrant
-    # Evita che il modello mescoli progetti o ne ometta alcuni per effetto del cross-collection fallback.
-    _is_list_projects_query = False
-    _list_project_patterns = re.compile(
-        r'(quali\s+progetti|lista\s+(dei\s+)?progetti|che\s+progetti|progetti\s+in\s+(memoria|rag)|'
-        r'elenco\s+(dei\s+)?progetti|quanti\s+progetti|progetti\s+(hai|conosci|hai\s+in)|'
-        r'which\s+projects|list\s+(of\s+)?projects|projects\s+in\s+(memory|rag))',
-        re.IGNORECASE
-    )
-    if _list_project_patterns.search(latest_msg):
-        try:
-            project_names = await list_rag_projects()
-            if project_names:
-                rag_ctx = "📚 Progetti indicizzati nel RAG:\n" + "\n".join(f"- {p}" for p in project_names)
-                _is_list_projects_query = True
-                logger.info(f"🗂️ Lista progetti RAG iniettata: {project_names}")
-        except Exception as e:
-            logger.warning(f"Errore list_rag_projects in prompt builder: {e}")
+    # else: general — active_project resta None, last_project invariato
 
     if state.memory:
         # Salva sempre in memoria il messaggio utente (con metadati di progetto se rilevato)
@@ -267,7 +362,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         rag_ctx = ""
     else:
         full_files_content = ""
-        if is_project_query:
+        if _is_project_query:
             # Trova nomi di file nel prompt (es. auth.py, src/main.go)
             matches = set(re.findall(r'\b([\w\.\-/]+\.(?:py|js|ts|jsx|tsx|go|c|cpp|h|hpp|rs|sql|yaml|yml|md|json))\b', latest_msg))
             if matches:
@@ -287,18 +382,18 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                                             full_files_content += f"\n\n📄 FILE COMPLETO RICHIESTO ({rp}):\n```\n{fc}\n```\n"
                                     except Exception as e: logger.warning(f"Errore silenziato: {e}")
 
-        if not _is_list_projects_query:
+        if not _is_meta_query:
             _rag_project = _user_override_focus if _user_override_focus else active_project
-            rag_ctx = await search_documents(clean_msg, is_project_query=is_project_query, project_name=_rag_project)
+            rag_ctx = await search_documents(clean_msg, is_project_query=_is_project_query, project_name=_rag_project)
         if full_files_content:
             rag_ctx = full_files_content + "\n" + rag_ctx
 
     # Auto web discovery: per saluti e conversazione generica breve si salta
     # (evita chiamate web inutili e lente per "ciao" o "grazie").
-    _is_short_greeting = len(clean_msg.strip()) < 20 and not is_project_query
+    _is_short_greeting = len(clean_msg.strip()) < 20 and not _is_project_query
     if not _is_short_greeting and not rag_ctx.strip() and not web_ctx:
         search_query = clean_msg
-        if is_project_query and active_project and active_project not in search_query:
+        if _is_project_query and active_project and active_project not in search_query:
             search_query = f"{active_project} {search_query}"
         web_knowledge_ctx = await search_web_knowledge(search_query)
         if web_knowledge_ctx:
@@ -476,7 +571,7 @@ Regole assolute:
         persona=_user_override_persona,
         focus=_user_override_focus,
         lang=_user_override_lang,
-        is_project_query=is_project_query,
+        is_project_query=_is_project_query,
     )
 
     if blocks:

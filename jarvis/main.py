@@ -164,6 +164,23 @@ async def lifespan(app: FastAPI):
         if "already exists" not in str(e).lower() and "409" not in str(e):
             logger.warning(f"Errore silenziato in create_collection: {e}")
 
+    # ── Collezione app_context per persistenza contesto progetto ──
+    try:
+        await state.qdrant.create_collection(
+            collection_name=state.APP_CONTEXT_COLLECTION,
+            vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
+        )
+        logger.info(f"[SYSTEM] Collezione {state.APP_CONTEXT_COLLECTION} creata con successo.")
+    except Exception as e:
+        if "already exists" not in str(e).lower() and "409" not in str(e):
+            logger.warning(f"Errore silenziato in create_collection app_context: {e}")
+
+    # ── Ripristino contesto progetto persistito su Qdrant ──
+    try:
+        await state.restore_project_contexts_from_qdrant()
+    except Exception as e:
+        logger.warning(f"Errore restore contesti progetto: {e}")
+
     # ==========================================================================
     # PULIZIA SYMLINK IN DOC_DIR
     # ==========================================================================

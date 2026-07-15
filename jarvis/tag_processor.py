@@ -72,6 +72,10 @@ THINKING_PATTERNS: list[tuple[str, str, str]] = [
     # Residual ChatML tags (safety net per chat_format=None)
     (r'<\|im_start\|>.*?<\|im_end\|>', "", "all"),
     (r'<\|im_start\|>|<\|im_end\|>', "", "all"),
+    # Gemma chat format residual: <start_of_turn>, </start_of_turn>, <end_of_turn>
+    # Leakano quando il template chat non viene applicato correttamente.
+    (r'</?start_of_turn>\s*', "", "all"),
+    (r'<end_of_turn>\s*', "", "all"),
     # Solar Pro: [ANALYSIS]...[/ANALYSIS]
     (r'(?s)\[ANALYSIS\].*?\[/ANALYSIS\]\s*', "", "all"),
     # Harmony: <|start|>...<|end|> blocks
@@ -529,7 +533,7 @@ _register(TagDef("CACHE_CLEAR",  _self_closing_pattern("CACHE_CLEAR"), _handle_c
 _register(TagDef("CONFIDENCE",   _tag_pattern("CONFIDENCE"),    _handle_confidence,   "hidden",  "Autovalutazione della confidenza della risposta"))
 _register(TagDef("ASK",          _tag_pattern("ASK"),           _handle_ask,          "action",  "Il LLM fa una domanda all'utente (reverse interaction)"))
 _register(TagDef("RAG",          _tag_pattern("RAG"),           _handle_rag,          "action",  "Forza RAG su un progetto specifico"))
-_register(TagDef("SUMMARY",      re.compile(r"<SUMMARY\s+[^>]*>.*?</SUMMARY>", re.DOTALL), _handle_summary, "action", "Salva un riepilogo nella memoria di un altro utente"))
+_register(TagDef("SUMMARY",      re.compile(r"<SUMMARY(.*?)</SUMMARY>", re.DOTALL | re.IGNORECASE), _handle_summary, "action", "Salva un riepilogo nella memoria di un altro utente"))
 _register(TagDef("BRANCH",       _tag_pattern("BRANCH"),        _handle_branch,       "action",  "Cambia branch git in un progetto"))
 _register(TagDef("COMMIT",       _tag_pattern("COMMIT"),        _handle_commit,       "action",  "Crea un commit git con i cambiamenti locali"))
 _register(TagDef("EXEC",         _tag_pattern("EXEC"),          _handle_exec,         "action",  "Esegue un comando shell readonly (whitelist)"))
@@ -540,20 +544,20 @@ _register(TagDef("EXEC",         _tag_pattern("EXEC"),          _handle_exec,   
 # ──────────────────────────────────────────────
 
 def _build_strip_regex() -> re.Pattern:
-    """Costruisce una regex che matcha tutti i tag con visibility=hidden/action."""
+    """Costruisce una regex che matcha tutti i tag con visibility=hidden/action.
+    
+    Usa il pattern compilato originale di ogni tag (non una rigenerazione)
+    per gestire correttamente tag con formato custom (es. SUMMARY con attributi).
+    I capture group non interferiscono con re.sub() che sostituisce l'intero match.
+    """
     tags_to_strip = [
         t for t in _TAG_REGISTRY.values()
         if t.visibility in ("hidden", "action")
     ]
     if not tags_to_strip:
         return re.compile(r'(?!)')  # never matches
-    # Genera pattern alternativi: <TAG>...</TAG> e <TAG/>
-    patterns = []
-    for t in tags_to_strip:
-        if t.is_self_closing:
-            patterns.append(rf"<{t.name}\s*/?\s*>")
-        else:
-            patterns.append(rf"<{t.name}>.*?</{t.name}>")
+    # Usa il pattern originale di ogni tag per match preciso
+    patterns = [t.pattern.pattern for t in tags_to_strip]
     combined = "|".join(patterns)
     return re.compile(combined, re.DOTALL | re.IGNORECASE)
 
@@ -576,6 +580,7 @@ def get_tag(name: str) -> Optional[TagDef]:
 
 def strip_all_tags(text: str) -> str:
     """Rimuove dal testo tutti i tag con visibility=hidden/action (incluso il contenuto)."""
+    text = strip_thinking_blocks(text, model_family="all")
     return _STRIP_ALL_RE.sub("", text).strip()
 
 
@@ -583,7 +588,11 @@ def strip_action_tags(text: str) -> str:
     """
     Come strip_all_tags ma SENZA .strip() — preserva spazi e whitespace.
     Utile nello streaming dove un chunk può essere solo " " (spazio tra parole).
+
+    Strippa anche i blocchi di thinking/reasoning (<|think|>, [THINK], ecc.)
+    per evitare che leakino nelle risposte visibili all'utente.
     """
+    text = strip_thinking_blocks(text, model_family="all")
     return _STRIP_ALL_RE.sub("", text)
 
 
@@ -636,6 +645,36 @@ class TagSafeStream:
                 else:
                     self._closings[name] = f"</{name}>".upper()
 
+        # Thinking block tracking: <|think|>...<|end|> (Gemma 4 style)
+        # Non sono in TAG_REGISTRY ma vanno tracciati per non leakare in streaming
+        self._openings.append(("<|THINK|>", "__THINK__", False))
+        # UPPERCASE per matchare buf_upper (come self._closings per registry tag)
+        self._think_closings: list[tuple[str, int]] = [
+            ("<|END|>", 8), ("</END>", 6), ("</END|>", 7),
+        ]
+
+        # Gemma chat format residual tags: <start_of_turn> e <end_of_turn>
+        # Sono self-closing nel senso TagSafeStream: non hanno contenuto da preservare,
+        # vanno semplicemente rimossi dal flusso come se non esistessero.
+        self._openings.append(("<START_OF_TURN>", "__START_OF_TURN__", True))
+        self._openings.append(("<END_OF_TURN>", "__END_OF_TURN__", True))
+        self._openings.append(("</START_OF_TURN>", "__CLOSE_START_OF_TURN__", True))
+        self._sc_patterns["__START_OF_TURN__"] = re.compile(r'<start_of_turn>\s*', re.IGNORECASE)
+        self._sc_patterns["__END_OF_TURN__"] = re.compile(r'<end_of_turn>\s*', re.IGNORECASE)
+        self._sc_patterns["__CLOSE_START_OF_TURN__"] = re.compile(r'</start_of_turn>\s*', re.IGNORECASE)
+
+        # Set di tutti i nomi tag tracciati per la generica detection anti-leak
+        # I tag interni (__NAME__) hanno un prefisso __ che non esiste nel testo,
+        # quindi registriamo anche la versione "pulita" (senza __) per il matching.
+        self._all_tag_names: set[str] = set()
+        for _, name, _ in self._openings:
+            self._all_tag_names.add(name)
+            # Per tag interni (__NAME__), aggiungi anche la versione senza underscore
+            if name.startswith("__") and name.endswith("__"):
+                clean = name.strip("_")
+                if clean:
+                    self._all_tag_names.add(clean)
+
     def process(self, chunk: str) -> str:
         """Processa un chunk dello stream, restituisce solo testo safe (senza tag)."""
         self._buffer += chunk
@@ -658,6 +697,21 @@ class TagSafeStream:
         while self._buffer:
             # ── Caso 1: stiamo aspettando la chiusura di un tag normale ──
             if self._in_tag:
+                if self._tag_name == "__THINK__":
+                    # Thinking blocks hanno multiple possibili chiusure: <|end|>, </end>, </end|>
+                    found_closing = False
+                    for closing, _ in self._think_closings:
+                        idx = self._buffer.upper().find(closing)
+                        if idx >= 0:
+                            end = idx + len(closing)
+                            self._buffer = self._buffer[end:]
+                            self._in_tag = False
+                            self._tag_name = None
+                            found_closing = True
+                            break
+                    if found_closing:
+                        continue  # Rivela il buffer per altri tag (continua while loop)
+                    break  # Non ancora arrivata la chiusura
                 closing = self._closings.get(self._tag_name or "")
                 if closing:
                     idx = self._buffer.upper().find(closing)
@@ -716,7 +770,31 @@ class TagSafeStream:
                             else:
                                 break
                         might_be_tag = any(
-                            name.startswith(tag_prefix.upper()) for name in self._closings.keys()
+                            name.startswith(tag_prefix.upper()) for name in self._all_tag_names
+                        ) if tag_prefix else False
+                    elif after[0] == '|':
+                        # <| potrebbe essere inizio di <|think|>, <|im_start|>, <|end|>
+                        # Estrai nome tag dopo <|
+                        tag_prefix = ""
+                        for c in after[1:].strip():
+                            if c.isalpha() or c == '_':
+                                tag_prefix += c
+                            else:
+                                break
+                        might_be_tag = any(
+                            name.startswith(tag_prefix.upper()) for name in self._all_tag_names
+                        ) if tag_prefix else True
+                    elif after[0] == '/':
+                        # </ potrebbe essere inizio di </TAG> (tag di chiusura frammentato)
+                        # Esempio: </start_of_turn> in due chunk → `</start_of` + `turn>`
+                        tag_prefix = ""
+                        for c in after[1:].strip():
+                            if c.isalpha() or c == '_':
+                                tag_prefix += c
+                            else:
+                                break
+                        might_be_tag = any(
+                            name.startswith(tag_prefix.upper()) for name in self._all_tag_names
                         ) if tag_prefix else False
                     
                     if might_be_tag:
@@ -749,6 +827,22 @@ class TagSafeStream:
                     self._sc_pending = True
                     self._sc_name = best_name
                     self._sc_pattern = pat
+                    break
+                elif best_name == "__THINK__":
+                    # Thinking blocks: cerca MULTIPLE possibili chiusure nel buffer corrente
+                    found_closing = False
+                    for closing, _ in self._think_closings:
+                        idx = self._buffer.upper().find(closing)
+                        if idx >= 0:
+                            end = idx + len(closing)
+                            self._buffer = self._buffer[end:]
+                            found_closing = True
+                            break
+                    if found_closing:
+                        continue  # Thinking block completo in un colpo solo
+                    # Deve aspettare la chiusura
+                    self._in_tag = True
+                    self._tag_name = best_name
                     break
                 else:
                     closing = self._closings.get(best_name or "")
@@ -902,9 +996,8 @@ def close_orphaned_tags(text: str) -> str:
     text = text.rstrip()
     
     for name in sorted(tag_names, key=len, reverse=True):
-        # Pattern più robusto: cerca <TAG>... che non ha </TAG> dopo
-        # Usa un approccio stack-based per gestire tag annidati
-        pattern_open = re.compile(rf"<{name}\s*>", re.IGNORECASE)
+        # Pattern più robusto: <TAG ...> invece di <TAG\s*> per supportare attributi (es. SUMMARY target="user")
+        pattern_open = re.compile(rf"<{name}[^>]*>", re.IGNORECASE)
         pattern_close = re.compile(rf"</{name}\s*>", re.IGNORECASE)
         
         opens = list(pattern_open.finditer(text))
@@ -954,13 +1047,13 @@ def strip_orphaned_tags(text: str) -> str:
         prev_text = text
         for name in tag_names:
             complete = re.compile(
-                rf"<{name}\s*>(.*?)</{name}\s*>", re.DOTALL | re.IGNORECASE
+                rf"<{name}[^>]*>(.*?)</{name}\s*>", re.DOTALL | re.IGNORECASE
             )
             text = complete.sub(r"\1", text)
 
-    # 2. Rimuovi tag opening orfani rimasti
+    # 2. Rimuovi tag opening orfani rimasti (supporta attributi)
     for name in tag_names:
-        orphan_open = re.compile(rf"<{name}\s*>", re.IGNORECASE)
+        orphan_open = re.compile(rf"<{name}[^>]*>", re.IGNORECASE)
         text = orphan_open.sub("", text)
 
     # 3. Rimuovi tag closing orfani rimasti
