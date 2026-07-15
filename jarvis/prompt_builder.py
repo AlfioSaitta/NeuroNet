@@ -82,18 +82,20 @@ PROJECT_KEYWORDS = {
 # System prompt per Gemma 4 in risposta diretta ma naturale
 CAVEMAN_GEMMA_SYSTEM = (
     "You are Jarvis, a direct coding assistant. Be concise but natural. "
+    "IMPORTANT: The input you receive contains structured labels (Project:, Task:, "
+    "Context:, etc.) for your reference only. DO NOT echo or mirror this structure "
+    "in your response. Respond in plain, natural prose. "
     "Skip pleasantries and fluff — get straight to the point. "
-    "Use natural language, not templates or bullet-point formats. "
     "When providing code: output clean SEARCH/REPLACE blocks. "
     "When explaining: use plain prose, keep it brief. "
     "Never say 'I think', 'I believe', 'I'd suggest'. Just state facts."
 )
 
 CAVEMAN_GEMMA_SYSTEM_ADDENDUM = (
-    "\n\n[RESPONSE HINTS]\n"
-    "- No thinking tags, no XML wrappers.\n"
+    "\n\n[RESPONSE RULES]\n"
+    "- No thinking tags, no XML, no markdown wrappers.\n"
     "- Code changes: SEARCH/REPLACE blocks only.\n"
-    "- Explain naturally, not in bullet-point lists.\n"
+    "- Respond in plain natural language, NOT in the structured label format.\n"
     "- Be concise but readable.\n"
     "- Stop once the answer is complete."
 )
@@ -518,8 +520,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     # Se la compressione è riuscita, usa system prompt caveman per codice diretto.
     if _compression_is_raw:
         final_prompt = (
-            "You are Jarvis, a helpful coding assistant with access to project context.\n\n"
-            f"Context information:\n{compressed}\n\n"
+            "You are Jarvis, a helpful coding assistant with access to project context.\n"
+            "The context below uses labels (Project:, Task:, Context:) for your reference only. "
+            "DO NOT echo them. Respond in plain natural prose.\n\n"
+            f"Context:\n{compressed}\n\n"
             "Please respond naturally and helpfully based on the context above."
         )
     else:
