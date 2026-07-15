@@ -202,12 +202,14 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         # Se la compressione fallisce (output troppo corto o errore), usa raw
         if not compressed or len(compressed) < 20:
             logger.warning("⚠️ Caveman compress fallita in concise mode, fallback raw")
-            caveman_prompt = f"{CAVEMAN_GEMMA_SYSTEM}\n\nQuery: {clean_msg}\n\n{CAVEMAN_GEMMA_SYSTEM_ADDENDUM}"
+            user_content = f"Query: {clean_msg}"
         else:
-            caveman_prompt = f"{CAVEMAN_GEMMA_SYSTEM}\n\n{compressed}\n\n{CAVEMAN_GEMMA_SYSTEM_ADDENDUM}"
+            user_content = compressed
+        # System prompt in messaggio system, non nella user query — previene echo
+        messages.append({"role": "system", "content": CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM})
         for m in reversed(messages):
             if m["role"] == "user":
-                m["content"] = caveman_prompt
+                m["content"] = user_content
                 break
         return messages
 
@@ -518,24 +520,24 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     # conversazionale — evita che Gemma 4 echeggi le etichette raw
     # (es. "PROJECT: SlotBuilder. CONTEXT: ... INSTRUCTION: ...").
     # Se la compressione è riuscita, usa system prompt caveman per codice diretto.
+    # System prompt in messaggio system, non nella user query — previene echo
     if _compression_is_raw:
-        final_prompt = (
+        system_prompt = (
             "You are Jarvis, a helpful coding assistant with access to project context.\n"
             "The context below uses labels (Project:, Task:, Context:) for your reference only. "
             "DO NOT echo them. Respond in plain natural prose.\n\n"
-            f"Context:\n{compressed}\n\n"
             "Please respond naturally and helpfully based on the context above."
         )
+        user_content = f"Context:\n{compressed}"
     else:
-        final_prompt = (
-            f"{CAVEMAN_GEMMA_SYSTEM}\n\n"
-            f"{compressed}\n\n"
-            f"{CAVEMAN_GEMMA_SYSTEM_ADDENDUM}"
-        )
+        system_prompt = CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
+        user_content = compressed
+
+    messages.append({"role": "system", "content": system_prompt})
 
     for m in reversed(messages):
         if m["role"] == "user":
-            m["content"] = final_prompt
+            m["content"] = user_content
             break
 
     return messages
