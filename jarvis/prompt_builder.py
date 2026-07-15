@@ -307,6 +307,23 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         logger.info(f"🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
         return messages
 
+    # ════════════════════════════════════════════════════════════════
+    # META INTENT: skip caveman compression — risposta conversazionale
+    # ════════════════════════════════════════════════════════════════
+    # Per intento meta (lista progetti, capacità, chi sei) il sistema deve
+    # rispondere in modo naturale, non in stile caveman. Includiamo la
+    # lista progetti nel messaggio utente così Gemma 4 risponde
+    # conversazionalmente.
+    if gk.intent == "meta":
+        logger.info(f"🗂️ Intento META: skip caveman compression, risposta conversazionale")
+        meta_context = "\n".join(f"- {p}" for p in _all_projects) if _all_projects else "Nessun progetto indicizzato."
+        meta_prompt = f"Progetti disponibili:\n{meta_context}\n\nDomanda: {clean_msg}"
+        for m in reversed(messages):
+            if m["role"] == "user":
+                m["content"] = meta_prompt
+                break
+        return messages
+
     if state.memory:
         try:
             loop = asyncio.get_running_loop()
