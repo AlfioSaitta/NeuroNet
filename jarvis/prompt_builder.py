@@ -29,18 +29,25 @@ import state
 # ════════════════════════════════════════════════════════════════
 
 META_PHRASES = re.compile(
-    r'(quali\s+(sono\s+)?(i\s+)?progetti'
-    r'|lista\s+(dei\s+)?progetti'
+    # ITALIANO: richieste di progetto/elenco
+    r'(quali\s+(sono\s+)?(i\s+|i\s+tuoi\s+|i\s+nostri\s+)?progetti'
+    r'|dammi\s+(la\s+)?lista(\s+dei)?(\s+\w+)?\s+progetti'
+    r'|mostra\s+(la\s+)?lista(\s+dei)?(\s+\w+)?\s+progetti'
+    r'|lista\s+(dei\s+)?(\w+\s+)?progetti'
     r'|che\s+progetti'
     r'|progetti\s+in\s+(memoria|rag)'
-    r'|elenco\s+(dei\s+)?progetti'
+    r'|elenco\s+(dei\s+)?(\w+\s+)?progetti'
     r'|quanti\s+progetti'
-    r'|progetti\s+(hai|conosci|hai\s+in|in\s+corso)'
+    r'|progetti\s+(hai|conosci|hai\s+in|in\s+corso|ci\s+sono|sono\s+disponibili)'
     r'|a\s+quali\s+progetti'
-    r'|quali\s+sono\s+(i\s+)?(tuoi\s+)?progetti'
-    r'|which\s+(are\s+)?(the\s+)?projects'
-    r'|list\s+(of\s+)?projects'
+    r'|quali\s+sono\s+(i\s+)?(tuoi\s+|nostri\s+|miei\s+|vostri\s+|suoi\s+)?progetti'
+    # INGLESE: project listing requests
+    r'|which\s+(are\s+)?(the\s+)?(your\s+|our\s+|all\s+)?projects'
+    r'|list\s+(of\s+)?(the\s+)?(your\s+|our\s+|all\s+)?projects'
+    r'|give\s+me\s+(the\s+)?(list\s+of\s+)?(the\s+)?(your\s+|our\s+|all\s+)?projects'
+    r'|show\s+me\s+(the\s+)?(list\s+of\s+)?(the\s+)?(your\s+|our\s+|all\s+)?projects'
     r'|projects\s+in\s+(memory|rag)'
+    # CAPACITÀ / HELP
     r'|cosa\s+sai\s+fare'
     r'|what\s+can\s+you\s+do'
     r'|come\s+funzioni'

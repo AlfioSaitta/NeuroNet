@@ -81,12 +81,16 @@ class GatekeeperResult:
 
 
 CAVEMAN_COMPRESSOR_SYSTEM_PROMPT = """You are the Caveman Prompt Architect for Jarvis. Your job is to translate the raw input data (user request, context, history) into a hyper-dense, ultra-compressed prompt for a master coding LLM (Gemma 4).
-Rules:
-- Strip all filler words, articles (the, a, an, il, la, un), polite phrases, and transition verbs.
-- Convert long paragraphs into raw, dense fact-bullets and logical fragments.
+STRICT RULES - YOUR OUTPUT MUST BE SHORTER THAN THE INPUT:
+- Strip ALL filler words, articles (the, a, an, il, la, un), polite phrases, transition verbs.
+- Merge related context into single dense lines.
+- Remove redundant keys/labels — keep only the essential data.
+- Convert long paragraphs into raw, dense fact-bullets.
 - STRICTLY KEEP intact all technical terms, file paths, variable names, function names, and code syntax.
-- Format the final output clearly using keys: [CONTEXT], [USER_QUERY], [INSTRUCTION].
-- Output ONLY the compressed prompt. No explanations, no greetings, no extra text."""
+- DO NOT add new structure keys. Output ONLY the compressed raw data.
+- NO [CONTEXT]: [USER_QUERY]: [INSTRUCTION]: wrappers. Just the compressed content.
+- If the input is already concise (under 200 char), pass it through unchanged.
+- Output ONLY the compressed result. No explanations, no greetings, no meta-text."""
 
 CAVEMAN_RESPONSE_INSTRUCTION = (
     "\n\nRespond in pure Caveman style: no preambles, no explanations, no greetings. "
@@ -571,7 +575,8 @@ digit ::= [0-9]'''
         active_project: Optional[str] = None,
     ) -> str:
         """Comprime dati grezzi (query + RAG + history) in prompt caveman
-        usando Qwen3.5 su CPU. Output ridotto del 40-60% in token.
+        usando Qwen3.5 su CPU. Output deve essere più corto dell'input.
+        Se la compressione fallisce o aumenta la dimensione, usa raw fallback.
 
         Args:
             user_query: Query utente originale.
@@ -580,7 +585,7 @@ digit ::= [0-9]'''
             active_project: Nome progetto attivo o None.
 
         Returns:
-            Stringa compressa con formato [CONTEXT], [USER_QUERY], [INSTRUCTION].
+            Stringa compressa (raw fallback se compressione non riduce).
         """
         # Assembla il blocco raw da comprimere
         raw_parts = []
@@ -619,8 +624,13 @@ digit ::= [0-9]'''
             raw_len = len(raw_data)
             comp_len = len(compressed)
             ratio = (1 - comp_len / raw_len) * 100 if raw_len > 0 else 0
-            logger.info(f"🗜️ Caveman compression: {raw_len} → {comp_len} char ({ratio:.0f}% riduzione)")
 
+            # Se la compressione NON riduce (ratio ≤ 0), usa raw fallback
+            if ratio <= 0:
+                logger.warning(f"⚠️ Caveman compression negativa ({ratio:.0f}%): {raw_len}→{comp_len}, fallback raw")
+                return raw_data[:4096]
+
+            logger.info(f"🗜️ Caveman compression: {raw_len} → {comp_len} char ({ratio:.0f}% riduzione)")
             return compressed.strip()
 
         except Exception as e:
