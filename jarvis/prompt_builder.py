@@ -91,6 +91,16 @@ CAVEMAN_GEMMA_SYSTEM = (
     "Never say 'I think', 'I believe', 'I'd suggest'. Just state facts."
 )
 
+MERMAID_RULES = (
+    "\n"
+    "- Mermaid diagrams: wrap in ```mermaid blocks. NEVER use parentheses () inside"
+    " square bracket node labels A[...] — they break the parser. Use quotes:"
+    ' A["Node (with parens)"] instead of A[Node (with parens)].\n'
+    "- Link labels use pipe syntax: A -->|label| B  (NOT A -- label --> B).\n"
+    "- Put comments on their own line with %%, never inline with % after a statement.\n"
+    "- Valid node shapes: A[rect], A(round), A{rhombus}, A[(cylinder DB)], A>flag].\n"
+)
+
 CAVEMAN_GEMMA_SYSTEM_ADDENDUM = (
     "\n\n[RESPONSE RULES]\n"
     "- No thinking tags, no XML tags.\n"
@@ -105,6 +115,7 @@ CAVEMAN_GEMMA_SYSTEM_ADDENDUM = (
     "\n"
     "- Be concise but readable.\n"
     "- Stop once the answer is complete."
+    + MERMAID_RULES
 )
 
 
@@ -639,6 +650,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             "Attenzione: (warnings/note, ometti se non serve)\n"
             "\n"
             "- No thinking tags, no XML tags.\n"
+            + MERMAID_RULES + "\n"
         )
         user_content = f"Context:\n{compressed}"
     else:
