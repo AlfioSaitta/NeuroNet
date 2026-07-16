@@ -51,6 +51,8 @@ services:
       - "11235:11235"
     environment:
       - MAX_CONCURRENT_TASKS=3
+      - GUNICORN_BIND=0.0.0.0:11235
+      - CRAWL4AI_API_TOKEN=dev
     networks:
       - ai_network
 
