@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-06-30 (TagSafeStream + documentazione completa tag XML)
+> **Data ultimo aggiornamento:** 2026-07-16 (MCP Server v2 Streamable HTTP)
 
 ---
 
@@ -176,7 +176,8 @@ Master jarvis:8000
 | `dashboard_template.py` | Template HTML/CSS/JS della dashboard web (Chart.js, Sigma.js, stile cyberpunk). | — |
 | `telemetry.py` | PipelineTracer per-request + GatekeeperStats cumulativi. Tracciamento step, LLM calls, tool calls. | `state` |
 | `mcp_server.py` | Server MCP stdio per diagnostica AI esterna. 9 tool + 7 resources. | `urllib` (HTTP proxy a Jarvis) |
-| `_mcp_handlers.py` | Handler MCP condivisi (in-process, usati da SSE e stdio). Evita dipendenze heavy. | `state`, `telemetry` |
+| `mcp_server_v2.py` | **Nuovo Server MCP v2 (Streamable HTTP).** Endpoint POST `/api/mcp/v2`. 8 tool + 7 resources. | `fastapi`, `telemetry` |
+| `_mcp_handlers.py` | **(Deprecato)** Handler MCP condivisi. Sostituito dalla logica in `mcp_server_v2.py`. | `state`, `telemetry` |
 
 ### Sotto-pacchetto `jarvis/openai/`
 
@@ -457,8 +458,8 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/dashboard_template.py` | ✅ Nuovo | Template HTML/CSS/JS dashboard estratto da `dashboard.py` |
 | `jarvis/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls, ring buffer 500 trace |
 | `jarvis/mcp_server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna |
-| `jarvis/_mcp_handlers.py` | ✅ Nuovo | Handler MCP condivisi (SSE + stdio), evita dipendenze heavy |
-| `MCP SSE Endpoint` | ✅ **ATTIVO** | `/api/mcp/sse` + `/api/mcp/message` per connessioni persistenti |
+| `jarvis/_mcp_handlers.py` | ✅ Deprecato | Sostituito da `mcp_server_v2.py` |
+| `MCP Server v2` | ✅ **ATTIVO** | Streamable HTTP via `/api/mcp/v2` (protocollo MCP v2) |
 | `jarvis/Dockerfile` | ✅ CUDA 13.0 | overlay cuda-compiler-13-0 + cudart-dev + cublas-dev su base 12.2; llama-cpp-python buildato con GGML_CUDA=on |
 | `docker-compose.vps.yml` | ✅ Pronto | Stack Master senza GPU (no sezione deploy) |
 | `docker-compose.worker.yml` | ✅ Pronto | QDRANT_HOST da .env, volumi mem0+documents montati |
@@ -495,6 +496,7 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 6. **Non impostare `EXTERNAL_GPU_URL` sul Worker** — il Worker è il target, non il delegante.
 7. **Non modificare `data/`** senza backup — contiene i dati persistenti (Qdrant, Mem0, sessioni Telegram).
 8. **Non cambiare `VECTOR_DB_VERSION`** senza una buona ragione — causa migrazione automatica delle collezioni Qdrant e ri-ingestion completa del RAG.
+9. **Non riavviare Jarvis autonomamente** — dopo modifiche a `.env`, `config.py` o `llm_engine.py`, chiedere SEMPRE ad Alfio di riavviare manualmente il processo Granian (`kill <PID> && granian --interface asgi --host 0.0.0.0 --port 8000 main:app`). Il server gira direttamente sull'host, non in container Docker, e un riavvio improvviso può interrompere conversazioni attive.
 
 ### 🟡 ATTENZIONE
 
@@ -518,6 +520,7 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 - Le modifiche al modello LLM (parametri, path) si effettuano SOLO nel `.env`.
 - Per testare Jarvis localmente: `curl -X POST http://localhost:8000/api/chat -H "Content-Type: application/json" -d '{"model":"local","messages":[{"role":"user","content":"..."}],"stream":false}'`
 - **Per isolamento progetto**: passare sempre `conversation_id` nelle richieste API (header `X-Conversation-Id` o body `conversation_id`). Il Telegram lo fa automaticamente con `chat_id`.
+- **Usare il server MCP v2 (`/api/mcp/v2`) per interrogare Jarvis** — chiamare i tool `get_recent_traces`, `get_trace_by_id`, `get_status` per ispezionare telemetry, pipeline traces, prompt e risposte in ogni fase. Gli agenti AI DEVs che lavorano su questo progetto devono usare l'MCP server come strumento primario di diagnostica.
 - **N_GPU_LAYERS** non deve superare 15 su Gemma 4 E2B QAT (segfault a 18+). Su Qwen3.5 max 19 (OOM a 22+). Sulla VPS sempre 0.
 
 ---
@@ -682,33 +685,33 @@ tar -xvzf backup_ai_YYYYMMDD.tar.gz
 ### MCP Server & Telemetry
 
 ```bash
-# Test standalone MCP server (richiede Jarvis in esecuzione su localhost:8000)
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python -m jarvis.mcp_server
+# Lista tool MCP (v2 Streamable HTTP)
+curl -X POST http://localhost:8000/api/mcp/v2 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -m json.tool
 
-# Lista tool MCP disponibili
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python -m jarvis.mcp_server | python3 -m json.tool
+# Chiamare un tool MCP (es. get_status, get_recent_traces, get_trace_by_id)
+curl -X POST http://localhost:8000/api/mcp/v2 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_status","arguments":{}}}' | python3 -m json.tool
 
-# Test risorsa MCP (ultimi trace)
-echo '{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"jarvis://traces/recent"}}' | python -m jarvis.mcp_server
+# Leggere una risorsa MCP (es. jarvis://traces/recent, jarvis://system/status)
+curl -X POST http://localhost:8000/api/mcp/v2 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"jarvis://traces/recent"}}' | python3 -m json.tool
 
-# Puntare MCP server a Jarvis su host diverso
-JARVIS_URL=http://100.64.0.1:8000 python -m jarvis.mcp_server
+# Ottenere un trace specifico per request_id (include prompt e risposte a ogni fase)
+curl -X POST http://localhost:8000/api/mcp/v2 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_trace_by_id","arguments":{"request_id":"ID_TRACE"}}}' | python3 -m json.tool
 
-# Query REST Telemetry API
+# Query REST Telemetry API (fallback)
 curl -s http://localhost:8000/api/telemetry/status | python3 -m json.tool
 curl -s http://localhost:8000/api/telemetry/traces?limit=3 | python3 -m json.tool
 curl -s http://localhost:8000/api/telemetry/gatekeeper | python3 -m json.tool
 curl -s http://localhost:8000/api/telemetry/errors | python3 -m json.tool
 curl -s http://localhost:8000/api/telemetry/model | python3 -m json.tool
 curl -s http://localhost:8000/api/telemetry/pending_ops | python3 -m json.tool
-
-# Connessione MCP SSE (WebSocket-like, persistente)
-# Aprire una sessione:
-curl -N -s http://localhost:8000/api/mcp/sse
-# Inviare comandi su un'altra shell:
-curl -X POST "http://localhost:8000/api/mcp/message?session_id=<id_da_sse>" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
 ---
