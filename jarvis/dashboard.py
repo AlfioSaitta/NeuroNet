@@ -5,7 +5,7 @@ import struct
 import asyncio
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, JSONResponse
-from config import QDRANT_HOST, ALLOWED_USERS, VECTOR_DB_VERSION
+from config import QDRANT_HOST, SEARXNG_HOST, CRAWL4AI_HOST, CRAWL4AI_API_TOKEN, ALLOWED_USERS, VECTOR_DB_VERSION
 import state
 from llm_engine import engine
 
@@ -255,14 +255,18 @@ async def get_stats():
 
     searxng_up = False
     try:
-        r = await state.http_client.get("http://searxng:8080", timeout=1.0)
+        r = await state.http_client.get(SEARXNG_HOST, timeout=1.0)
         searxng_up = (r.status_code < 500)
     except Exception:
         pass
 
     crawl4ai_up = False
     try:
-        r = await state.http_client.get("http://crawl4ai_server:11235", timeout=1.0)
+        health_url = CRAWL4AI_HOST.rstrip('/') + '/health'
+        headers = {}
+        if CRAWL4AI_API_TOKEN:
+            headers["Authorization"] = f"Bearer {CRAWL4AI_API_TOKEN}"
+        r = await state.http_client.get(health_url, headers=headers, timeout=2.0)
         crawl4ai_up = (r.status_code < 500)
     except Exception:
         pass
@@ -326,6 +330,18 @@ async def get_stats():
         "userbots": True,
     }
 
+    # Telemetry summary
+    gk_stats = getattr(state, 'gatekeeper_stats', None)
+    gatekeeper_data = gk_stats.to_dict() if gk_stats and hasattr(gk_stats, 'to_dict') else None
+    error_count = len(getattr(state, 'error_counters', {}))
+    trace_count = len(getattr(state, 'pipeline_traces', []))
+    active_traces_count = 0
+    try:
+        from telemetry import PipelineTracer
+        active_traces_count = len(PipelineTracer.get_all_active())
+    except Exception:
+        pass
+
     return JSONResponse({
         "rag_stats": {
             "indexed_files": len(state.rag_state),
@@ -361,6 +377,13 @@ async def get_stats():
             "uptime": sys_uptime,
             "load": sys_load,
             "disk": sys_disk
+        },
+        "telemetry": {
+            "gatekeeper": gatekeeper_data,
+            "error_count": error_count,
+            "trace_count": trace_count,
+            "active_traces": active_traces_count,
+            "mcp_v2_active": True,
         }
     })
 
@@ -492,80 +515,80 @@ ENTITY_COLLECTION = f"{MEMORY_COLLECTION}_entities"
 
 @dashboard_router.get("/api/dashboard/graph/memory")
 async def get_memory_graph(user_id: str = "alfio_dev"):
-    """Grafo bipartito: nodi entità ↔ nodi memoria dall'entity store di Mem0.
+    """Grafo bipartito: nodi entità ↔ nodi memoria dall'entity store.
 
     Scansiona la entity store (``collateral_memories_v3_entities``) e la
-    collection delle memorie (``collateral_memories_v3``), poi costruisce
-    un grafo dove:
-      - I nodi entità (colore viola) sono le entità estratte via spaCy
+    collection delle memorie (``collateral_memories_v3``) via state.qdrant,
+    poi costruisce un grafo dove:
+      - I nodi entità (colore viola) sono le entità estratte via regex
       - I nodi memoria (colore ciano) sono i ricordi episodici
       - I link connettono ogni entità alle memorie che la contengono
-        (basati su ``linked_memory_ids`` nell'entity store)
     """
+    from qdrant_client import models as qdrant_models
+
     nodes = []
     links = []
     memory_lookup = {}  # memory_id → memory text
     entity_lookup = {}  # entity_name → metadata
 
+    if not state.qdrant:
+        return JSONResponse({"error": "Qdrant not available"}, status_code=503)
+
     # 1) Fetch memories from the memory collection
     try:
-        res_pts = await state.http_client.post(
-            f"http://{QDRANT_HOST}:6333/collections/{MEMORY_COLLECTION}/points/scroll",
-            json={"limit": 1000, "with_payload": True, "with_vector": False,
-                  "filter": {"must": [{"key": "user_id", "match": {"value": user_id}}]}},
-            timeout=5.0
+        all_memory_points, _ = await state.qdrant.scroll(
+            collection_name=MEMORY_COLLECTION,
+            limit=1000,
+            with_payload=True,
+            with_vectors=False,
+            scroll_filter=qdrant_models.Filter(
+                must=[qdrant_models.FieldCondition(
+                    key="user_id",
+                    match=qdrant_models.MatchValue(value=user_id),
+                )]
+            ),
         )
-        if res_pts.status_code == 200:
-            points = res_pts.json().get("result", {}).get("points", [])
-            for p in points:
-                pid = p.get("id", "")
-                payload = p.get("payload", {}) or {}
-                mem_text = payload.get("memory", "") or ""
-                memory_lookup[pid] = mem_text
-    except Exception as e:
+        for p in all_memory_points:
+            pid = str(p.id)
+            payload = p.payload or {}
+            mem_text = payload.get("data", "") or payload.get("memory", "") or payload.get("text", "")
+            memory_lookup[pid] = mem_text
+    except Exception:
         pass
 
     # 2) Fetch entities from the entity store
     try:
-        res_ent = await state.http_client.post(
-            f"http://{QDRANT_HOST}:6333/collections/{ENTITY_COLLECTION}/points/scroll",
-            json={"limit": 1000, "with_payload": True, "with_vector": False},
-            timeout=5.0
+        all_entity_points, _ = await state.qdrant.scroll(
+            collection_name=ENTITY_COLLECTION,
+            limit=1000,
+            with_payload=True,
+            with_vectors=False,
         )
-        if res_ent.status_code == 200:
-            points = res_ent.json().get("result", {}).get("points", [])
-            for p in points:
-                payload = p.get("payload", {}) or {}
-                ent_name = payload.get("entity_name", "") or ""
-                linked = payload.get("linked_memory_ids") or []
-                ent_type = payload.get("entity_type", "unknown")
-                if not ent_name:
-                    continue
-                entity_lookup[ent_name] = {
-                    "linked_memory_ids": linked,
-                    "entity_type": ent_type,
-                }
+        for p in all_entity_points:
+            payload = p.payload or {}
+            ent_name = payload.get("entity_name", "") or ""
+            linked = payload.get("linked_memory_ids") or []
+            ent_type = payload.get("entity_type", "unknown")
+            if not ent_name:
+                continue
+            entity_lookup[ent_name] = {
+                "linked_memory_ids": linked,
+                "entity_type": ent_type,
+            }
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
     # 3) Build graph nodes & links
-    added_entity_ids = set()
-
     for ent_name, ent_meta in entity_lookup.items():
         linked_ids = ent_meta["linked_memory_ids"]
         if not linked_ids:
             continue
 
-        # Filter linked IDs to only those that exist in memory_lookup
         valid_linked = [lid for lid in linked_ids if lid in memory_lookup]
         if not valid_linked:
             continue
 
-        # Entity node ID (prefixed to avoid collisions)
         ent_node_id = f"ent_{ent_name}"
-        added_entity_ids.add(ent_node_id)
-
-        # Count how many memories this entity connects to
         connected_count = len(valid_linked)
 
         nodes.append({
@@ -579,22 +602,17 @@ async def get_memory_graph(user_id: str = "alfio_dev"):
             "group": "entity",
         })
 
-        # Links: entity → each linked memory
         for mem_id in valid_linked:
             mem_text = memory_lookup.get(mem_id, "")
-            # Truncate for display
             mem_excerpt = mem_text[:120] + "…" if len(mem_text) > 120 else mem_text
             links.append({
                 "source": ent_node_id,
                 "target": mem_id,
-                "similarity": 0.9,  # fixed high weight for entity links
+                "similarity": 0.9,
             })
 
     # 4) Add memory nodes that are connected to at least one entity
-    connected_memory_ids = set()
-    for link in links:
-        connected_memory_ids.add(link["target"])
-
+    connected_memory_ids = {link["target"] for link in links}
     for mem_id, mem_text in memory_lookup.items():
         if mem_id not in connected_memory_ids:
             continue
@@ -603,9 +621,7 @@ async def get_memory_graph(user_id: str = "alfio_dev"):
             "id": mem_id,
             "payload": {
                 "memory": mem_excerpt,
-                "entity_count": sum(
-                    1 for lnk in links if lnk["target"] == mem_id
-                ),
+                "entity_count": sum(1 for lnk in links if lnk["target"] == mem_id),
             },
             "ext": "memory",
             "group": "memory",
@@ -779,6 +795,40 @@ async def restart_container(name: str):
     if api_err:
         return JSONResponse({"error": api_err}, status_code=500)
     return JSONResponse({"status": "restarting", "container": name})
+
+
+@dashboard_router.get("/api/dashboard/telemetry")
+async def get_dashboard_telemetry():
+    """Aggregated telemetry data: gatekeeper stats, error counters, recent traces."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    gk_stats = getattr(state, 'gatekeeper_stats', None)
+    gatekeeper_data = gk_stats.to_dict() if gk_stats and hasattr(gk_stats, 'to_dict') else None
+
+    errors = dict(getattr(state, 'error_counters', {}))
+    traces = []
+    try:
+        pipeline_traces = getattr(state, 'pipeline_traces', [])
+        # deque does not support slicing → convert to list first
+        trace_list = list(pipeline_traces) if hasattr(pipeline_traces, '__len__') else pipeline_traces
+        traces = [t.to_dict() if hasattr(t, 'to_dict') else t for t in trace_list[-10:]]
+    except Exception as e:
+        logger.warning(f"Error reading traces: {e}")
+
+    active_traces_list = []
+    try:
+        from telemetry import PipelineTracer
+        active_traces_list = PipelineTracer.get_all_active()
+    except Exception:
+        pass
+
+    return JSONResponse({
+        "gatekeeper": gatekeeper_data,
+        "error_counters": errors,
+        "recent_traces": traces,
+        "active_traces": active_traces_list,
+    })
 
 
 @dashboard_router.post("/api/dashboard/ingestion/restart")

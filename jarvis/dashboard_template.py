@@ -359,10 +359,37 @@ HTML_CONTENT = r"""
                     <button class="btn" onclick="restartContainer('qdrant_db')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
                 </li>
                 <li><span>GPU (CUDA)</span> <span class="badge" id="health-cuda">...</span></li>
+                <li><span>MCP v2</span> <span class="badge badge-primary" id="mcp-v2-badge">✔ Streamable HTTP</span></li>
             </ul>
             <div style="display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.05);">
                 <button class="btn" onclick="restartIngestion()" style="font-size:0.65rem;padding:3px 8px;">⟳ Restart Ingestion</button>
                 <button class="btn" onclick="openMemoryGraphModal()" style="font-size:0.65rem;padding:3px 8px;background:rgba(179,136,255,0.15);border-color:rgba(179,136,255,0.3);color:#b388ff;">✧ Memory Graph</button>
+            </div>
+        </div>
+
+        <div class="card" style="padding: 16px;">
+            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 10px;">
+                <span class="dot dot-accent pulsing"></span> Telemetry Pipeline
+            </div>
+            <div class="metric-row" style="gap: 8px; margin-bottom: 6px;">
+                <div class="metric">
+                    <div class="val" id="tele-trace-count" style="font-size: 1.2rem; color: var(--secondary);">0</div>
+                    <div class="label" style="font-size: 0.6rem;">Traces</div>
+                </div>
+                <div class="metric">
+                    <div class="val" id="tele-active-traces" style="font-size: 1.2rem; color: var(--primary);">0</div>
+                    <div class="label" style="font-size: 0.6rem;">Active</div>
+                </div>
+                <div class="metric">
+                    <div class="val" id="tele-error-count" style="font-size: 1.2rem; color: var(--danger);">0</div>
+                    <div class="label" style="font-size: 0.6rem;">Errors</div>
+                </div>
+            </div>
+            <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:4px;">Gatekeeper</div>
+            <div id="gatekeeper-summary" style="font-size:0.65rem;font-family:'JetBrains Mono',monospace;">
+                <div>Bypass rate: <span id="gk-bypass-rate">--</span></div>
+                <div>Avg confidence: <span id="gk-avg-conf">--</span></div>
+                <div>Classifications: <span id="gk-classified">--</span></div>
             </div>
         </div>
     </div>
@@ -506,6 +533,33 @@ HTML_CONTENT = r"""
                 <div class="card-header"><span class="dot dot-accent"></span> GPU Processes</div>
                 <div id="gpu-proc-list" style="flex:1; overflow-y: auto;">
                     <pre id="gpu-proc-text" style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-muted); margin: 0; white-space: pre-wrap;">Loading...</pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pipeline Traces -->
+        <div class="card fade-in">
+            <div class="card-header" style="cursor:pointer;" onclick="toggleTraces()">
+                <span class="dot dot-secondary"></span> Recent Pipeline Traces
+                <span style="flex:1;"></span>
+                <span id="toggle-traces-icon" style="font-size:0.8rem;color:var(--text-muted);">▶</span>
+            </div>
+            <div id="traces-content" style="display:none;">
+                <div style="max-height:300px;overflow-y:auto;">
+                    <table style="width:100%;font-size:0.7rem;font-family:'JetBrains Mono',monospace;border-collapse:collapse;">
+                        <thead>
+                            <tr style="color:var(--text-muted);border-bottom:1px solid rgba(255,255,255,0.1);">
+                                <th style="padding:4px 8px;text-align:left;">ID</th>
+                                <th style="padding:4px 8px;text-align:right;">Steps</th>
+                                <th style="padding:4px 8px;text-align:right;">Duration</th>
+                                <th style="padding:4px 8px;text-align:right;">Tokens</th>
+                                <th style="padding:4px 8px;text-align:center;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="traces-table-body">
+                            <tr><td colspan="5" style="padding:12px;text-align:center;color:var(--text-muted);">No traces yet</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -1762,6 +1816,102 @@ HTML_CONTENT = r"""
                 console.error('Failed to restart ingestion', e);
             }
         }
+
+        // ================================================================
+        // TELEMETRY PIPELINE
+        // ================================================================
+        function toggleTraces() {
+            const content = document.getElementById('traces-content');
+            const icon = document.getElementById('toggle-traces-icon');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                icon.textContent = '▼';
+            } else {
+                content.style.display = 'none';
+                icon.textContent = '▶';
+            }
+        }
+
+        async function fetchTelemetry() {
+            try {
+                const res = await fetch('/api/dashboard/telemetry');
+                const data = await res.json();
+
+                // Gatekeeper stats
+                const gk = data.gatekeeper;
+                if (gk) {
+                    const bypassRate = gk.total_classified > 0
+                        ? ((gk.bypassed / gk.total_classified) * 100).toFixed(1) + '%'
+                        : '--';
+                    document.getElementById('gk-bypass-rate').textContent = bypassRate;
+
+                    const avgConf = gk.avg_confidence
+                        ? (gk.avg_confidence * 100).toFixed(1) + '%'
+                        : '--';
+                    document.getElementById('gk-avg-conf').textContent = avgConf;
+
+                    document.getElementById('gk-classified').textContent = gk.total_classified ?? '--';
+
+                    // Trace / error counts
+                    document.getElementById('tele-trace-count').textContent = data.recent_traces?.length ?? 0;
+                    document.getElementById('tele-error-count').textContent = Object.keys(data.error_counters || {}).length || 0;
+                    document.getElementById('tele-active-traces').textContent = data.active_traces?.length ?? 0;
+                }
+
+                // Recent traces table
+                const tbody = document.getElementById('traces-table-body');
+                if (data.recent_traces && data.recent_traces.length > 0) {
+                    tbody.innerHTML = '';
+                    data.recent_traces.slice(0, 10).forEach(t => {
+                        const tr = document.createElement('tr');
+                        const duration = t.duration_ms ? (t.duration_ms / 1000).toFixed(1) + 's' : '--';
+                        const tokens = t.total_tokens ?? '--';
+                        const steps = t.steps?.length ?? 0;
+                        const status = t.error ? '❌' : '✓';
+                        const shortId = (t.request_id || t.id || '').substring(0, 12);
+                        tr.innerHTML = `
+                            <td style="padding:4px 8px;color:var(--text-muted);">${escapeHtml(shortId)}</td>
+                            <td style="padding:4px 8px;text-align:right;">${steps}</td>
+                            <td style="padding:4px 8px;text-align:right;">${duration}</td>
+                            <td style="padding:4px 8px;text-align:right;">${tokens}</td>
+                            <td style="padding:4px 8px;text-align:center;">${status}</td>
+                        `;
+                        tr.style.cursor = 'pointer';
+                        tr.onmouseenter = () => { tr.style.background = 'rgba(0,255,204,0.05)'; };
+                        tr.onmouseleave = () => { tr.style.background = ''; };
+                        tr.onclick = () => {
+                            const gatekeeperInfo = t.gatekeeper
+                                ? `Gatekeeper: ${t.gatekeeper.intent} (${(t.gatekeeper.confidence*100).toFixed(0)}%)\n`
+                                : '';
+                            const stepInfo = (t.steps || [])
+                                .map(s => `  ${s.step}: ${s.status} (${s.duration_ms}ms)`)
+                                .join('\n');
+                            const llmCalls = (t.llm_calls || [])
+                                .map(l => `  LLM: ${l.model || '?'} — ${l.prompt_tokens || 0}↑ ${l.completion_tokens || 0}↓`)
+                                .join('\n');
+                            alert(
+                                `Trace: ${t.request_id}\n` +
+                                `Duration: ${duration}\n` +
+                                `Total tokens: ${tokens}\n` +
+                                (t.error ? `Error: ${t.error}\n` : '') +
+                                `\n${gatekeeperInfo}` +
+                                `\nSteps:\n${stepInfo || '  (none)'}` +
+                                `\n\nLLM Calls:\n${llmCalls || '  (none)'}`
+                            );
+                        };
+                        tbody.appendChild(tr);
+                    });
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--text-muted);">No traces yet</td></tr>';
+                }
+            } catch (err) {
+                console.error('Failed to fetch telemetry', err);
+            }
+        }
+
+        // Fetch telemetry on load and poll
+        fetchTelemetry();
+        setInterval(fetchTelemetry, 5000);
     </script>
 </body>
 </html>

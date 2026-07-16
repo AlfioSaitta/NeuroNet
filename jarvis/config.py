@@ -72,6 +72,7 @@ logging.getLogger("telegram.ext.Updater").addFilter(TelegramNetworkErrorFilter()
 QDRANT_HOST = os.getenv("QDRANT_HOST", "local")
 SEARXNG_HOST = os.getenv("SEARXNG_HOST", "http://searxng:8080").rstrip('/')
 CRAWL4AI_HOST = os.getenv("CRAWL4AI_HOST", "http://crawl4ai:11235").rstrip('/')
+CRAWL4AI_API_TOKEN = os.getenv("CRAWL4AI_API_TOKEN", "")
 BOT_NAME = os.getenv("BOT_NAME", "Jarvis")
 EXTERNAL_GPU_URL = os.getenv("EXTERNAL_GPU_URL", "")
 # LLM Options supporta parametri personalizzati da .env

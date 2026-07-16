@@ -4,7 +4,7 @@ Web Intelligence — SearXNG metasearch + Crawl4AI scraping in parallelo.
 
 import asyncio
 
-from config import SEARXNG_HOST, CRAWL4AI_HOST, logger
+from config import SEARXNG_HOST, CRAWL4AI_HOST, CRAWL4AI_API_TOKEN, logger
 import state
 
 
@@ -35,9 +35,13 @@ async def perform_web_search_and_crawl(user_message, force=False):
 
         async def crawl_worker(url):
             try:
+                headers = {}
+                if CRAWL4AI_API_TOKEN:
+                    headers["Authorization"] = f"Bearer {CRAWL4AI_API_TOKEN}"
                 res = await state.http_client.post(
                     f"{CRAWL4AI_HOST}/crawl",
                     json={"urls": [url]},
+                    headers=headers,
                     timeout=15.0
                 )
                 if res.status_code == 200:
