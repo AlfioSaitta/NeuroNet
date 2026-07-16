@@ -85,18 +85,24 @@ CAVEMAN_GEMMA_SYSTEM = (
     "You are Jarvis, a direct coding assistant. Be concise but natural. "
     "IMPORTANT: The input you receive contains structured labels (Project:, Task:, "
     "Context:, etc.) for your reference only. DO NOT echo or mirror this structure "
-    "in your response. Respond in plain, natural prose. "
+    "in your response. "
     "Skip pleasantries and fluff — get straight to the point. "
     "When providing code: output clean SEARCH/REPLACE blocks. "
-    "When explaining: use plain prose, keep it brief. "
     "Never say 'I think', 'I believe', 'I'd suggest'. Just state facts."
 )
 
 CAVEMAN_GEMMA_SYSTEM_ADDENDUM = (
     "\n\n[RESPONSE RULES]\n"
-    "- No thinking tags, no XML, no markdown wrappers.\n"
+    "- No thinking tags, no XML tags.\n"
     "- Code changes: SEARCH/REPLACE blocks only.\n"
-    "- Respond in plain natural language, NOT in the structured label format.\n"
+    "- Use Markdown formatting for readability: tables for comparisons/data, "
+    "code blocks for code/config/schemas, bullet lists for multiple items, "
+    "bold for key terms.\n"
+    "- ALWAYS end with a concise final notes section. Format:"
+    "\n---"
+    "\n**Riepilogo:** ... (2-3 bullet points max)"
+    "\n**Attenzione:** ... (edge cases, warnings, o ometti se non serve)"
+    "\n"
     "- Be concise but readable.\n"
     "- Stop once the answer is complete."
 )
@@ -156,7 +162,7 @@ def _record_gatekeeper_stats(intent: str, confidence: float, bypassed: bool, pro
         logger.warning(f"Errore aggiornamento gatekeeper_stats: {exc}")
 
 
-async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False, request_id=None):
+async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False, request_id=None, finalize_trace: bool = True):
     """
     Pipeline di arricchimento a 4 step con Caveman Compression.
 
@@ -171,6 +177,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     Args:
         request_id: Se fornito, riusa un PipelineTracer esistente (da main.py).
                     Altrimenti ne crea uno nuovo internamente.
+        finalize_trace: Se True (default), chiama tracer.finish() prima di tornare.
+                        Se False, lascia il tracer aperto per uso esterno (MCP chat_send).
     """
     user_messages = [m["content"] for m in messages if m["role"] == "user"]
     latest_msg = user_messages[-1] if user_messages else ""
@@ -179,7 +187,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             tracer = PipelineTracer.get(request_id)
             if tracer:
                 tracer.step("build_omniscient_prompt", status="skipped", details={"reason": "empty_message"})
-                tracer.finish()
+                if finalize_trace:
+                    tracer.finish()
         return messages
 
     # ── Pipeline Telemetry ──
@@ -222,7 +231,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if PURE_GREETING.match(clean_msg.strip().lower()):
             logger.info("🗣️ Concise + saluto: skip caveman compression")
             tracer.end_step("concise_pipeline", status="skipped", details={"reason": "greeting"})
-            tracer.finish()
+            if finalize_trace:
+                tracer.finish()
             return messages
         # Compressione caveman anche in modalità concise
         compressed = await engine.compress_prompt(
@@ -245,12 +255,19 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             user_content = compressed
             tracer.end_step("concise_pipeline", details={"comp_len": len(compressed)})
         # System prompt in messaggio system, non nella user query — previene echo
-        messages.append({"role": "system", "content": CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM})
+        system_prompt = CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
+        messages.append({"role": "system", "content": system_prompt})
         for m in reversed(messages):
             if m["role"] == "user":
                 m["content"] = user_content
                 break
-        tracer.finish()
+        # Cattura prompt testuali sul tracer
+        tracer.set_system_prompt(system_prompt)
+        tracer.set_user_content(user_content)
+        if not PURE_GREETING.match(clean_msg.strip().lower()):
+            tracer.set_compressed_text(compressed if isinstance(compressed, str) else str(compressed))
+        if finalize_trace:
+            tracer.finish()
         return messages
 
     # ════════════════════════════════════════════════════════════════
@@ -363,7 +380,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         logger.info(f"🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
         tracer.step("context_gathering", status="skipped", details={"reason": "general_intent"})
         tracer.step("caveman_compression", status="skipped", details={"reason": "general_intent"})
-        tracer.finish()
+        if finalize_trace:
+            tracer.finish()
         return messages
 
     # ════════════════════════════════════════════════════════════════
@@ -381,9 +399,11 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             if m["role"] == "user":
                 m["content"] = meta_prompt
                 break
+        tracer.set_user_content(meta_prompt)
         tracer.step("context_gathering", status="skipped", details={"reason": "meta_intent"})
         tracer.step("caveman_compression", status="skipped", details={"reason": "meta_intent"})
-        tracer.finish()
+        if finalize_trace:
+            tracer.finish()
         return messages
 
     # ════════════════════════════════════════════════════════════════
@@ -607,8 +627,18 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         system_prompt = (
             "You are Jarvis, a helpful coding assistant with access to project context.\n"
             "The context below uses labels (Project:, Task:, Context:) for your reference only. "
-            "DO NOT echo them. Respond in plain natural prose.\n\n"
-            "Please respond naturally and helpfully based on the context above."
+            "DO NOT echo them.\n\n"
+            "Please respond naturally and helpfully based on the context above.\n\n"
+            "[FORMAT RULES]\n"
+            "- Use Markdown formatting: tables for comparisons/data, "
+            "code blocks for code/config/schemas, bullet lists for multiple items, "
+            "bold for key terms.\n"
+            "- FINAL NOTES: Always close your response with:\n"
+            "---\n"
+            "Riepilogo: (2-3 bullet riassuntivi)\n"
+            "Attenzione: (warnings/note, ometti se non serve)\n"
+            "\n"
+            "- No thinking tags, no XML tags.\n"
         )
         user_content = f"Context:\n{compressed}"
     else:
@@ -622,7 +652,22 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             m["content"] = user_content
             break
 
+    # Cattura prompt testuali sul tracer per debug
+    tracer.set_system_prompt(system_prompt)
+    tracer.set_user_content(user_content)
+    tracer.set_compressed_text(str(compressed) if compressed else "")
+    # RAG context: assembled context from all sources
+    _rag_ctx_combined = (
+        f"[MEMORY]\n{mem_ctx}\n\n" if mem_ctx else ""
+    ) + (
+        f"[RAG]\n{rag_final}\n\n" if rag_ctx else ""
+    ) + (
+        f"[WEB]\n{web_ctx}\n\n" if web_ctx else ""
+    )
+    tracer.set_rag_context(_rag_ctx_combined.strip())
+
     tracer.end_step("build_prompt", details={"system_prompt_len": len(system_prompt), "user_content_len": len(user_content)})
 
-    tracer.finish()
+    if finalize_trace:
+        tracer.finish()
     return messages

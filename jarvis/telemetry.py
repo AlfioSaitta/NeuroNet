@@ -73,6 +73,13 @@ class PipelineTrace:
     """
     Trace completo di una richiesta utente attraverso la pipeline.
     Dopo il completamento viene inserito in state.pipeline_traces (ring buffer).
+    
+    I campi prompt_* contengono i testi intermedi della pipeline per debug:
+      - system_prompt:   Il messaggio system finale inviato al LLM
+      - rag_context:     Contesto RAG recuperato (memoria + documenti + web)
+      - user_content:    Contenuto del messaggio utente finale (dopo elaborazione)
+      - compressed_text: Testo compresso in stile caveman (se applicato)
+      - llm_response:    Risposta testuale generata dal LLM
     """
     request_id: str
     user_message: str          # troncato a 200 caratteri
@@ -84,9 +91,15 @@ class PipelineTrace:
     gatekeeper: Optional[dict] = None
     error: Optional[str] = None
     tool_calls_count: int = 0
+    # Prompt testuali per debug (popolati opzionalmente)
+    system_prompt: Optional[str] = None
+    rag_context: Optional[str] = None
+    user_content: Optional[str] = None
+    compressed_text: Optional[str] = None
+    llm_response: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "request_id": self.request_id,
             "user_message": self.user_message,
             "user_id": self.user_id,
@@ -99,6 +112,18 @@ class PipelineTrace:
             "error": self.error,
             "tool_calls_count": self.tool_calls_count,
         }
+        # Includi campi prompt solo se popolati (per retrocompatibilità)
+        if self.system_prompt is not None:
+            d["system_prompt"] = self.system_prompt
+        if self.rag_context is not None:
+            d["rag_context"] = self.rag_context
+        if self.user_content is not None:
+            d["user_content"] = self.user_content
+        if self.compressed_text is not None:
+            d["compressed_text"] = self.compressed_text
+        if self.llm_response is not None:
+            d["llm_response"] = self.llm_response
+        return d
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False, default=str)
@@ -137,6 +162,12 @@ class PipelineTracer:
         self._error: Optional[str] = None
         self._tool_calls_count: int = 0
         self._finished: bool = False
+        # Prompt testuali catturati durante la pipeline
+        self._system_prompt: Optional[str] = None
+        self._rag_context: Optional[str] = None
+        self._user_content: Optional[str] = None
+        self._compressed_text: Optional[str] = None
+        self._llm_response: Optional[str] = None
 
     # ── Factory ─────────────────────────────────
 
@@ -254,6 +285,28 @@ class PipelineTracer:
         """Incrementa il contatore tool calls."""
         self._tool_calls_count += n
 
+    # ── Prompt Text Capture ─────────────────────
+
+    def set_system_prompt(self, text: str):
+        """Cattura il system prompt finale inviato al LLM."""
+        self._system_prompt = text
+
+    def set_rag_context(self, text: str):
+        """Cattura il contesto RAG recuperato (memoria + documenti + web)."""
+        self._rag_context = text
+
+    def set_user_content(self, text: str):
+        """Cattura il contenuto del messaggio utente finale (dopo elaborazione)."""
+        self._user_content = text
+
+    def set_compressed_text(self, text: str):
+        """Cattura il testo compresso in stile caveman."""
+        self._compressed_text = text
+
+    def set_llm_response(self, text: str):
+        """Cattura la risposta testuale generata dal LLM."""
+        self._llm_response = text
+
     # ── Finalize ────────────────────────────────
 
     def finish(self) -> Optional[PipelineTrace]:
@@ -283,6 +336,11 @@ class PipelineTracer:
             gatekeeper=self._gatekeeper,
             error=self._error,
             tool_calls_count=self._tool_calls_count,
+            system_prompt=self._system_prompt,
+            rag_context=self._rag_context,
+            user_content=self._user_content,
+            compressed_text=self._compressed_text,
+            llm_response=self._llm_response,
         )
 
         # Inserimento thread-safe nel ring buffer (state.pipeline_traces)
