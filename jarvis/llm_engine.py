@@ -80,17 +80,19 @@ class GatekeeperResult:
     confidence: float = 0.0
 
 
-CAVEMAN_COMPRESSOR_SYSTEM_PROMPT = """You are the Caveman Prompt Architect for Jarvis. Your job is to translate the raw input data (user request, context, history) into a hyper-dense, ultra-compressed prompt for a master coding LLM (Gemma 4).
-STRICT RULES - YOUR OUTPUT MUST BE SHORTER THAN THE INPUT:
-- Strip ALL filler words, articles (the, a, an, il, la, un), polite phrases, transition verbs.
-- Merge related context into single dense lines.
-- Remove redundant keys/labels — keep only the essential data.
-- Convert long paragraphs into raw, dense fact-bullets.
-- STRICTLY KEEP intact all technical terms, file paths, variable names, function names, and code syntax.
-- DO NOT add new structure keys. Output ONLY the compressed raw data.
-- NO [CONTEXT]: [USER_QUERY]: [INSTRUCTION]: wrappers. Just the compressed content.
-- If the input is already concise (under 200 char), pass it through unchanged.
-- Output ONLY the compressed result. No explanations, no greetings, no meta-text."""
+CAVEMAN_COMPRESSOR_SYSTEM_PROMPT = """You are a data compressor. Compress the text below by removing fluff while keeping all technical details.
+
+Example:
+  INPUT:  "[PROJECT: MyApp]\n[RAG_CONTEXT]\nThe application uses React 18 with TypeScript 5 and has 25 database tables. The authentication system uses JWT tokens with refresh rotation."
+  OUTPUT: "MyApp: React18+TS5, 25 DB tables, auth=JWT+refresh rotation."
+
+RULES:
+- Keep: project names, tech stack, numbers, versions, file paths, URLs, statuses.
+- Remove: articles (the/a/an), filler phrases, polite greetings, transition verbs.
+- Merge: related facts into single dense lines.
+- NO thinking/reasoning — just output the compressed data directly.
+- KEEP ALL code snippets, function names, and syntax intact.
+- If already short (<200 chars), pass through unchanged."""
 
 CAVEMAN_RESPONSE_INSTRUCTION = (
     "\n\nRespond concisely and naturally. No templates, no bullet-point lists, "
@@ -132,7 +134,7 @@ class LlamaEngine:
             
         self.chat_model = None       # Gemma 4 su GPU (main_brain)
         self.embed_model = None      # Qwen3-Embedding su CPU
-        self.gatekeeper_model = None # Qwen3.5-0.8B su CPU (classify + compress)
+        self.gatekeeper_model = None # Qwen3.5-0.8B (classify + compress, CPU default)
         # Thread pool per non bloccare l'event loop di FastAPI (concurrency safe)
         self.executor = ThreadPoolExecutor(max_workers=8)
         # Lock separati: ogni modello Llama è indipendente, non devono bloccarsi
@@ -247,18 +249,23 @@ class LlamaEngine:
             logger.warning(f"File embed model {embed_model_path} non trovato!")
 
         # ════════════════════════════════════════════════════════════════
-        # 3. GATEKEEPER LLM — Qwen3.5-0.8B-Instruct su CPU
-        #    n_gpu_layers=0, n_ctx=2048, n_threads=4
+        # 3. GATEKEEPER LLM — Qwen3.5-0.8B-Instruct
         #    Usato per: classificazione intenti + compressione caveman prompt.
-        #    Modello tiny (~0.8B): inferenza ~100-200ms su CPU.
+        #    Default: CPU (n_gpu_layers=0). Imposta GATEKEEPER_N_GPU_LAYERS=-1
+        #    nel .env per GPU offload. Modello tiny (~0.8B).
         # ════════════════════════════════════════════════════════════════
         if os.path.exists(gatekeeper_model_path):
-            from config import GATEKEEPER_N_CTX as _cfg_gk_ctx, GATEKEEPER_N_THREADS as _cfg_gk_threads
-            logger.info(f"Caricamento Gatekeeper Model (CPU): {gatekeeper_model_path}")
-            logger.info(f"⚙️ n_gpu_layers=0 n_ctx={_cfg_gk_ctx} n_threads={_cfg_gk_threads}")
+            from config import (
+                GATEKEEPER_N_CTX as _cfg_gk_ctx,
+                GATEKEEPER_N_THREADS as _cfg_gk_threads,
+                GATEKEEPER_N_GPU_LAYERS as _cfg_gk_gpu,
+            )
+            _gk_device = "GPU" if _cfg_gk_gpu != 0 else "CPU"
+            logger.info(f"Caricamento Gatekeeper Model ({_gk_device}): {gatekeeper_model_path}")
+            logger.info(f"⚙️ n_gpu_layers={_cfg_gk_gpu} n_ctx={_cfg_gk_ctx} n_threads={_cfg_gk_threads}")
             self.gatekeeper_model = Llama(
                 model_path=gatekeeper_model_path,
-                n_gpu_layers=0,
+                n_gpu_layers=_cfg_gk_gpu,
                 n_ctx=_cfg_gk_ctx,
                 n_batch=128,
                 n_ubatch=128,
@@ -268,7 +275,7 @@ class LlamaEngine:
                 chat_format="chatml",
                 verbose=False,
             )
-            logger.info(f"✅ Gatekeeper Model caricato su CPU")
+            logger.info(f"✅ Gatekeeper Model caricato ({_gk_device})")
 
             # Warmup: prima chiamata per compilazione grafo GGUF
             try:
@@ -620,6 +627,10 @@ digit ::= [0-9]'''
                 logger.warning("Compressore: output vuoto → fallback raw")
                 return raw_data[:4096]
 
+            # Strip eventuali tag di pensiero (thinking/reasoning) che il gatekeeper
+            # potrebbe emettere — impedisce che meta-cognizioni inquinino Gemma 4.
+            compressed = _strip_thinking(compressed)
+
             # Log compression ratio
             raw_len = len(raw_data)
             comp_len = len(compressed)
@@ -713,10 +724,37 @@ digit ::= [0-9]'''
         )
 
 
+def _strip_thinking(text: str) -> str:
+    """Rimuove tag di pensiero (thinking/reasoning) dall'output del LLM.
+    
+    Copre formati noti: <think>...</think>, <think> senza chiusura,
+    [Thinking]..., <|think|>...</|think|>, e meta-ragionamenti
+    numerati di compressione (es. "1.  **Analyze the Request:**").
+    """
+    import re as _re
+    # <think>...</think> con chiusura
+    text = _re.sub(r'<think>.*?</think>', '', text, flags=_re.DOTALL).strip()
+    # <think> senza chiusura (tutto da <think> in poi)
+    text = _re.sub(r'<think>.*', '', text, flags=_re.DOTALL).strip()
+    # <|think|>...</|think|>
+    text = _re.sub(r'<\|think\|>.*?<\|/think\|>', '', text, flags=_re.DOTALL).strip()
+    # [Thinking]...[/Thinking]
+    text = _re.sub(r'\[Thinking\].*?\[/Thinking\]', '', text, flags=_re.DOTALL).strip()
+    # "Thinking:" all'inizio di una riga
+    text = _re.sub(r'(?m)^Thinking:\s*\n?', '', text).strip()
+    # Blocchi di analisi numerata: "1.  **Analyze**...", "2.  **Scan**...",
+    # "3.  **Identify**...", "4.  **Determine**...", "5.  **Drafting**..."
+    text = _re.sub(r'(?m)^\d+\.\s+\*\*.*?\*\*:.*', '', text).strip()
+    # Righi tipo "*   **Project Name:** SlotBuilder" (liste di analisi)
+    text = _re.sub(r'(?m)^\s*\*\s+\*\*.*?\*\*:.*', '', text).strip()
+    return text
+
+
 def extract_content(response: dict, default: str = "") -> str:
     """Estrae il contenuto testuale da una risposta LLM in formato OpenAI."""
     try:
-        return response["choices"][0]["message"].get("content", default)
+        content = response["choices"][0]["message"].get("content", default)
+        return _strip_thinking(content)
     except (KeyError, IndexError, TypeError):
         return default
 

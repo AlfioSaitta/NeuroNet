@@ -108,11 +108,13 @@ LLM_FLASH_ATTN = os.getenv("LLM_FLASH_ATTN", "true").lower() == "true"
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
 # ==============================================================================
-# GATEKEEPER LLM (Qwen3.5-0.8B-Instruct su CPU)
+# GATEKEEPER LLM (Qwen3.5-0.8B-Instruct)
 # ==============================================================================
-# Esegue SU CPU (n_gpu_layers=0): classificazione intenti + compressione prompt
-# in stile Caveman. Modello tiny (~0.8B) — n_ctx=2048 è sufficiente.
+# Classificazione intenti + compressione prompt in stile Caveman.
+# Default: CPU (n_gpu_layers=0). Imposta GATEKEEPER_N_GPU_LAYERS=-1 per GPU,
+# oppure un numero per offload parziale. Modello tiny (~0.8B) — n_ctx=2048.
 GATEKEEPER_MODEL_PATH = os.getenv("GATEKEEPER_MODEL_PATH", "")
+GATEKEEPER_N_GPU_LAYERS = int(os.getenv("GATEKEEPER_N_GPU_LAYERS", "0"))
 GATEKEEPER_N_CTX = int(os.getenv("GATEKEEPER_N_CTX", "2048"))
 GATEKEEPER_N_THREADS = int(os.getenv("GATEKEEPER_N_THREADS", "4"))
 
