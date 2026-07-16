@@ -11,7 +11,7 @@ L'inferenza avviene **interamente in-process** tramite `llama-cpp-python` su mod
 
 ---
 
-## 🚦 Stato del Sistema (al 2026-07-15)
+## 🚦 Stato del Sistema (al 2026-07-16)
 
 | Componente | Stato | Note |
 |---|---|---|
@@ -28,8 +28,10 @@ L'inferenza avviene **interamente in-process** tramite `llama-cpp-python` su mod
 | **Crawl4AI** | ✅ **ATTIVO** | Scraper headless su :11235 |
 | **Telegram Bot** | ✅ **PRONTO** | Da attivare su Master (disabilitato su Worker) |
 | **Pipeline Telemetry** | ✅ **ATTIVA** | Tracciamento richieste: step, LLM calls, gatekeeper, tool calls |
-| **MCP Server (stdio)** | ✅ **ATTIVO** | 9 tools + 7 resources per diagnostica AI esterna |
-| **MCP SSE Endpoint** | ✅ **ATTIVO** | `/api/mcp/sse` + `/api/mcp/message` per connessioni persistenti |
+| **MCP Server v2 (Streamable HTTP)** | ✅ **ATTIVO** | `/api/mcp/v2` — 8 tool + 7 resources per diagnostica AI esterna |
+| **MCP Server (stdio)** | ✅ **LEGACY** | Sostituito da MCP v2, mantiene compatibilità stdio |
+| **Caveman Compression** | ✅ **OTTIMIZZATA** | `_strip_thinking()` rimuove metacognizione Qwen3.5; compressor prompt con esempio concreto |
+| **Prompt Formatting** | ✅ **ATTIVA** | Regole formato tabelle/code block/bold + sezione finale `---` con Riepilogo/Attenzione |
 
 ---
 
@@ -145,16 +147,16 @@ ai-ecosystem/
     ├── Dockerfile                   # Build CUDA 13.0 + llama-cpp-python
     ├── requirements.txt             # 33 dipendenze Python
     ├── models/                      # File GGUF (~8.7GB, gitignored)
-    ├── main.py                      # Entry point FastAPI/Granian (1497 righe)
-    ├── config.py                    # Configurazione centralizzata (325 righe)
+    ├── main.py                      # Entry point FastAPI/Granian (1360 righe)
+    ├── config.py                    # Configurazione centralizzata (327 righe)
     ├── state.py                     # Stato globale mutabile (72 righe)
-    ├── llm_engine.py                # LlamaEngine + PriorityLock (571 righe)
+    ├── llm_engine.py                # LlamaEngine + PriorityLock + _strip_thinking (635 righe)
     ├── rag.py                       # Pipeline RAG completa (1797 righe)
     ├── rag_reranker.py              # Reranker modulare (Qwen3 + FlashRank) (80 righe)
     ├── rag_cache.py                 # Cache semantica + Web Knowledge Qdrant (190 righe)
     ├── memory.py                    # Mem0 + helper memoria (187 righe)
     ├── memory_backup.py             # Export/import memoria JSON (68 righe)
-    ├── prompt_builder.py            # Gatekeeper + super-prompt (479 righe)
+    ├── prompt_builder.py            # Gatekeeper + super-prompt + format rules (530 righe)
     ├── agent_tools.py               # Tool-calling agentico (1008 righe)
     ├── skills_manager.py            # Skill dinamiche da YAML (526 righe)
     ├── skills/                      # Skill dinamiche (vuota)
@@ -169,9 +171,10 @@ ai-ecosystem/
     ├── model_profiles.py            # Auto-rilevamento famiglia modello (292 righe)
     ├── external_providers.py        # Provider cloud esterni (356 righe)
     ├── mcp_client.py                # Client MCP per tool esterni (634 righe)
-    ├── mcp_server.py                # Server MCP stdio per diagnostica AI (474 righe)
-    ├── _mcp_handlers.py             # Handler MCP condivisi (SSE + stdio) (250 righe)
-    ├── telemetry.py                 # PipelineTracer + GatekeeperStats (434 righe)
+    ├── mcp_server.py                # Server MCP stdio per diagnostica AI (legacy) (474 righe)
+    ├── mcp_server_v2.py             # Server MCP v2 Streamable HTTP — endpoint POST /api/mcp/v2 (455 righe)
+    ├── _mcp_handlers.py             # (Deprecato) Handler MCP condivisi — sostituito da mcp_server_v2.py (250 righe)
+    ├── telemetry.py                 # PipelineTracer + GatekeeperStats + prompt fields (442 righe)
     ├── tag_processor.py             # Elaborazione tag XML nelle risposte (1043 righe)
     ├── telegram_format.py            # Utility formattazione Telegram Markdown (147 righe)
     ├── dashboard_template.py         # Template HTML/CSS/JS dashboard (cyberpunk, Chart.js, Sigma.js)
@@ -239,6 +242,9 @@ ai-ecosystem/
 - Offloading GPU con failover automatico (1.5s ping)
 - Warmup CUDA JIT per evitare delay di 30s+ sulla prima richiesta
 - MRL embedding troncamento (1024→768) per retrocompatibilità
+- `_strip_thinking()` — rimuove tag `<think>`, analisi strutturate e meta-ragionamenti dalle risposte LLM
+- `compress_prompt()` — compressione caveman con Qwen3.5 (CPU), raw fallback se ratio negativo
+- `Gatekeeper N_GPU_LAYERS` — supporto offload GPU opzionale per il Gatekeeper LLM
 
 ---
 
@@ -406,6 +412,8 @@ Messaggio utente
 │                     │    <system_instructions>
 └─────────────────────┘
 ```
+
+**Formattazione Output:** Il system prompt include regole esplicite per l'uso di tabelle Markdown, code block, elenchi puntati e grassetto. Ogni risposta DEVE chiudersi con una sezione `---` contenente **Riepilogo:** (2-3 bullet) e **Attenzione:** (warnings/note). Il `finalize_trace` parameter opzionale permette al chiamante di decidere se chiudere il PipelineTracer.
 
 **Tag d'Azione nella Risposta LLM — Registro Completo (21 tag):**
 
@@ -1022,6 +1030,17 @@ tar -cvzf backup_ai_$(date +%Y%m%d).tar.gz ./data .env
 ---
 
 ## 📝 Changelog
+
+### v9.6.0 (2026-07-16) — MCP Server v2 + compressione ottimizzata + prompt format rules
+- **MCP Server v2 Streamable HTTP**: nuovo endpoint `/api/mcp/v2` conforme MCP Streamable HTTP (RFC 2025-11-25). 8 tool + 7 resources. Rimossi vecchi endpoint SSE (`/api/mcp/sse`, `/api/mcp/message`).
+- **Model info rewrite**: `get_telemetry_model()` ora legge da `config.py` invece che dal motore. Sync in `_mcp_handlers.py`. `GATEKEEPER_N_GPU_LAYERS` per offload GPU opzionale.
+- **`_strip_thinking()`**: nuova funzione in `llm_engine.py` che rimuove tag `<think>`, analisi strutturate numerate e meta-ragionamenti dalle risposte del Gatekeeper Qwen3.5. Applicata in `extract_content()`, `compress_prompt()` e su ogni risposta LLM.
+- **Compressor prompt riscritto**: `CAVEMAN_COMPRESSOR_SYSTEM_PROMPT` ora include esempio concreto INPUT/OUTPUT per guidare Qwen3.5 verso compressione reale invece di analisi.
+- **Prompt format rules**: system prompt aggiornato con regole esplicite per tabelle Markdown, code block, grassetto. Sezione finale `---` con Riepilogo/Attenzione richiesta in ogni risposta.
+- **Telemetry prompt tracing**: `PipelineTrace` ora include campi `system_prompt`, `rag_context`, `user_content`, `compressed_text`, `llm_response` per debug completo della pipeline.
+- **`finalize_trace` parameter**: `build_omniscient_prompt()` supporta `finalize_trace=False` per uso esterno (MCP chat_send).
+- **fix: options=None**: bug in `ollama_chat()` che causava errore quando `options` era nullo.
+- **AGENTS.md**: regola n.9 (non riavviare Jarvis autonomamente), nota MCP diagnostic per agenti DEVs.
 
 ### v9.5.0 (2026-06-30) — TagSafeStream: fix leak tag XML nello streaming + documentazione completa
 - **TagSafeStream introdotto**: nuova classe state machine in `tag_processor.py` che previene la fuga di tag XML incompleti (`<NOTIFY_ONCE>`, `<CONFIDENCE>`, ecc.) quando il LLM genera token uno alla volta. Mantiene stato `_in_tag`/`_sc_pending` tra chunk successivi e yielda solo contenuto safe

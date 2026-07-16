@@ -350,6 +350,12 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 
 | Data | Modifica | Impatto |
 |---|---|---|
+| 16/07 | **MCP Server v2 Streamable HTTP** | Nuovo endpoint `/api/mcp/v2` — 8 tool + 7 resources. Rimossi endpoint SSE legacy. Conforme MCP Streamable HTTP (RFC 2025-11-25) |
+| 16/07 | **`_strip_thinking()` + compressione ottimizzata** | Rimuove tag `<think>`, analisi strutturate e meta-ragionamenti dalle risposte del Gatekeeper Qwen3.5. Compressor prompt riscritto con esempio INPUT/OUTPUT concreto |
+| 16/07 | **Prompt format rules** | System prompt aggiornato con regole esplicite per tabelle Markdown, code block, grassetto. Sezione finale obbligatoria `---` con Riepilogo/Attenzione |
+| 16/07 | **Telemetry prompt tracing** | `PipelineTrace` ora include system_prompt, rag_context, user_content, compressed_text, llm_response per debug completo pipeline |
+| 16/07 | **Model info rewrite** | `get_telemetry_model()` legge da `config.py` invece che dal motore. `GATEKEEPER_N_GPU_LAYERS` per offload GPU |
+| 16/07 | **fix: options=None, finalize_trace param** | Bug `ollama_chat()` risolto; `build_omniscient_prompt()` supporta `finalize_trace=False` per uso MCP |
 | 29/06 | **Refactor OpenAI in sottopacchetto** | `openai/` modulare con 17 moduli: lazy import, Assistants/Threads/Runs API, state persistente su SQLite |
 | 29/06 | **DB race condition fix (OpenAI)** | `asyncio.Lock` + double-check in `get_db()` di `openai/state.py` — risolve `RuntimeError: OpenAIDatabase not initialised` su richieste concorrenti |
 | 29/06 | **Reranker modulare (rag_reranker.py)** | Estratto da `rag.py`: Qwen3-Reranker transformers + FlashRank fallback in file separato |
@@ -441,10 +447,10 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 
 | Componente | Stato | Dettaglio |
 |---|---|---|
-| `jarvis/config.py` | ✅ Pronto | LLM_THINKING_MODE, LLM_NUM_CTX, parametri Gemma 4/Qwen3.5, Reranker config |
-| `jarvis/llm_engine.py` | ✅ Ottimizzato | n_batch=512, n_threads=6, embed n_gpu_layers=2, chat_format=None, thinking mode, offloading+failover |
+| `jarvis/config.py` | ✅ Pronto | LLM_THINKING_MODE, LLM_NUM_CTX, parametri Gemma 4/Qwen3.5, Reranker config, GATEKEEPER_N_GPU_LAYERS per offload GPU opzionale |
+| `jarvis/llm_engine.py` | ✅ Ottimizzato | n_batch=512, n_threads=6, embed n_gpu_layers=2, chat_format=None, thinking mode, offloading+failover, `_strip_thinking()` per rimuovere metacognizione, compressor con esempio INPUT/OUTPUT |
 | `jarvis/rag.py` | ✅ Ottimizzato | Reranker Qwen3 fp16 su CPU, project_id nei payload, substring matching multi-word, inode tracking in os.walk per evitare loop symlink |
-| `jarvis/prompt_builder.py` | ✅ Corretto | Isolamento progetto per conversazione, memoria filtrata per progetto, history 20 msg, finestra progetto attivo |
+| `jarvis/prompt_builder.py` | ✅ Corretto | Isolamento progetto per conversazione, memoria filtrata per progetto, history 20 msg, finestra progetto attivo, format rules (tabelle/code block/bold), sezione finale `---`, `finalize_trace` parameter |
 | `jarvis/state.py` | ✅ Migliorato | conversation_id per contesto progetto, helper get/set_last_project; counter inferenza (total_requests, total_prompt_tokens, total_completion_tokens) |
 | `jarvis/main.py` | ✅ Corretto | reset-all pulisce last_project_context, conversation_id passato alla pipeline, PollingObserver watchdog, cleanup nested symlink |
 | `jarvis/telegram_bot.py` | ✅ Corretto | user_id normalizzato a string, session TTL resetta progetto |
@@ -456,7 +462,7 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/rag_cache.py` | ✅ Nuovo | Cache semantica Qdrant + Web Knowledge persistence |
 | `jarvis/telegram_format.py` | ✅ Nuovo | Utility formattazione Telegram MarkdownV2/Markdown |
 | `jarvis/dashboard_template.py` | ✅ Nuovo | Template HTML/CSS/JS dashboard estratto da `dashboard.py` |
-| `jarvis/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls, ring buffer 500 trace |
+| `jarvis/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls, ring buffer 500 trace. Prompt fields: system_prompt, rag_context, user_content, compressed_text, llm_response |
 | `jarvis/mcp_server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna |
 | `jarvis/_mcp_handlers.py` | ✅ Deprecato | Sostituito da `mcp_server_v2.py` |
 | `MCP Server v2` | ✅ **ATTIVO** | Streamable HTTP via `/api/mcp/v2` (protocollo MCP v2) |
