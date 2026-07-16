@@ -722,23 +722,45 @@ async def get_telemetry_model():
     from config import MODEL_ID as cfg_model_id
     info = {
         "model_id": cfg_model_id,
+        "model_path": None,
+        "n_gpu_layers": 0,
+        "n_ctx": 0,
+        "n_batch": 0,
+        "n_ubatch": 0,
+        "flash_attn": False,
+        "thinking_mode": False,
+        "max_tokens": 2048,
+        "gatekeeper_model_loaded": False,
+        "detected_family": "unknown",
     }
-    # Prova a leggere dal motore
     try:
-        from llm_engine import engine
-        if hasattr(engine, 'model_path') and engine.chat_model is not None:
-            info["model_path"] = str(getattr(engine, 'model_path', ''))
-        info["n_gpu_layers"] = getattr(engine, 'n_gpu_layers', 0)
-        info["flash_attn"] = getattr(engine, 'flash_attn', False) or getattr(engine, 'llm_flash_attn', False)
-        if hasattr(engine, 'model_profiles'):
-            info["model_profile"] = str(getattr(engine, 'model_profiles', ''))
+        from config import (
+            LLAMA_MODEL_PATH, N_GPU_LAYERS, LLM_NUM_CTX,
+            LLM_BATCH_SIZE, LLM_UBATCH_SIZE, LLM_FLASH_ATTN,
+            LLM_THINKING_MODE, LLM_MAX_TOKENS,
+        )
+        info["model_path"] = LLAMA_MODEL_PATH
+        info["n_gpu_layers"] = N_GPU_LAYERS
+        info["n_ctx"] = LLM_NUM_CTX
+        info["n_batch"] = LLM_BATCH_SIZE
+        info["n_ubatch"] = LLM_UBATCH_SIZE
+        info["flash_attn"] = LLM_FLASH_ATTN
+        info["thinking_mode"] = LLM_THINKING_MODE
+        info["max_tokens"] = LLM_MAX_TOKENS
     except Exception:
         pass
-    # Leggi da model_profiles
+    try:
+        from llm_engine import engine
+        if engine.chat_model is not None:
+            info["model_loaded"] = True
+        if engine.gatekeeper_model is not None:
+            info["gatekeeper_model_loaded"] = True
+    except Exception:
+        info["model_loaded"] = False
     try:
         from model_profiles import detect_model_family
         family = detect_model_family(cfg_model_id)
-        info["detected_family"] = family or "unknown"
+        info["detected_family"] = family.family if family else "unknown"
     except Exception:
         info["detected_family"] = "unknown"
     return JSONResponse(info)
@@ -772,101 +794,12 @@ if not hasattr(state, '_start_time'):
 
 
 # ═══════════════════════════════════════════
-# MCP SSE Transport Endpoint
+# MCP Server v2
 # ═══════════════════════════════════════════
-# Implementa il trasporto SSE per il Model Context Protocol.
-# Altri agenti AI (Claude Code, Cursor) possono connettersi via
-#   GET  /api/mcp/sse
-#   POST /api/mcp/message?session_id=<id>
-#
-# Per agenti che supportano solo stdio, usare jarvis/mcp_server.py
-# configurato in .mcp.json.
+# Il nuovo server MCP v2 è registrato più sotto (sezione MCP Server v2).
+# I vecchi endpoint (/api/mcp/sse, /api/mcp/message, /api/mcp/remote)
+# sono stati rimossi — tutto passa da /api/mcp/v2.
 # ═══════════════════════════════════════════
-
-_mcp_sse_sessions: dict[str, asyncio.Queue] = {}
-
-
-@app.get("/api/mcp/sse")
-async def mcp_sse_transport(request: Request):
-    """MCP SSE transport — connessione persistente per messaggi MCP."""
-    session_id = uuid.uuid4().hex[:12]
-    queue: asyncio.Queue = asyncio.Queue()
-    _mcp_sse_sessions[session_id] = queue
-
-    from telemetry import PipelineTracer as PT
-
-    async def event_stream():
-        try:
-            # Invia endpoint event (MCP spec: dice al client dove POSTare)
-            msg_endpoint = f"/api/mcp/message?session_id={session_id}"
-            yield f"event: endpoint\ndata: {msg_endpoint}\n\n"
-
-            # Invia initialized notification (MCP spec)
-            init_msg = json.dumps({
-                "jsonrpc": "2.0",
-                "method": "initialized",
-                "params": {"serverName": "jarvis-telemetry-sse"},
-            })
-            yield f"data: {init_msg}\n\n"
-
-            # Stream risposte
-            while True:
-                try:
-                    response = await asyncio.wait_for(queue.get(), timeout=30)
-                    yield f"data: {response}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            _mcp_sse_sessions.pop(session_id, None)
-            logger.debug(f"[MCP-SSE] Session {session_id} ended")
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-@app.post("/api/mcp/message")
-async def mcp_sse_message(request: Request):
-    """MCP message endpoint — riceve JSON-RPC dal client e risponde via SSE."""
-    session_id = request.query_params.get("session_id", "")
-    if not session_id or session_id not in _mcp_sse_sessions:
-        return JSONResponse(
-            {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Invalid session"}},
-            status_code=400,
-        )
-
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(
-            {"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}},
-            status_code=400,
-        )
-
-    req_id = body.get("id", 0)
-    method = body.get("method", "")
-    params = body.get("params")
-
-    # Processa la richiesta
-    try:
-        result = handle_mcp_request(method, params)
-    except Exception as e:
-        result = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(e)}}
-        _mcp_sse_sessions[session_id] = result
-        return JSONResponse({"ok": True})
-
-    # Costruisci risposta JSON-RPC
-    if isinstance(result, dict) and "error" in result:
-        response = {"jsonrpc": "2.0", "id": req_id, "error": result["error"]}
-    else:
-        response = {"jsonrpc": "2.0", "id": req_id, "result": result}
-
-    # Invia risposta al client via SSE
-    await _mcp_sse_sessions[session_id].put(json.dumps(response, ensure_ascii=False))
-    return JSONResponse({"ok": True})
-
-
-from _mcp_handlers import handle_mcp_request
 
 
 @app.post("/api/chat")
@@ -881,7 +814,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
     
     raw_messages = body.get("messages", [])
     
-    options = body.get("options", {})
+    options = body.get("options") or {}
     
     # Bypass per Mem0 internal queries o per Worker Offloading (skip_rag)
     is_internal = False
@@ -1021,6 +954,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             choice = response["choices"][0]["message"]
             ollama_resp["message"] = {"role": choice.get("role", "assistant"), "content": choice.get("content", "")}
             if tracer:
+                tracer.set_llm_response(choice.get("content", ""))
                 usage2 = response.get("usage", {})
                 tracer.add_llm_call(LlmCallRecord(
                     model="chat",
@@ -1033,6 +967,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         
         content = ollama_resp["message"].get("content", "")
         if tracer:
+            tracer.set_llm_response(content)
             tracer.finish()
 
         # Strip tag veloce (regex, senza handler) per la risposta immediata.
@@ -1131,6 +1066,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                     logger.warning(f"⚠️ Background tag processing error: {e}")
 
             if tracer:
+                tracer.set_llm_response(full_text)
                 tracer.finish()
 
         return StreamingResponse(stream_gen(), media_type="application/x-ndjson")
@@ -1385,3 +1321,39 @@ async def ollama_show():
         "template": "",
         "details": {"families": ["qwen2", "nomic"]}
     }
+
+
+# ═══════════════════════════════════════════
+# MCP Server v2 — Streamable HTTP (route FastAPI diretta)
+# ═══════════════════════════════════════════
+# Implementazione conforme MCP Streamable HTTP (RFC 2025-11-25)
+# su route FastAPI diretta, senza sub-app Starlette montate
+# (evita problemi di lifespan con Granian).
+#
+# Endpoint: POST /api/mcp/v2 → JSON-RPC request/response
+# ═══════════════════════════════════════════
+
+try:
+    from mcp_server_v2 import handle_mcp_post
+
+    @app.post("/api/mcp/v2")
+    async def mcp_v2(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            from starlette.responses import JSONResponse as _JR
+            return _JR({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}}, status_code=400)
+
+        resp = await handle_mcp_post(body) if hasattr(handle_mcp_post, '__call__') else handle_mcp_post(body)
+
+        # Se è una notifica, rispondi 202 Accepted
+        if not resp or resp == {}:
+            from starlette.responses import Response as _Resp
+            return _Resp(status_code=202)
+
+        from starlette.responses import JSONResponse as _JR2
+        return _JR2(resp)
+
+    logger.info("MCP Server v2 su /api/mcp/v2 (Streamable HTTP)")
+except Exception as exc:
+    logger.warning(f"MCP Server v2 non disponibile — installa 'mcp' package: pip install mcp ({exc})")

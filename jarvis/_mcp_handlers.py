@@ -85,12 +85,39 @@ def _get_status_dict() -> dict:
 
 def _get_model_info_dict() -> dict:
     from config import MODEL_ID as cfg_model_id
-    info = {"model_id": cfg_model_id}
+    info = {
+        "model_id": cfg_model_id,
+        "model_path": None,
+        "n_gpu_layers": 0,
+        "n_ctx": 0,
+        "n_batch": 0,
+        "n_ubatch": 0,
+        "flash_attn": False,
+        "thinking_mode": False,
+        "max_tokens": 2048,
+        "gatekeeper_model_loaded": False,
+        "model_loaded": False,
+    }
+    try:
+        from config import (
+            LLAMA_MODEL_PATH, N_GPU_LAYERS, LLM_NUM_CTX,
+            LLM_BATCH_SIZE, LLM_UBATCH_SIZE, LLM_FLASH_ATTN,
+            LLM_THINKING_MODE, LLM_MAX_TOKENS,
+        )
+        info["model_path"] = LLAMA_MODEL_PATH
+        info["n_gpu_layers"] = N_GPU_LAYERS
+        info["n_ctx"] = LLM_NUM_CTX
+        info["n_batch"] = LLM_BATCH_SIZE
+        info["n_ubatch"] = LLM_UBATCH_SIZE
+        info["flash_attn"] = LLM_FLASH_ATTN
+        info["thinking_mode"] = LLM_THINKING_MODE
+        info["max_tokens"] = LLM_MAX_TOKENS
+    except Exception:
+        pass
     try:
         from llm_engine import engine
-        if hasattr(engine, 'model_path') and engine.chat_model is not None:
-            info["model_path"] = str(getattr(engine, 'model_path', ''))
-        info["n_gpu_layers"] = getattr(engine, 'n_gpu_layers', 0)
+        info["model_loaded"] = engine.chat_model is not None
+        info["gatekeeper_model_loaded"] = engine.gatekeeper_model is not None
     except Exception:
         pass
     return info
