@@ -230,9 +230,24 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if m.get("content") and len(m["content"]) > 1500:
             m["content"] = m["content"][:1500] + "\n...[TRUNCATED FOR CONTEXT LIMIT]..."
 
-    # Inietta data/ora corrente come system message iniziale
-    # Il modello non ha accesso a datetime senza questo contesto esplicito.
-    messages.insert(0, {"role": "system", "content": _datetime_context()})
+    # Inietta data/ora corrente in OGNI richiesta — il modello ignora i system message
+    # perché ha un prior training forte ("non conosco l'ora"). Per forzare la
+    # cognizione temporale, la data/ora viene iniettata sia come system message
+    # (tracciabilità storica) sia nel contenuto dell'ultimo user message (certezza
+    # di lettura). I path che sostituiscono user_content (concise/full/meta) hanno
+    # la data/ora già nel system prompt.
+    _dt_now = _datetime_context()
+    messages.insert(0, {"role": "system", "content": _dt_now})
+    # Inietta anche nell'ultimo messaggio utente — il modello LO LEGGE SEMPRE.
+    # Il formato [CURRENT DATETIME — YOU MUST USE THIS: ...] contraddice
+    # esplicitamente il training prior del LLM ("non so che ora è").
+    for _i in range(len(messages) - 1, -1, -1):
+        if messages[_i]["role"] == "user":
+            messages[_i]["content"] = (
+                f"[CURRENT DATETIME — YOU MUST USE THIS: {_dt_now}]\n\n"
+                f"{messages[_i]['content']}"
+            )
+            break
 
     tracer.end_step("prompt_preprocessing", details={"msg_len": len(latest_msg), "history_len": len(messages)})
 
@@ -419,7 +434,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     if gk.intent == "meta":
         logger.info(f"🗂️ Intento META: skip caveman compression, risposta conversazionale")
         meta_context = "\n".join(f"- {p}" for p in _all_projects) if _all_projects else "Nessun progetto indicizzato."
-        meta_prompt = f"Progetti disponibili:\n{meta_context}\n\nDomanda: {clean_msg}"
+        meta_prompt = f"[CURRENT DATETIME — YOU MUST USE THIS: {_dt_now}]\n\nProgetti disponibili:\n{meta_context}\n\nDomanda: {clean_msg}"
         for m in reversed(messages):
             if m["role"] == "user":
                 m["content"] = meta_prompt
