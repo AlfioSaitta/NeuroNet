@@ -5,8 +5,11 @@ import struct
 import json
 import uuid
 import asyncio
+import logging
+from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from collections import deque
+from typing import Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
@@ -15,6 +18,8 @@ import state
 from llm_engine import engine
 from tag_processor import strip_action_tags, TagSafeStream
 
+logger = logging.getLogger(__name__)
+
 dashboard_router = APIRouter()
 
 from dashboard_template import HTML_CONTENT
@@ -22,6 +27,201 @@ from dashboard_template import HTML_CONTENT
 # ── Chat session state (in-memory ring buffer per conversation) ──
 _chat_sessions: dict[str, deque] = {}
 MAX_HISTORY = 200
+
+# ═══════════════════════════════════════════════════════════════
+# Telemetry Cache (evita subprocess/IO bloccanti a ogni richiesta)
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class TelemetryCache:
+    gpu: dict | None = None
+    sys_metrics: dict | None = None
+    health: dict | None = None
+    qdrant_collections: list | None = None
+    sys_stats: dict | None = None  # uptime, load, disk, ram_mb
+    last_gpu_ts: float = 0.0
+    last_health_ts: float = 0.0
+
+_telemetry_cache = TelemetryCache()
+_TELEMETRY_POLL_INTERVAL = 5  # secondi
+
+
+async def _collect_gpu_cache() -> dict | None:
+    """Colle metrics GPU via subprocess (offloaded a thread pool) e le cache."""
+    import subprocess
+    loop = asyncio.get_running_loop()
+    result = {"temp": None, "vram_used": None, "vram_total": None, "util": None, "cuda_version": None, "processes": None}
+    try:
+        out = await loop.run_in_executor(None, lambda: subprocess.run(
+            ["nvidia-smi", "--query-gpu=temperature.gpu,memory.used,memory.total,utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        ))
+        if out.returncode == 0:
+            parts = out.stdout.strip().split(", ")
+            if len(parts) >= 3:
+                result["temp"] = int(parts[0])
+                result["vram_used"] = int(parts[1])
+                result["vram_total"] = int(parts[2])
+            if len(parts) >= 4:
+                result["util"] = int(parts[3]) if parts[3].lstrip('-').isdigit() else 0
+    except Exception:
+        pass
+
+    try:
+        out2 = await loop.run_in_executor(None, lambda: subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3
+        ))
+        if out2.returncode == 0:
+            result["cuda_version"] = out2.stdout.strip()
+    except Exception:
+        pass
+
+    try:
+        out3 = await loop.run_in_executor(None, lambda: subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3
+        ))
+        if out3.returncode == 0 and out3.stdout.strip():
+            lines = [l.strip() for l in out3.stdout.strip().split('\n') if l.strip()]
+            header = f"{'PID':>7}  {'NAME':<30}  {'VRAM':>8}\n" + "-" * 50
+            rows = []
+            for l in lines:
+                parts = l.split(", ")
+                if len(parts) >= 3:
+                    rows.append(f"{parts[0]:>7}  {parts[1]:<30}  {parts[2]:>8}")
+            if rows:
+                result["processes"] = header + "\n" + "\n".join(rows)
+    except Exception:
+        pass
+
+    if result["temp"] is not None:
+        state.gpu_history.append({
+            "ts": time.time(), "temp": result["temp"],
+            "vram_used": result["vram_used"], "vram_total": result["vram_total"],
+            "util": result["util"] or 0
+        })
+
+    return result
+
+
+async def _collect_health_cache() -> tuple[dict, dict]:
+    """Health checks per servizi esterni + sys_stats (uptime, load, disk, RAM)."""
+    health = {"searxng": False, "crawl4ai": False, "qdrant": False}
+    try:
+        r = await state.http_client.get(SEARXNG_HOST, timeout=1.0)
+        health["searxng"] = (r.status_code < 500)
+    except Exception:
+        pass
+    try:
+        health_url = CRAWL4AI_HOST.rstrip('/') + '/health'
+        headers = {}
+        if CRAWL4AI_API_TOKEN:
+            headers["Authorization"] = f"Bearer {CRAWL4AI_API_TOKEN}"
+        r = await state.http_client.get(health_url, headers=headers, timeout=2.0)
+        health["crawl4ai"] = (r.status_code < 500)
+    except Exception:
+        pass
+    try:
+        res = await state.http_client.get(f"http://{QDRANT_HOST}:6333/collections", timeout=2.0)
+        health["qdrant"] = (res.status_code == 200)
+    except Exception:
+        pass
+
+    sys_stats = {"uptime": "N/A", "load": "N/A", "disk": "N/A", "ram_mb": 0}
+    try:
+        with open('/proc/uptime') as f:
+            uptime_seconds = float(f.readline().split()[0])
+            h, m = int(uptime_seconds // 3600), int((uptime_seconds % 3600) // 60)
+            sys_stats["uptime"] = f"{h}h {m}m"
+    except Exception:
+        pass
+    try:
+        with open('/proc/loadavg') as f:
+            sys_stats["load"] = " ".join(f.readline().split()[0:3])
+    except Exception:
+        pass
+    try:
+        st = os.statvfs('/')
+        total_gb = (st.f_blocks * st.f_frsize) / (1024 ** 3)
+        free_gb = (st.f_bavail * st.f_frsize) / (1024 ** 3)
+        sys_stats["disk"] = f"{total_gb - free_gb:.1f}G / {total_gb:.1f}G"
+    except Exception:
+        pass
+    try:
+        with open('/proc/self/statm') as f:
+            process_pages = int(f.read().split()[1])
+            page_size = os.sysconf('SC_PAGE_SIZE')
+            sys_stats["ram_mb"] = round((process_pages * page_size) / (1024 * 1024), 1)
+    except Exception:
+        pass
+
+    return health, sys_stats
+
+
+async def _collect_qdrant_cache() -> list:
+    """Lista collezioni Qdrant con punti."""
+    collections = []
+    try:
+        res = await state.http_client.get(f"http://{QDRANT_HOST}:6333/collections", timeout=2.0)
+        if res.status_code == 200:
+            c_data = res.json()
+            if "result" in c_data and "collections" in c_data["result"]:
+                for c in c_data["result"]["collections"]:
+                    name = c["name"]
+                    try:
+                        info = await state.http_client.get(
+                            f"http://{QDRANT_HOST}:6333/collections/{name}", timeout=2.0
+                        )
+                        if info.status_code == 200:
+                            pts = info.json().get("result", {}).get("points_count", 0)
+                            collections.append({"name": name, "points": pts})
+                            continue
+                    except Exception:
+                        pass
+                    collections.append({"name": name})
+    except Exception:
+        pass
+    return collections
+
+
+async def telemetry_collector_loop():
+    """Background task: raccoglie GPU + health + Qdrant ogni N secondi e li cache."""
+    while True:
+        try:
+            # GPU (operazione pesante → eseguita in thread pool)
+            gpu = await _collect_gpu_cache()
+            if gpu:
+                _telemetry_cache.gpu = gpu
+                _telemetry_cache.last_gpu_ts = time.time()
+        except Exception as e:
+            logger.debug(f"Telemetry GPU collector: {e}")
+
+        try:
+            health, sys_stats = await _collect_health_cache()
+            _telemetry_cache.health = health
+            _telemetry_cache.sys_stats = sys_stats
+            _telemetry_cache.last_health_ts = time.time()
+        except Exception as e:
+            logger.debug(f"Telemetry health collector: {e}")
+
+        try:
+            qdrant = await _collect_qdrant_cache()
+            _telemetry_cache.qdrant_collections = qdrant
+        except Exception as e:
+            logger.debug(f"Telemetry Qdrant collector: {e}")
+
+        await asyncio.sleep(_TELEMETRY_POLL_INTERVAL)
+
+
+def start_telemetry_collector(app):
+    """Avvia il background collector. Chiamato dal lifespan di main.py."""
+    task = asyncio.create_task(telemetry_collector_loop())
+    state.background_tasks.add(task)
+    task.add_done_callback(state.background_tasks.discard)
+    logger.info("📊 Telemetry collector avviato (poll %ds)", _TELEMETRY_POLL_INTERVAL)
 
 
 class ChatStreamRequest(BaseModel):
@@ -171,13 +371,16 @@ async def get_gpu_json():
 
 @dashboard_router.get("/api/dashboard/stats")
 async def get_stats():
-    import json
+    # ── Legge dal cache (aggiornato ogni 5s dal background collector) ──
+    gpu = _telemetry_cache.gpu or await _collect_gpu_cache()
+    health = _telemetry_cache.health
+    sys_stats = _telemetry_cache.sys_stats
+    qdrant_collections = _telemetry_cache.qdrant_collections or []
 
-    gpu = await get_gpu_metrics()
-
+    # ── Sys metrics (on-demand: leggero, ~1ms) ──
     sys_m = collect_sys_metrics()
 
-    # Inference delta tracking
+    # ── Inference delta tracking ──
     prev_req = getattr(state, '_prev_total_requests', None)
     prev_pt = getattr(state, '_prev_prompt_tokens', None)
     prev_ct = getattr(state, '_prev_completion_tokens', None)
@@ -196,37 +399,18 @@ async def get_stats():
             "completion_tokens": max(delta_ct, 0),
             "tokens_per_sec": round(max(delta_ct, 0) / 3, 1) if delta_ct > 0 else 0
         })
-
     state._prev_total_requests = cur_req
     state._prev_prompt_tokens = cur_pt
     state._prev_completion_tokens = cur_ct
 
-    qdrant_collections = []
-    qdrant_up = False
-    try:
-        res = await state.http_client.get(f"http://{QDRANT_HOST}:6333/collections", timeout=2.0)
-        if res.status_code == 200:
-            qdrant_up = True
-            c_data = res.json()
-            if "result" in c_data and "collections" in c_data["result"]:
-                for c in c_data["result"]["collections"]:
-                    name = c["name"]
-                    try:
-                        info = await state.http_client.get(f"http://{QDRANT_HOST}:6333/collections/{name}", timeout=2.0)
-                        if info.status_code == 200:
-                            pts = info.json().get("result", {}).get("points_count", 0)
-                            qdrant_collections.append({"name": name, "points": pts})
-                            continue
-                    except Exception:
-                        pass
-                    qdrant_collections.append({"name": name})
-    except Exception:
-        pass
+    # ── Qdrant / health status dal cache ──
+    qdrant_up = bool(health and health.get("qdrant"))
 
     total_requests = getattr(state, 'total_requests', 0)
     total_prompt_tokens = getattr(state, 'total_prompt_tokens', 0)
     total_completion_tokens = getattr(state, 'total_completion_tokens', 0)
 
+    # ── Model info (on-demand: letture in-memory) ──
     models = {}
     try:
         chat_model_name = "N/A"
@@ -249,15 +433,15 @@ async def get_stats():
             details.append({"label": "n_gpu_layers", "value": ngl_str})
             try:
                 ctx = cm.n_ctx()
-                try:
-                    meta = cm.metadata if hasattr(cm, 'metadata') else {}
-                    ctx_max = meta.get('gemma4.context_length') or meta.get('llama.context_length') or meta.get('LLaMA.context_length') or cm.n_ctx_train()
-                except Exception:
-                    ctx_max = None
-                ctx_str = f"{ctx} / {ctx_max}" if ctx_max and ctx_max != ctx else str(ctx)
-                details.append({"label": "n_ctx", "value": ctx_str})
             except Exception:
-                details.append({"label": "n_ctx", "value": "?"})
+                ctx = '?'
+            try:
+                meta = cm.metadata if hasattr(cm, 'metadata') else {}
+                ctx_max = meta.get('gemma4.context_length') or meta.get('llama.context_length') or meta.get('LLaMA.context_length') or cm.n_ctx_train()
+            except Exception:
+                ctx_max = None
+            ctx_str = f"{ctx} / {ctx_max}" if ctx_max and ctx_max != ctx else str(ctx)
+            details.append({"label": "n_ctx", "value": ctx_str})
             fa_type = (getattr(cp2, 'flash_attn_type', None) if cp2 else
                        getattr(cm, 'flash_attn_type', None))
             if fa_type is None:
@@ -276,52 +460,17 @@ async def get_stats():
     except Exception as e:
         models = {"chat_model": "Error", "embed_model": "Error", "details": [{"label": "error", "value": str(e)}]}
 
-    searxng_up = False
-    try:
-        r = await state.http_client.get(SEARXNG_HOST, timeout=1.0)
-        searxng_up = (r.status_code < 500)
-    except Exception:
-        pass
+    # ── Service health dal cache ──
+    searxng_up = bool(health and health.get("searxng"))
+    crawl4ai_up = bool(health and health.get("crawl4ai"))
 
-    crawl4ai_up = False
-    try:
-        health_url = CRAWL4AI_HOST.rstrip('/') + '/health'
-        headers = {}
-        if CRAWL4AI_API_TOKEN:
-            headers["Authorization"] = f"Bearer {CRAWL4AI_API_TOKEN}"
-        r = await state.http_client.get(health_url, headers=headers, timeout=2.0)
-        crawl4ai_up = (r.status_code < 500)
-    except Exception:
-        pass
+    # ── Sys stats dal cache ──
+    sys_uptime = (sys_stats or {}).get("uptime", "N/A")
+    sys_load = (sys_stats or {}).get("load", "N/A")
+    sys_disk = (sys_stats or {}).get("disk", "N/A")
+    ram_mb = (sys_stats or {}).get("ram_mb", 0)
 
-    try:
-        process = open('/proc/self/statm').read().split()[1]
-        page_size = os.sysconf('SC_PAGE_SIZE')
-        ram_mb = round((int(process) * page_size) / (1024 * 1024), 1)
-    except:
-        ram_mb = 0
-
-    try:
-        with open('/proc/uptime', 'r') as f:
-            uptime_seconds = float(f.readline().split()[0])
-            sys_uptime = f"{int(uptime_seconds // 3600)}h {int((uptime_seconds % 3600) // 60)}m"
-    except:
-        sys_uptime = "N/A"
-
-    try:
-        with open('/proc/loadavg', 'r') as f:
-            sys_load = " ".join(f.readline().split()[0:3])
-    except:
-        sys_load = "N/A"
-
-    try:
-        st = os.statvfs('/')
-        total_gb = (st.f_blocks * st.f_frsize) / (1024 ** 3)
-        free_gb = (st.f_bavail * st.f_frsize) / (1024 ** 3)
-        sys_disk = f"{total_gb - free_gb:.1f}G / {total_gb:.1f}G"
-    except:
-        sys_disk = "N/A"
-
+    # ── Agent stats (on-demand: letture file JSON) ──
     active_todos = 0
     active_crons = 0
     try:
@@ -329,7 +478,6 @@ async def get_stats():
         tasks = load_tasks()
         active_todos = len([t for t in tasks.values() if t.get('status') != 'done'])
     except: pass
-
     try:
         from cron_agent import load_jobs
         jobs = load_jobs()

@@ -402,6 +402,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"MCP initialization: {e}")
 
+    # Avvio background collector telemetria (GPU, health, Qdrant ogni 5s)
+    try:
+        from dashboard import start_telemetry_collector
+        start_telemetry_collector(app)
+    except Exception as e:
+        logger.warning(f"Telemetry collector non avviato: {e}")
+
     yield
 
     # Shutdown
