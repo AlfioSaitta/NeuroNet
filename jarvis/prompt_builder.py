@@ -26,6 +26,18 @@ from telemetry import PipelineTracer, GatekeeperStats
 import state
 
 # ════════════════════════════════════════════════════════════════
+# FUNZIONE DI CONTESTO TEMPORALE
+# ════════════════════════════════════════════════════════════════
+
+def _datetime_context() -> str:
+    """Restituisce una stringa formattata con data/ora correnti e timezone locale."""
+    now = datetime.datetime.now()
+    return (
+        f"Current date and time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}. "
+        f"Today is {now.strftime('%A')}, day {now.timetuple().tm_yday} of {now.year}."
+    )
+
+# ════════════════════════════════════════════════════════════════
 # STEP 1: FAST PATHS — Keyword Bypass (0 LLM calls)
 # ════════════════════════════════════════════════════════════════
 
@@ -220,8 +232,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
 
     # Inietta data/ora corrente come system message iniziale
     # Il modello non ha accesso a datetime senza questo contesto esplicito.
-    _now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
-    messages.insert(0, {"role": "system", "content": f"Current date and time: {_now}. Today is {datetime.datetime.now().strftime('%A')}."})
+    messages.insert(0, {"role": "system", "content": _datetime_context()})
 
     tracer.end_step("prompt_preprocessing", details={"msg_len": len(latest_msg), "history_len": len(messages)})
 
@@ -266,7 +277,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             user_content = compressed
             tracer.end_step("concise_pipeline", details={"comp_len": len(compressed)})
         # System prompt in messaggio system, non nella user query — previene echo
-        system_prompt = CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
+        system_prompt = (
+            f"[{_datetime_context()}]\n\n"
+            + CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
+        )
         messages.append({"role": "system", "content": system_prompt})
         for m in reversed(messages):
             if m["role"] == "user":
@@ -634,8 +648,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     # (es. "PROJECT: SlotBuilder. CONTEXT: ... INSTRUCTION: ...").
     # Se la compressione è riuscita, usa system prompt caveman per codice diretto.
     # System prompt in messaggio system, non nella user query — previene echo
+    _dt = _datetime_context()
     if _compression_is_raw:
         system_prompt = (
+            f"[{_dt}]\n\n"
             "You are Jarvis, a helpful coding assistant with access to project context.\n"
             "The context below uses labels (Project:, Task:, Context:) for your reference only. "
             "DO NOT echo them.\n\n"
@@ -654,7 +670,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         )
         user_content = f"Context:\n{compressed}"
     else:
-        system_prompt = CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
+        system_prompt = (
+            f"[{_dt}]\n\n"
+            + CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
+        )
         user_content = compressed
 
     messages.append({"role": "system", "content": system_prompt})
