@@ -54,48 +54,113 @@ HTML_CONTENT = r"""
             color: var(--text-main);
             height: 100vh;
             display: flex;
+            flex-direction: column;
             overflow: hidden;
             background-image: 
                 radial-gradient(circle at 0% 0%, rgba(123, 44, 191, 0.15), transparent 30%),
                 radial-gradient(circle at 100% 100%, rgba(0, 255, 204, 0.1), transparent 30%);
         }
-        
-        .sidebar {
-            width: 320px;
-            background: rgba(10, 15, 20, 0.8);
-            backdrop-filter: blur(20px);
-            border-right: 1px solid var(--glass-border);
-            padding: 30px 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-            overflow-y: auto;
-            z-index: 10;
+
+        /* ── Top Navbar ── */
+        .top-navbar {
+            height: 56px;
             flex-shrink: 0;
+            background: rgba(10, 15, 20, 0.85);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--glass-border);
+            display: flex;
+            align-items: center;
+            padding: 0 24px;
+            gap: 16px;
+            z-index: 100;
+            -webkit-app-region: drag;
         }
-        .brand {
-            text-align: center; padding-bottom: 10px;
-            border-bottom: 1px solid rgba(255,255,255,0.05);
+        .navbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            -webkit-app-region: no-drag;
         }
-        .brand h1 {
-            font-weight: 800; font-size: 2.2rem;
+        .navbar-brand .logo {
+            font-weight: 800; font-size: 1.3rem;
             background: linear-gradient(90deg, var(--primary), var(--secondary));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            margin: 0; letter-spacing: -1px;
+            letter-spacing: -0.5px;
+            white-space: nowrap;
         }
-        .brand .subtitle {
-            font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
-            color: var(--text-muted); text-transform: uppercase; letter-spacing: 2px; margin-top: 5px;
+        .navbar-brand .version {
+            font-family: 'JetBrains Mono', monospace; font-size: 0.6rem;
+            color: var(--text-muted); padding: 2px 8px;
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 4px; background: rgba(255,255,255,0.03);
         }
-        
+        .navbar-divider {
+            width: 1px; height: 28px;
+            background: rgba(255,255,255,0.06);
+            flex-shrink: 0;
+        }
+        .navbar-nav {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            -webkit-app-region: no-drag;
+        }
+        .nav-pill {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 6px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.8rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .nav-pill:hover { color: var(--text-main); background: rgba(255,255,255,0.05); }
+        .nav-pill.active {
+            color: var(--primary);
+            background: rgba(0,255,204,0.1);
+        }
+        .nav-pill .nav-icon { font-size: 1rem; }
+        .navbar-spacer { flex: 1; }
+        .navbar-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            -webkit-app-region: no-drag;
+        }
+        .status-chip {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 10px;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            font-size: 0.7rem;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+        .status-chip .dot { margin: 0; width: 7px; height: 7px; flex-shrink: 0; }
+        .status-chip .label { color: var(--text-muted); margin-right: 2px; }
+        .status-chip .value { color: var(--text-main); font-weight: 600; }
+        .status-chip .value.good { color: var(--primary); }
+        .status-chip .value.warm { color: var(--warning); }
+        .status-chip .value.hot { color: var(--danger); }
+
         .main-content {
             flex: 1;
-            padding: 30px;
+            padding: 24px 28px;
             overflow-y: auto;
             display: flex;
             flex-direction: column;
-            gap: 24px;
+            gap: 20px;
         }
 
         .grid-container {
@@ -170,8 +235,8 @@ HTML_CONTENT = r"""
 
         .modal {
             display: none; position: fixed; z-index: 1000;
-            left: 320px; top: 0;
-            width: calc(100% - 320px); height: 100%;
+            left: 0; top: 0;
+            width: 100%; height: 100%;
             background-color: rgba(5, 7, 10, 0.97);
             backdrop-filter: blur(10px);
         }
@@ -325,155 +390,41 @@ HTML_CONTENT = r"""
 </head>
 <body>
 
-    <div class="sidebar">
-        <div class="brand">
-            <h1>NEURONET</h1>
-            <div class="subtitle">Neural Control Panel</div>
+    <!-- ── Top Navbar ── -->
+    <nav class="top-navbar">
+        <div class="navbar-brand">
+            <span class="logo">NEURONET</span>
+            <span class="version">v8.6.7</span>
         </div>
-
-        <div class="card" style="padding: 16px;">
-            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 8px;"><span class="dot dot-accent pulsing"></span> Neural Engine</div>
-            <div style="margin-bottom: 8px;">
-                <div style="display:flex; justify-content:space-between; font-size:0.8rem;">
-                    <span style="color:var(--text-muted);">Chat</span>
-                    <span id="model-chat-side" style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">--</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:0.8rem;">
-                    <span style="color:var(--text-muted);">Embed</span>
-                    <span id="model-embed-side" style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">--</span>
-                </div>
-            </div>
-            <ul class="data-list" id="model-details-side" style="margin-bottom:8px;"></ul>
-            <div style="border-top:1px solid rgba(255,255,255,0.05);padding-top:6px;">
-                <div style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Features</div>
-                <div id="features-list" style="display:grid;grid-template-columns:1fr 1fr;gap:3px;"></div>
-            </div>
+        <div class="navbar-divider"></div>
+        <div class="navbar-nav">
+            <button id="nav-monitor-btn" class="nav-pill active" onclick="showChatView(false)">
+                <span class="nav-icon">📊</span> Monitor
+            </button>
+            <button id="nav-chat-btn" class="nav-pill" onclick="showChatView(true)">
+                <span class="nav-icon">💬</span> Chat
+            </button>
         </div>
-
-        <div class="card" style="padding: 16px;">
-            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 12px;"><span class="dot dot-accent pulsing"></span> GPU Monitor</div>
-            <div class="gpu-temp" style="margin-bottom: 10px;">
-                <div class="temp-val" id="gpu-temp">--</div>
-                <div style="flex:1">
-                    <div class="temp-label" style="color: var(--text-muted);">°C</div>
-                    <div class="progress-bar" style="height: 6px;">
-                        <div class="progress-fill" id="gpu-temp-bar" style="width: 0%;"></div>
-                    </div>
-                </div>
+        <div class="navbar-spacer"></div>
+        <div class="navbar-status">
+            <div class="status-chip" title="Chat model">
+                <span class="label">Model</span>
+                <span class="value" id="navbar-model">--</span>
             </div>
-            <div class="metric-row" style="gap: 10px; margin-bottom: 0;">
-                <div class="metric">
-                    <div class="val" id="gpu-vram-used" style="font-size: 1rem; color: var(--primary);">--</div>
-                    <div class="label" style="font-size: 0.65rem;">VRAM Used</div>
-                </div>
-                <div class="metric">
-                    <div class="val" id="gpu-vram-total" style="font-size: 1rem; color: var(--text-muted);">--</div>
-                    <div class="label" style="font-size: 0.65rem;">Total</div>
-                </div>
-                <div class="metric">
-                    <div class="val" id="gpu-util" style="font-size: 1rem;">--</div>
-                    <div class="label" style="font-size: 0.65rem;">Util %</div>
-                </div>
+            <div class="status-chip" title="GPU temperature">
+                <span class="dot" id="navbar-gpu-dot" style="background:var(--text-muted);color:var(--text-muted);"></span>
+                <span class="value" id="navbar-gpu-temp">--°C</span>
             </div>
-            <div class="progress-bar" style="height: 5px;">
-                <div class="progress-fill" id="gpu-vram-bar" style="width: 0%;"></div>
+            <div class="status-chip" title="Services health">
+                <span class="dot dot-primary pulsing" id="navbar-health-dot"></span>
+                <span class="value good" id="navbar-services">All OK</span>
             </div>
-            <div class="gpu-processes" id="gpu-processes" style="margin-top: 8px;"></div>
-        </div>
-
-        <div class="card" style="padding: 16px;">
-            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 12px;"><span class="dot dot-warning"></span> Host</div>
-            <div style="display: flex; flex-direction: column; gap: 8px;">
-                <div style="display: flex; justify-content: space-between; font-size: 0.8rem;">
-                    <span style="color: var(--text-muted);">Uptime</span>
-                    <span id="sys-uptime" style="font-family: 'JetBrains Mono', monospace;">--</span>
-                </div>
-                <div style="display: flex; justify-content: space-between; font-size: 0.8rem;">
-                    <span style="color: var(--text-muted);">Load Avg</span>
-                    <span id="sys-load" style="font-family: 'JetBrains Mono', monospace;">--</span>
-                </div>
-                <div style="display: flex; justify-content: space-between; font-size: 0.8rem;">
-                    <span style="color: var(--text-muted);">Disk</span>
-                    <span id="sys-disk" style="font-family: 'JetBrains Mono', monospace;">--</span>
-                </div>
-                <div style="display: flex; justify-content: space-between; font-size: 0.8rem;">
-                    <span style="color: var(--text-muted);">Agent RAM</span>
-                    <span id="sys-ram" style="font-family: 'JetBrains Mono', monospace;">--</span>
-                </div>
+            <div class="status-chip" title="Uptime">
+                <span class="label">Up</span>
+                <span class="value" id="navbar-uptime">--</span>
             </div>
         </div>
-
-        <div class="card" style="padding: 16px;">
-            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 12px;">
-                <span class="dot dot-secondary"></span> Services
-                <span style="flex:1;"></span>
-                <button class="btn" onclick="openLogModal()" style="font-size:0.65rem;padding:2px 6px;">Logs</button>
-            </div>
-            <ul class="data-list">
-                <li style="display:flex;gap:4px;flex-wrap:wrap;">
-                    <span style="flex:1;">SearXNG</span>
-                    <span class="badge" id="health-searxng">...</span>
-                    <button class="btn" onclick="restartContainer('searxng')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
-                </li>
-                <li style="display:flex;gap:4px;flex-wrap:wrap;">
-                    <span style="flex:1;">Crawl4AI</span>
-                    <span class="badge" id="health-crawl4ai">...</span>
-                    <button class="btn" onclick="restartContainer('crawl4ai_server')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
-                </li>
-                <li style="display:flex;gap:4px;flex-wrap:wrap;">
-                    <span style="flex:1;">Qdrant</span>
-                    <span class="badge" id="health-qdrant">...</span>
-                    <button class="btn" onclick="restartContainer('qdrant_db')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
-                </li>
-                <li><span>GPU (CUDA)</span> <span class="badge" id="health-cuda">...</span></li>
-                <li><span>MCP v2</span> <span class="badge badge-primary" id="mcp-v2-badge">✔ Streamable HTTP</span></li>
-            </ul>
-            <div style="display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.05);">
-                <button class="btn" onclick="restartIngestion()" style="font-size:0.65rem;padding:3px 8px;">⟳ Restart Ingestion</button>
-                <button class="btn" onclick="openMemoryGraphModal()" style="font-size:0.65rem;padding:3px 8px;background:rgba(179,136,255,0.15);border-color:rgba(179,136,255,0.3);color:#b388ff;">✧ Memory Graph</button>
-            </div>
-        </div>
-
-        <div class="card" style="padding: 16px;">
-            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 10px;">
-                <span class="dot dot-secondary"></span> Navigation
-            </div>
-            <div style="display:grid;gap:6px;">
-                <button id="nav-monitor-btn" class="btn chat-btn-active" onclick="showChatView(false)" style="font-size:0.75rem;padding:8px;text-align:left;width:100%;display:flex;align-items:center;gap:8px;">
-                    <span style="font-size:1rem;">📊</span> Monitor
-                </button>
-                <button id="nav-chat-btn" class="btn" onclick="showChatView(true)" style="font-size:0.75rem;padding:8px;text-align:left;width:100%;display:flex;align-items:center;gap:8px;">
-                    <span style="font-size:1rem;">💬</span> Chat
-                </button>
-            </div>
-        </div>
-
-        <div class="card" style="padding: 16px;">
-            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 10px;">
-                <span class="dot dot-accent pulsing"></span> Telemetry Pipeline
-            </div>
-            <div class="metric-row" style="gap: 8px; margin-bottom: 6px;">
-                <div class="metric">
-                    <div class="val" id="tele-trace-count" style="font-size: 1.2rem; color: var(--secondary);">0</div>
-                    <div class="label" style="font-size: 0.6rem;">Traces</div>
-                </div>
-                <div class="metric">
-                    <div class="val" id="tele-active-traces" style="font-size: 1.2rem; color: var(--primary);">0</div>
-                    <div class="label" style="font-size: 0.6rem;">Active</div>
-                </div>
-                <div class="metric">
-                    <div class="val" id="tele-error-count" style="font-size: 1.2rem; color: var(--danger);">0</div>
-                    <div class="label" style="font-size: 0.6rem;">Errors</div>
-                </div>
-            </div>
-            <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:4px;">Gatekeeper</div>
-            <div id="gatekeeper-summary" style="font-size:0.65rem;font-family:'JetBrains Mono',monospace;">
-                <div>Bypass rate: <span id="gk-bypass-rate">--</span></div>
-                <div>Avg confidence: <span id="gk-avg-conf">--</span></div>
-                <div>Classifications: <span id="gk-classified">--</span></div>
-            </div>
-        </div>
-    </div>
+    </nav>
 
     <div class="main-content">
         <div id="monitoring-view" class="active">
@@ -524,8 +475,145 @@ HTML_CONTENT = r"""
             </div>
         </div>
 
+        <!-- Sidebar-relocated cards -->
+        <div class="grid-container" style="grid-template-columns: repeat(3, 1fr);">
+            <div class="card fade-in" style="padding: 16px;">
+                <div class="card-header" style="font-size: 0.85rem; margin-bottom: 8px;"><span class="dot dot-accent pulsing"></span> Neural Engine</div>
+                <div style="margin-bottom: 8px;">
+                    <div style="display:flex; justify-content:space-between; font-size:0.8rem;">
+                        <span style="color:var(--text-muted);">Chat</span>
+                        <span id="model-chat-side" style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">--</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:0.8rem;">
+                        <span style="color:var(--text-muted);">Embed</span>
+                        <span id="model-embed-side" style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">--</span>
+                    </div>
+                </div>
+                <ul class="data-list" id="model-details-side" style="margin-bottom:8px;"></ul>
+                <div style="border-top:1px solid rgba(255,255,255,0.05);padding-top:6px;">
+                    <div style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Features</div>
+                    <div id="features-list" style="display:grid;grid-template-columns:1fr 1fr;gap:3px;"></div>
+                </div>
+            </div>
+
+            <div class="card fade-in" style="padding: 16px;">
+                <div class="card-header" style="font-size: 0.85rem; margin-bottom: 12px;">
+                    <span class="dot dot-secondary"></span> Services
+                    <span style="flex:1;"></span>
+                    <button class="btn" onclick="openLogModal()" style="font-size:0.65rem;padding:2px 6px;">Logs</button>
+                </div>
+                <ul class="data-list">
+                    <li style="display:flex;gap:4px;flex-wrap:wrap;">
+                        <span style="flex:1;">SearXNG</span>
+                        <span class="badge" id="health-searxng">...</span>
+                        <button class="btn" onclick="restartContainer('searxng')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
+                    </li>
+                    <li style="display:flex;gap:4px;flex-wrap:wrap;">
+                        <span style="flex:1;">Crawl4AI</span>
+                        <span class="badge" id="health-crawl4ai">...</span>
+                        <button class="btn" onclick="restartContainer('crawl4ai_server')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
+                    </li>
+                    <li style="display:flex;gap:4px;flex-wrap:wrap;">
+                        <span style="flex:1;">Qdrant</span>
+                        <span class="badge" id="health-qdrant">...</span>
+                        <button class="btn" onclick="restartContainer('qdrant_db')" style="font-size:0.6rem;padding:1px 5px;" title="Restart">⟳</button>
+                    </li>
+                    <li><span>GPU (CUDA)</span> <span class="badge" id="health-cuda">...</span></li>
+                    <li><span>MCP v2</span> <span class="badge badge-primary" id="mcp-v2-badge">✔ Streamable HTTP</span></li>
+                </ul>
+                <div style="display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.05);">
+                    <button class="btn" onclick="restartIngestion()" style="font-size:0.65rem;padding:3px 8px;">⟳ Restart Ingestion</button>
+                    <button class="btn" onclick="openMemoryGraphModal()" style="font-size:0.65rem;padding:3px 8px;background:rgba(179,136,255,0.15);border-color:rgba(179,136,255,0.3);color:#b388ff;">✧ Memory Graph</button>
+                </div>
+            </div>
+
+            <div class="card fade-in" style="padding: 16px;">
+                <div class="card-header" style="font-size: 0.85rem; margin-bottom: 8px;">
+                    <span class="dot dot-accent pulsing"></span> Telemetry Pipeline
+                </div>
+                <div class="metric-row" style="gap: 8px; margin-bottom: 6px;">
+                    <div class="metric">
+                        <div class="val" id="tele-trace-count" style="font-size: 1.2rem; color: var(--secondary);">0</div>
+                        <div class="label" style="font-size: 0.6rem;">Traces</div>
+                    </div>
+                    <div class="metric">
+                        <div class="val" id="tele-active-traces" style="font-size: 1.2rem; color: var(--primary);">0</div>
+                        <div class="label" style="font-size: 0.6rem;">Active</div>
+                    </div>
+                    <div class="metric">
+                        <div class="val" id="tele-error-count" style="font-size: 1.2rem; color: var(--danger);">0</div>
+                        <div class="label" style="font-size: 0.6rem;">Errors</div>
+                    </div>
+                </div>
+                <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:4px;">Gatekeeper</div>
+                <div id="gatekeeper-summary" style="font-size:0.65rem;font-family:'JetBrains Mono',monospace;">
+                    <div>Bypass rate: <span id="gk-bypass-rate">--</span></div>
+                    <div>Avg confidence: <span id="gk-avg-conf">--</span></div>
+                    <div>Classifications: <span id="gk-classified">--</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Host Info Row -->
+        <div class="grid-container" style="grid-template-columns: repeat(4, 1fr);">
+            <div class="card fade-in" style="padding: 12px;">
+                <div class="card-header" style="font-size:0.75rem;margin-bottom:4px;"><span class="dot dot-warning"></span> Uptime</div>
+                <div style="font-size:1.2rem;font-weight:700;font-family:'JetBrains Mono',monospace;" id="sys-uptime">--</div>
+            </div>
+            <div class="card fade-in" style="padding: 12px;">
+                <div class="card-header" style="font-size:0.75rem;margin-bottom:4px;"><span class="dot dot-warning"></span> Load Avg</div>
+                <div style="font-size:1.2rem;font-weight:700;font-family:'JetBrains Mono',monospace;" id="sys-load">--</div>
+            </div>
+            <div class="card fade-in" style="padding: 12px;">
+                <div class="card-header" style="font-size:0.75rem;margin-bottom:4px;"><span class="dot dot-warning"></span> Disk</div>
+                <div style="font-size:1.2rem;font-weight:700;font-family:'JetBrains Mono',monospace;" id="sys-disk">--</div>
+            </div>
+            <div class="card fade-in" style="padding: 12px;">
+                <div class="card-header" style="font-size:0.75rem;margin-bottom:4px;"><span class="dot dot-warning"></span> Agent RAM</div>
+                <div style="font-size:1.2rem;font-weight:700;font-family:'JetBrains Mono',monospace;" id="sys-ram">--</div>
+            </div>
+        </div>
+
+        <!-- GPU Monitor Card -->
+        <div class="grid-container" style="grid-template-columns: 1fr;">
+            <div class="card fade-in" style="padding: 16px;">
+                <div class="card-header" style="font-size: 0.85rem; margin-bottom: 12px;"><span class="dot dot-accent pulsing"></span> GPU Monitor</div>
+                <div class="gpu-temp" style="margin-bottom: 10px;">
+                    <div class="temp-val" id="gpu-temp">--</div>
+                    <div style="flex:1">
+                        <div class="temp-label" style="color: var(--text-muted);">°C</div>
+                        <div class="progress-bar" style="height: 6px;">
+                            <div class="progress-fill" id="gpu-temp-bar" style="width: 0%;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div style="display:flex;gap:20px;align-items:center;">
+                    <div style="flex:1;">
+                        <div style="display:flex;gap:24px;">
+                            <div>
+                                <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;">VRAM Used</div>
+                                <div style="font-size:1.1rem;font-weight:700;color:var(--primary);font-family:'JetBrains Mono',monospace;" id="gpu-vram-used">--</div>
+                            </div>
+                            <div>
+                                <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;">Total</div>
+                                <div style="font-size:1.1rem;font-weight:700;color:var(--text-muted);font-family:'JetBrains Mono',monospace;" id="gpu-vram-total">--</div>
+                            </div>
+                            <div>
+                                <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;">Util %</div>
+                                <div style="font-size:1.1rem;font-weight:700;font-family:'JetBrains Mono',monospace;" id="gpu-util">--</div>
+                            </div>
+                        </div>
+                        <div class="progress-bar" style="height: 5px;margin-top:8px;">
+                            <div class="progress-fill" id="gpu-vram-bar" style="width: 0%;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="gpu-processes" id="gpu-processes" style="margin-top: 8px;"></div>
+            </div>
+        </div>
+
         <!-- Monitoring section: 2 rows of charts -->
-        <div style="margin: 16px 0 6px; display:flex; align-items:center; gap:10px;">
+        <div style="margin: 8px 0 6px; display:flex; align-items:center; gap:10px;">
             <span class="dot dot-secondary pulsing"></span>
             <span style="font-weight:600;font-size:0.8rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);">Monitoring</span>
             <span style="flex:1;height:1px;background:rgba(255,255,255,0.06);"></span>
@@ -1700,6 +1788,15 @@ HTML_CONTENT = r"""
                 if (data.gpu) {
                     const g = data.gpu;
                     document.getElementById('gpu-temp').innerText = g.temp ?? '--';
+                    // Update navbar GPU chip
+                    const navbarGpuTemp = document.getElementById('navbar-gpu-temp');
+                    const navbarGpuDot = document.getElementById('navbar-gpu-dot');
+                    if (g.temp != null) {
+                        navbarGpuTemp.innerText = g.temp + '°C';
+                        const gpuColor = g.temp > 80 ? 'var(--danger)' : g.temp > 65 ? 'var(--warning)' : 'var(--primary)';
+                        navbarGpuDot.style.background = gpuColor;
+                        navbarGpuDot.style.color = gpuColor;
+                    }
                     const tempInfo = calcGpuTempColor(g.temp);
                     const tempPct = Math.min(100, ((g.temp ?? 0) / 100) * 100);
                     const tempBar = document.getElementById('gpu-temp-bar');
@@ -1759,6 +1856,7 @@ HTML_CONTENT = r"""
                     const embedName = data.models.embed_model || 'N/A';
                     document.getElementById('model-chat-side').innerText = chatName.split('/').pop();
                     document.getElementById('model-embed-side').innerText = embedName.split('/').pop();
+                    document.getElementById('navbar-model').innerText = chatName.split('/').pop();
                     const sideList = document.getElementById('model-details-side');
                     sideList.innerHTML = '';
                     if (data.models.details) {
@@ -1823,6 +1921,18 @@ HTML_CONTENT = r"""
                     setHealth('health-searxng', data.health.searxng);
                     setHealth('health-crawl4ai', data.health.crawl4ai);
                     setHealth('health-qdrant', data.health.qdrant);
+                    // Update navbar services health
+                    const allUp = data.health.searxng && data.health.crawl4ai && data.health.qdrant;
+                    const navbarServices = document.getElementById('navbar-services');
+                    const navbarHealthDot = document.getElementById('navbar-health-dot');
+                    if (navbarServices) {
+                        navbarServices.innerText = allUp ? 'All OK' : 'Issues';
+                        navbarServices.style.color = allUp ? 'var(--primary)' : 'var(--danger)';
+                    }
+                    if (navbarHealthDot) {
+                        navbarHealthDot.style.background = allUp ? 'var(--primary)' : 'var(--danger)';
+                        navbarHealthDot.style.color = allUp ? 'var(--primary)' : 'var(--danger)';
+                    }
                 }
 
                 if (data.sys_stats) {
@@ -1830,6 +1940,13 @@ HTML_CONTENT = r"""
                     document.getElementById('sys-uptime').innerText = data.sys_stats.uptime || '--';
                     document.getElementById('sys-load').innerText = data.sys_stats.load || '--';
                     document.getElementById('sys-disk').innerText = data.sys_stats.disk || '--';
+                    const navbarUptime = document.getElementById('navbar-uptime');
+                    if (navbarUptime) {
+                        const uptimeStr = data.sys_stats.uptime || '--';
+                        // Extract first meaningful part (e.g. "2h" from "2h 15m")
+                        const parts = uptimeStr.split(' ');
+                        navbarUptime.innerText = parts[0] || uptimeStr;
+                    }
                 }
 
             } catch (err) {
