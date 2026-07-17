@@ -2,16 +2,39 @@ import os
 import sys
 import time
 import struct
+import json
+import uuid
 import asyncio
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse, JSONResponse
+from datetime import datetime, UTC
+from collections import deque
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict
 from config import QDRANT_HOST, SEARXNG_HOST, CRAWL4AI_HOST, CRAWL4AI_API_TOKEN, ALLOWED_USERS, VECTOR_DB_VERSION
 import state
 from llm_engine import engine
+from tag_processor import strip_action_tags, TagSafeStream
 
 dashboard_router = APIRouter()
 
 from dashboard_template import HTML_CONTENT
+
+# ── Chat session state (in-memory ring buffer per conversation) ──
+_chat_sessions: dict[str, deque] = {}
+MAX_HISTORY = 200
+
+
+class ChatStreamRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    message: str
+    conversation_id: str = "dashboard_default"
+    images: list[str] | None = None  # base64-encoded images
+
+
+def _get_session(conversation_id: str) -> deque:
+    if conversation_id not in _chat_sessions:
+        _chat_sessions[conversation_id] = deque(maxlen=MAX_HISTORY)
+    return _chat_sessions[conversation_id]
 
 
 @dashboard_router.get("/")
@@ -839,3 +862,123 @@ async def restart_ingestion():
     state.background_tasks.add(task)
     task.add_done_callback(state.background_tasks.discard)
     return JSONResponse({"status": "success", "message": "Document ingestion re-started"})
+
+
+# ═══════════════════════════════════════════════════════════════
+# Dashboard Chat Endpoints
+# ═══════════════════════════════════════════════════════════════
+
+
+@dashboard_router.get("/api/dashboard/chat-history")
+async def get_chat_history(conversation_id: str = "dashboard_default"):
+    """Return message history for the dashboard chat."""
+    session = _get_session(conversation_id)
+    return JSONResponse({"messages": list(session)})
+
+
+@dashboard_router.post("/api/dashboard/chat/stream")
+async def chat_stream(payload: ChatStreamRequest, request: Request):
+    """SSE streaming chat endpoint for the dashboard."""
+    conversation_id = payload.conversation_id
+    session = _get_session(conversation_id)
+
+    # Store user message
+    user_msg = {"role": "user", "content": payload.message, "timestamp": datetime.now(UTC).isoformat()}
+    if payload.images:
+        user_msg["images"] = payload.images
+    session.append(user_msg)
+
+    # Build messages for the engine — include history
+    raw_messages = []
+    for m in list(session):
+        if m.get("role") == "user":
+            content = m["content"]
+            if m.get("images"):
+                # Build multimodal content array
+                parts = [{"type": "text", "text": content}]
+                for b64img in m["images"]:
+                    parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64img}"}})
+                raw_messages.append({"role": "user", "content": parts})
+            else:
+                raw_messages.append({"role": "user", "content": content})
+        elif m.get("role") == "assistant":
+            raw_messages.append({"role": "assistant", "content": m["content"]})
+
+    if not raw_messages:
+        raw_messages = [{"role": "user", "content": payload.message}]
+
+    from prompt_builder import build_omniscient_prompt
+    current_user_id = "dashboard_user"
+    request_id = str(uuid.uuid4())[:12]
+
+    try:
+        enhanced_messages = await build_omniscient_prompt(
+            raw_messages, user_id=current_user_id,
+            conversation_id=conversation_id, concise=False,
+            request_id=request_id
+        )
+    except Exception:
+        enhanced_messages = raw_messages
+
+    async def sse_generator():
+        full_text_chunks = []
+        safe_stream = TagSafeStream()
+
+        try:
+            gen = await engine.generate_chat_with_router(
+                enhanced_messages, tools=None, options={}, stream=True
+            )
+
+            if isinstance(gen, dict) and "error" in gen:
+                yield f"data: {json.dumps({'error': gen['error']})}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                return
+
+            async for chunk in gen:
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    delta = chunk["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        full_text_chunks.append(content)
+                        cleaned = safe_stream.process(content)
+                        if cleaned:
+                            yield f"data: {json.dumps({'content': cleaned})}\n\n"
+
+            final_flush = safe_stream.flush()
+            if final_flush:
+                full_text_chunks.append(final_flush)
+                yield f"data: {json.dumps({'content': final_flush})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+        full_text = "".join(full_text_chunks)
+        clean_text = strip_action_tags(full_text) if full_text else ""
+
+        # Store assistant response
+        if clean_text:
+            session.append({"role": "assistant", "content": clean_text, "timestamp": datetime.now(UTC).isoformat()})
+
+        # Process tags in background
+        if full_text:
+            try:
+                bg_task = asyncio.create_task(
+                    process_response_tags(full_text, user_id=current_user_id)
+                )
+                state.background_tasks.add(bg_task)
+                bg_task.add_done_callback(state.background_tasks.discard)
+            except Exception:
+                pass
+
+        yield f"data: {json.dumps({'done': True, 'full_text': clean_text})}\n\n"
+
+    return StreamingResponse(sse_generator(), media_type="text/event-stream")
+
+
+# Lazy import for tag processing
+async def process_response_tags(text: str, user_id: str):
+    try:
+        from tag_processor import process_response_tags as _process
+        await _process(text, user_id=user_id)
+    except Exception:
+        pass

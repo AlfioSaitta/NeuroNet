@@ -9,6 +9,9 @@ HTML_CONTENT = r"""
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/atom-one-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
     <script type="importmap">
     {
         "imports": {
@@ -254,6 +257,70 @@ HTML_CONTENT = r"""
         .gpu-temp .temp-val { font-size: 2.4rem; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
         .gpu-temp .temp-label { font-size: 0.8rem; }
         .gpu-processes pre { font-size: 0.7rem; margin: 0; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; max-height: 120px; overflow-y: auto; }
+
+        /* ── Chat Styles ── */
+        #chat-view { display: none; flex-direction: column; height: 100%; flex: 1; }
+        #chat-view.active { display: flex; }
+        #monitoring-view.active { display: flex; flex-direction: column; gap: 24px; flex: 1; }
+        #monitoring-view.hidden { display: none; }
+        #chat-messages { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth; min-height: 0; }
+        .chat-empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; color: var(--text-muted); text-align: center; padding: 40px; }
+        .chat-empty-state .icon { font-size: 3rem; opacity: 0.3; }
+        .chat-empty-state h2 { font-size: 1.2rem; font-weight: 600; color: var(--text-muted); margin: 0; }
+        .chat-empty-state p { font-size: 0.85rem; max-width: 400px; margin: 0; line-height: 1.6; }
+        .chat-suggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 500px; }
+        .chat-suggestions button { background: rgba(0,255,204,0.08); border: 1px solid rgba(0,255,204,0.2); color: var(--primary); padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 0.8rem; font-family: 'Inter', sans-serif; transition: all 0.2s; }
+        .chat-suggestions button:hover { background: rgba(0,255,204,0.15); border-color: var(--primary); }
+        .msg-bubble { max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.85rem; line-height: 1.6; word-wrap: break-word; animation: msgIn 0.2s ease; position: relative; }
+        .msg-bubble.user { align-self: flex-end; background: rgba(0,255,204,0.12); border: 1px solid rgba(0,255,204,0.2); color: var(--text-main); border-bottom-right-radius: 4px; }
+        .msg-bubble.assistant { align-self: flex-start; background: rgba(15,20,30,0.8); border: 1px solid rgba(255,255,255,0.08); backdrop-filter: blur(10px); border-bottom-left-radius: 4px; }
+        .msg-bubble .msg-meta { font-size: 0.65rem; color: var(--text-muted); margin-top: 6px; opacity: 0.6; }
+        .msg-bubble.user .msg-meta { text-align: right; }
+        .msg-bubble pre { position: relative; background: rgba(0,0,0,0.5) !important; border-radius: 8px; padding: 12px !important; margin: 8px 0; overflow-x: auto; }
+        .msg-bubble pre code { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; }
+        .msg-bubble code:not(pre code) { background: rgba(0,255,204,0.1); padding: 1px 5px; border-radius: 4px; font-size: 0.8em; }
+        .copy-btn { position: absolute; top: 6px; right: 6px; background: rgba(255,255,255,0.08); border: none; color: var(--text-muted); cursor: pointer; padding: 3px 7px; border-radius: 4px; font-size: 0.7rem; opacity: 0; transition: opacity 0.2s; }
+        .msg-bubble pre:hover .copy-btn { opacity: 1; }
+        .copy-btn:hover { background: rgba(255,255,255,0.15); color: var(--text-main); }
+        .msg-bubble table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 0.8rem; }
+        .msg-bubble th, .msg-bubble td { border: 1px solid rgba(255,255,255,0.1); padding: 6px 10px; text-align: left; }
+        .msg-bubble th { background: rgba(0,255,204,0.06); color: var(--primary); }
+        .msg-bubble blockquote { border-left: 3px solid var(--primary); margin: 8px 0; padding: 4px 12px; color: var(--text-muted); background: rgba(0,255,204,0.03); border-radius: 0 4px 4px 0; }
+        .msg-bubble img:not(.chat-img-preview) { max-width: 100%; border-radius: 8px; margin: 8px 0; }
+        .msg-bubble ul, .msg-bubble ol { padding-left: 20px; margin: 6px 0; }
+        .msg-bubble a { color: var(--secondary); text-decoration: underline; }
+        .msg-bubble h1, .msg-bubble h2, .msg-bubble h3, .msg-bubble h4 { margin: 12px 0 6px; color: var(--text-main); }
+        .msg-bubble h1 { font-size: 1.2rem; }
+        .msg-bubble h2 { font-size: 1.1rem; }
+        .msg-bubble h3 { font-size: 1rem; }
+        .msg-bubble hr { border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 12px 0; }
+        .msg-bubble p { margin: 4px 0; }
+        .msg-bubble p:first-child { margin-top: 0; }
+        .msg-bubble p:last-child { margin-bottom: 0; }
+
+        #chat-input-container { border-top: 1px solid rgba(255,255,255,0.06); padding: 12px 20px; background: rgba(10,15,20,0.6); backdrop-filter: blur(10px); flex-shrink: 0; }
+        #chat-image-previews { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+        .chat-img-preview { position: relative; width: 64px; height: 64px; border-radius: 8px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); }
+        .chat-img-preview img { width: 100%; height: 100%; object-fit: cover; }
+        .chat-img-preview .remove-img { position: absolute; top: -4px; right: -4px; width: 18px; height: 18px; border-radius: 50%; background: var(--danger); border: none; color: #fff; font-size: 0.6rem; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0.8; }
+        .chat-img-preview .remove-img:hover { opacity: 1; }
+        #chat-input-row { display: flex; gap: 10px; align-items: flex-end; }
+        #chat-input { flex: 1; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 12px 16px; color: var(--text-main); font-family: 'Inter', sans-serif; font-size: 0.85rem; resize: none; outline: none; transition: border-color 0.2s; min-height: 44px; max-height: 120px; line-height: 1.5; }
+        #chat-input:focus { border-color: var(--primary); }
+        #chat-input::placeholder { color: var(--text-muted); opacity: 0.5; }
+        .chat-btn { background: rgba(0,255,204,0.1); border: 1px solid rgba(0,255,204,0.2); color: var(--primary); width: 40px; height: 40px; border-radius: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; transition: all 0.2s; flex-shrink: 0; }
+        .chat-btn:hover { background: rgba(0,255,204,0.2); border-color: var(--primary); }
+        .chat-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        #chat-send-btn { background: var(--primary); border: none; color: #05070a; width: 44px; height: 44px; border-radius: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; transition: all 0.2s; flex-shrink: 0; }
+        #chat-send-btn:hover { background: #00e6b8; transform: scale(1.05); }
+        #chat-send-btn:disabled { opacity: 0.3; transform: none; cursor: not-allowed; }
+        .typing-indicator { display: flex; align-items: center; gap: 4px; padding: 12px 16px; align-self: flex-start; background: rgba(15,20,30,0.6); border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); border-bottom-left-radius: 4px; }
+        .typing-indicator span { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); animation: typingDot 1.4s infinite; }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typingDot { 0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); } 30% { opacity: 1; transform: scale(1.2); } }
+        @keyframes msgIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .chat-btn-active { background: rgba(0,255,204,0.15); border-color: var(--primary); color: var(--primary); }
     </style>
 </head>
 <body>
@@ -369,6 +436,20 @@ HTML_CONTENT = r"""
 
         <div class="card" style="padding: 16px;">
             <div class="card-header" style="font-size: 0.85rem; margin-bottom: 10px;">
+                <span class="dot dot-secondary"></span> Navigation
+            </div>
+            <div style="display:grid;gap:6px;">
+                <button id="nav-monitor-btn" class="btn chat-btn-active" onclick="showChatView(false)" style="font-size:0.75rem;padding:8px;text-align:left;width:100%;display:flex;align-items:center;gap:8px;">
+                    <span style="font-size:1rem;">📊</span> Monitor
+                </button>
+                <button id="nav-chat-btn" class="btn" onclick="showChatView(true)" style="font-size:0.75rem;padding:8px;text-align:left;width:100%;display:flex;align-items:center;gap:8px;">
+                    <span style="font-size:1rem;">💬</span> Chat
+                </button>
+            </div>
+        </div>
+
+        <div class="card" style="padding: 16px;">
+            <div class="card-header" style="font-size: 0.85rem; margin-bottom: 10px;">
                 <span class="dot dot-accent pulsing"></span> Telemetry Pipeline
             </div>
             <div class="metric-row" style="gap: 8px; margin-bottom: 6px;">
@@ -395,6 +476,7 @@ HTML_CONTENT = r"""
     </div>
 
     <div class="main-content">
+        <div id="monitoring-view" class="active">
         <!-- Top metric cards row -->
         <div class="grid-container" style="grid-template-columns: repeat(2, 1fr);">
             <div class="card fade-in">
@@ -563,6 +645,34 @@ HTML_CONTENT = r"""
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- ── Chat View ── -->
+    <div id="chat-view">
+        <div id="chat-messages">
+            <div class="chat-empty-state" id="chat-empty-state">
+                <div class="icon">💬</div>
+                <h2>Neural Chat</h2>
+                <p>Interact with Jarvis directly from the control panel. Ask questions, request code analysis, or explore the system.</p>
+                <div class="chat-suggestions">
+                    <button onclick="sendSuggested('What can you do?')">What can you do?</button>
+                    <button onclick="sendSuggested('Show me the system status')">System status</button>
+                    <button onclick="sendSuggested('Analyze the current project structure')">Analyze project</button>
+                    <button onclick="sendSuggested('What is the latest pipeline trace?')">Latest trace</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="chat-input-container">
+            <div id="chat-image-previews"></div>
+            <div id="chat-input-row">
+                <button id="chat-attach-btn" class="chat-btn" onclick="document.getElementById('chat-file-input').click()" title="Attach image">📎</button>
+                <input type="file" id="chat-file-input" accept="image/png,image/jpeg,image/webp" multiple style="display:none;" onchange="handleFileSelect(event)">
+                <textarea id="chat-input" rows="1" placeholder="Message Jarvis..." onkeydown="handleInputKeydown(event)"></textarea>
+                <button id="chat-send-btn" onclick="sendChatMessage()" title="Send">➤</button>
+            </div>
+        </div>
+    </div>
     </div>
 
     <div id="graph-modal" class="modal">
@@ -1912,6 +2022,382 @@ HTML_CONTENT = r"""
         // Fetch telemetry on load and poll
         fetchTelemetry();
         setInterval(fetchTelemetry, 5000);
+
+        // ═══════════════════════════════════════════════════
+        // Chat Functionality
+        // ═══════════════════════════════════════════════════
+        let chatImages = [];
+        let isChatStreaming = false;
+        const chatConvId = 'dashboard_default';
+        let abortController = null;
+
+        // Init mermaid
+        mermaid.initialize({ startOnLoad: false, theme: 'dark', themeVariables: { primaryColor: '#00ffcc', primaryTextColor: '#f8fafc', primaryBorderColor: '#00ffcc', lineColor: '#00b8ff', secondaryColor: '#7b2cbf', tertiaryColor: '#05070a' } });
+
+        function showChatView(show) {
+            document.getElementById('monitoring-view').classList.toggle('active', !show);
+            document.getElementById('monitoring-view').classList.toggle('hidden', show);
+            document.getElementById('chat-view').classList.toggle('active', show);
+            document.getElementById('nav-monitor-btn').classList.toggle('chat-btn-active', !show);
+            document.getElementById('nav-chat-btn').classList.toggle('chat-btn-active', show);
+            if (show) {
+                document.getElementById('chat-input').focus();
+                loadChatHistory();
+            }
+        }
+
+        async function loadChatHistory() {
+            try {
+                const resp = await fetch('/api/dashboard/chat-history?conversation_id=' + encodeURIComponent(chatConvId));
+                const data = await resp.json();
+                const container = document.getElementById('chat-messages');
+                // Clear existing messages (keep empty state as template)
+                const emptyState = document.getElementById('chat-empty-state');
+                const msgs = container.querySelectorAll('.msg-bubble, .typing-indicator');
+                msgs.forEach(m => m.remove());
+
+                if (!data.messages || data.messages.length === 0) {
+                    emptyState.style.display = 'flex';
+                    return;
+                }
+                emptyState.style.display = 'none';
+                for (const msg of data.messages) {
+                    appendMessage(msg.role, msg.content, false);
+                }
+                scrollChat();
+            } catch (e) {
+                console.error('Failed to load chat history', e);
+            }
+        }
+
+        function appendMessage(role, content, isStreaming) {
+            const container = document.getElementById('chat-messages');
+            const emptyState = document.getElementById('chat-empty-state');
+            emptyState.style.display = 'none';
+
+            // Remove typing indicator if present
+            const typingEl = container.querySelector('.typing-indicator');
+            if (typingEl) typingEl.remove();
+
+            let bubble = container.querySelector('.msg-bubble.streaming');
+            if (isStreaming && role === 'assistant') {
+                if (bubble) {
+                    bubble.innerHTML = renderMarkdown(content);
+                    bubble.dataset.fullContent = (bubble.dataset.fullContent || '') + content;
+                    applyCodeCopy(bubble);
+                    return bubble;
+                }
+            }
+
+            bubble = document.createElement('div');
+            bubble.className = 'msg-bubble ' + role;
+            if (isStreaming) {
+                bubble.classList.add('streaming');
+                bubble.dataset.fullContent = content || '';
+            }
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'msg-content';
+            contentDiv.innerHTML = renderMarkdown(content || '');
+            bubble.appendChild(contentDiv);
+
+            const meta = document.createElement('div');
+            meta.className = 'msg-meta';
+            meta.textContent = new Date().toLocaleTimeString();
+            bubble.appendChild(meta);
+            container.appendChild(bubble);
+
+            if (!isStreaming) {
+                applyCodeCopy(bubble);
+                runMermaid(bubble);
+            }
+            scrollChat();
+            return bubble;
+        }
+
+        function renderMarkdown(text) {
+            if (!text) return '';
+            let html = marked.parse(text, { breaks: true, gfm: true });
+            html = DOMPurify.sanitize(html, { ADD_TAGS: ['svg', 'path', 'circle', 'rect', 'g', 'defs', 'linearGradient', 'stop', 'text', 'tspan', 'marker', 'polygon', 'polyline', 'ellipse', 'line'], ADD_ATTR: ['viewBox', 'xmlns', 'd', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'cx', 'cy', 'r', 'x', 'y', 'width', 'height', 'rx', 'ry', 'points', 'transform', 'style', 'class', 'id', 'ref', 'marker-end', 'marker-start', 'marker-mid', 'orient', 'refX', 'refY', 'pathLength'] });
+            // Wrap tables for responsive
+            html = html.replace(/<table>/g, '<div style="overflow-x:auto"><table>').replace(/<\/table>/g, '</table></div>');
+            return html;
+        }
+
+        function applyCodeCopy(container) {
+            container.querySelectorAll('pre code').forEach((codeBlock) => {
+                const pre = codeBlock.closest('pre');
+                if (!pre || pre.querySelector('.copy-btn')) return;
+                const btn = document.createElement('button');
+                btn.className = 'copy-btn';
+                btn.textContent = '📋 Copy';
+                btn.onclick = async () => {
+                    try {
+                        await navigator.clipboard.writeText(codeBlock.textContent);
+                        btn.textContent = '✅ Copied!';
+                        setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
+                    } catch { btn.textContent = '❌ Failed'; }
+                };
+                pre.style.position = 'relative';
+                pre.appendChild(btn);
+            });
+        }
+
+        function runMermaid(container) {
+            container.querySelectorAll('.mermaid').forEach((el) => {
+                try { mermaid.run({ nodes: [el] }); } catch (e) { console.warn('Mermaid render failed', e); }
+            });
+            // Also handle ```mermaid code blocks
+            container.querySelectorAll('pre code.language-mermaid').forEach((codeBlock) => {
+                const pre = codeBlock.closest('pre');
+                if (!pre || pre.querySelector('.mermaid-rendered')) return;
+                const wrapper = document.createElement('div');
+                wrapper.className = 'mermaid mermaid-rendered';
+                wrapper.textContent = codeBlock.textContent;
+                pre.replaceWith(wrapper);
+                try { mermaid.run({ nodes: [wrapper] }); } catch (e) { console.warn('Mermaid render failed', e); }
+            });
+        }
+
+        function updateStreamingMessage(content) {
+            const container = document.getElementById('chat-messages');
+            let bubble = container.querySelector('.msg-bubble.streaming');
+            if (!bubble) {
+                bubble = appendMessage('assistant', '', true);
+            }
+            const fullContent = (bubble.dataset.fullContent || '') + content;
+            bubble.dataset.fullContent = fullContent;
+            const contentDiv = bubble.querySelector('.msg-content');
+            if (contentDiv) {
+                contentDiv.innerHTML = renderMarkdown(fullContent);
+            }
+            applyCodeCopy(bubble);
+            scrollChat();
+        }
+
+        function finishStreamingMessage(fullText) {
+            const container = document.getElementById('chat-messages');
+            let bubble = container.querySelector('.msg-bubble.streaming');
+            if (bubble) {
+                bubble.classList.remove('streaming');
+                const contentDiv = bubble.querySelector('.msg-content');
+                if (contentDiv) {
+                    contentDiv.innerHTML = renderMarkdown(fullText || bubble.dataset.fullContent || '');
+                }
+                delete bubble.dataset.fullContent;
+                applyCodeCopy(bubble);
+                runMermaid(bubble);
+            }
+        }
+
+        function scrollChat() {
+            const container = document.getElementById('chat-messages');
+            if (container) container.scrollTop = container.scrollHeight;
+        }
+
+        function addTypingIndicator() {
+            const container = document.getElementById('chat-messages');
+            const typingEl = container.querySelector('.typing-indicator');
+            if (typingEl) return;
+            const div = document.createElement('div');
+            div.className = 'typing-indicator';
+            div.innerHTML = '<span></span><span></span><span></span>';
+            container.appendChild(div);
+            scrollChat();
+        }
+
+        async function sendChatMessage() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text && chatImages.length === 0) return;
+            if (isChatStreaming) return;
+
+            // Show user message
+            appendMessage('user', text, false);
+
+            // Clear input
+            input.value = '';
+            input.style.height = 'auto';
+
+            const imagesToSend = [...chatImages];
+            chatImages = [];
+            updateImagePreviews();
+
+            // Show typing indicator
+            addTypingIndicator();
+
+            isChatStreaming = true;
+            document.getElementById('chat-send-btn').disabled = true;
+            abortController = new AbortController();
+
+            try {
+                const resp = await fetch('/api/dashboard/chat/stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: text,
+                        conversation_id: chatConvId,
+                        images: imagesToSend.length > 0 ? imagesToSend : undefined
+                    }),
+                    signal: abortController.signal
+                });
+
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const data = JSON.parse(line.slice(6));
+                        if (data.error) {
+                            console.error('Chat error:', data.error);
+                            finishStreamingMessage('');
+                            appendMessage('assistant', '⚠️ Error: ' + data.error, false);
+                            break;
+                        }
+                        if (data.content) {
+                            updateStreamingMessage(data.content);
+                        }
+                        if (data.done) {
+                            finishStreamingMessage(data.full_text || '');
+                        }
+                    }
+                }
+            } catch (e) {
+                if (e.name !== 'AbortError') {
+                    console.error('Chat stream failed:', e);
+                    finishStreamingMessage('');
+                    appendMessage('assistant', '⚠️ Connection error: ' + e.message, false);
+                }
+            } finally {
+                isChatStreaming = false;
+                document.getElementById('chat-send-btn').disabled = false;
+                abortController = null;
+                const container = document.getElementById('chat-messages');
+                const typingEl = container.querySelector('.typing-indicator');
+                if (typingEl) typingEl.remove();
+                scrollChat();
+            }
+        }
+
+        function sendSuggested(text) {
+            document.getElementById('chat-input').value = text;
+            sendChatMessage();
+        }
+
+        function handleInputKeydown(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendChatMessage();
+            }
+            // Auto-resize
+            const el = e.target;
+            el.style.height = 'auto';
+            el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+        }
+
+        // ── Image handling ──
+        function handleFileSelect(e) {
+            const files = e.target.files;
+            for (const file of files) {
+                if (!file.type.startsWith('image/')) continue;
+                if (chatImages.length >= 4) break;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    const b64 = ev.target.result.split(',')[1];
+                    chatImages.push(b64);
+                    updateImagePreviews();
+                };
+                reader.readAsDataURL(file);
+            }
+            e.target.value = '';
+        }
+
+        function updateImagePreviews() {
+            const container = document.getElementById('chat-image-previews');
+            container.innerHTML = '';
+            for (let i = 0; i < chatImages.length; i++) {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'chat-img-preview';
+                wrapper.innerHTML = '<img src="data:image/jpeg;base64,' + chatImages[i] + '" alt="Preview">' +
+                    '<button class="remove-img" onclick="removeImage(' + i + ')" title="Remove">✕</button>';
+                container.appendChild(wrapper);
+            }
+        }
+
+        function removeImage(index) {
+            chatImages.splice(index, 1);
+            updateImagePreviews();
+        }
+
+        // Handle paste (images from clipboard)
+        document.addEventListener('paste', (e) => {
+            if (!document.getElementById('chat-view').classList.contains('active')) return;
+            const items = e.clipboardData.items;
+            for (const item of items) {
+                if (item.type.startsWith('image/') && chatImages.length < 4) {
+                    const file = item.getAsFile();
+                    if (!file) continue;
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                        const b64 = ev.target.result.split(',')[1];
+                        chatImages.push(b64);
+                        updateImagePreviews();
+                    };
+                    reader.readAsDataURL(file);
+                }
+            }
+        });
+
+        // Handle drag-and-drop on chat input area
+        const chatInputContainer = document.getElementById('chat-input-container');
+        chatInputContainer.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            chatInputContainer.style.borderColor = 'var(--primary)';
+        });
+        chatInputContainer.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            chatInputContainer.style.borderColor = '';
+        });
+        chatInputContainer.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            chatInputContainer.style.borderColor = '';
+            const files = e.dataTransfer.files;
+            for (const file of files) {
+                if (!file.type.startsWith('image/')) continue;
+                if (chatImages.length >= 4) break;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    const b64 = ev.target.result.split(',')[1];
+                    chatImages.push(b64);
+                    updateImagePreviews();
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        // Focus input when pressing / anywhere
+        document.addEventListener('keydown', (e) => {
+            if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
+                if (document.getElementById('chat-view').classList.contains('active')) {
+                    e.preventDefault();
+                    document.getElementById('chat-input').focus();
+                }
+            }
+        });
     </script>
 </body>
 </html>
