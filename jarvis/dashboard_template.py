@@ -2062,7 +2062,7 @@ HTML_CONTENT = r"""
                 }
                 emptyState.style.display = 'none';
                 for (const msg of data.messages) {
-                    appendMessage(msg.role, msg.content, false);
+                    appendMessage(msg.role, msg.content, false, msg.metrics);
                 }
                 scrollChat();
             } catch (e) {
@@ -2070,7 +2070,7 @@ HTML_CONTENT = r"""
             }
         }
 
-        function appendMessage(role, content, isStreaming) {
+        function appendMessage(role, content, isStreaming, metrics) {
             const container = document.getElementById('chat-messages');
             const emptyState = document.getElementById('chat-empty-state');
             emptyState.style.display = 'none';
@@ -2103,7 +2103,14 @@ HTML_CONTENT = r"""
 
             const meta = document.createElement('div');
             meta.className = 'msg-meta';
-            meta.textContent = new Date().toLocaleTimeString();
+            if (role === 'assistant' && metrics && metrics.ttft_ms != null) {
+                const tokStr = (metrics.tok_per_sec != null)
+                    ? `<span style="color:var(--primary);font-family:'JetBrains Mono',monospace;font-size:0.65rem;">TTFT ${metrics.ttft_ms}ms · ${metrics.tok_per_sec} tok/s · ${metrics.tokens || '?'} tok</span>`
+                    : `<span style="color:var(--text-muted);font-size:0.65rem;">TTFT ${metrics.ttft_ms}ms</span>`;
+                meta.innerHTML = `${new Date().toLocaleTimeString()} · ${tokStr}`;
+            } else {
+                meta.textContent = new Date().toLocaleTimeString();
+            }
             bubble.appendChild(meta);
             container.appendChild(bubble);
 
@@ -2175,7 +2182,7 @@ HTML_CONTENT = r"""
             scrollChat();
         }
 
-        function finishStreamingMessage(fullText) {
+        function finishStreamingMessage(fullText, ttftMs, tokPerSec, tokens, durationMs) {
             const container = document.getElementById('chat-messages');
             let bubble = container.querySelector('.msg-bubble.streaming');
             if (bubble) {
@@ -2187,6 +2194,16 @@ HTML_CONTENT = r"""
                 delete bubble.dataset.fullContent;
                 applyCodeCopy(bubble);
                 runMermaid(bubble);
+                // Add metrics to meta
+                const meta = bubble.querySelector('.msg-meta');
+                if (meta && ttftMs != null) {
+                    const timeStr = new Date().toLocaleTimeString();
+                    const metricsStr = (tokPerSec != null)
+                        ? `<span style="color:var(--primary);font-family:'JetBrains Mono',monospace;font-size:0.65rem;">TTFT ${ttftMs}ms · ${tokPerSec} tok/s · ${tokens} tok</span>`
+                        : `<span style="color:var(--text-muted);font-size:0.65rem;">TTFT ${ttftMs}ms</span>`;
+                    meta.innerHTML = `${timeStr} · ${metricsStr}`;
+                }
+                // Also store metrics in history message if available via next history load
             }
         }
 
@@ -2269,7 +2286,7 @@ HTML_CONTENT = r"""
                             updateStreamingMessage(data.content);
                         }
                         if (data.done) {
-                            finishStreamingMessage(data.full_text || '');
+                            finishStreamingMessage(data.full_text || '', data.ttft_ms, data.tok_per_sec, data.tokens, data.duration_ms);
                         }
                     }
                 }

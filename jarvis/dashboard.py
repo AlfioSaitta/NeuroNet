@@ -923,6 +923,8 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
     async def sse_generator():
         full_text_chunks = []
         safe_stream = TagSafeStream()
+        stream_start_time = time.monotonic()
+        first_token_time = None
 
         try:
             gen = await engine.generate_chat_with_router(
@@ -939,6 +941,8 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
                     delta = chunk["choices"][0].get("delta", {})
                     content = delta.get("content", "")
                     if content:
+                        if first_token_time is None:
+                            first_token_time = time.monotonic()
                         full_text_chunks.append(content)
                         cleaned = safe_stream.process(content)
                         if cleaned:
@@ -952,12 +956,26 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
+        stream_end_time = time.monotonic()
         full_text = "".join(full_text_chunks)
         clean_text = strip_action_tags(full_text) if full_text else ""
 
-        # Store assistant response
+        # Compute metrics
+        total_duration_ms = round((stream_end_time - stream_start_time) * 1000, 1)
+        ttft_ms = round((first_token_time - stream_start_time) * 1000, 1) if first_token_time else total_duration_ms
+        char_count = len(full_text)
+        estimated_tokens = max(1, char_count // 4)
+        elapsed_sec = max(0.001, stream_end_time - stream_start_time)
+        tok_per_sec = round(estimated_tokens / elapsed_sec, 1)
+
+        # Store assistant response with metrics
         if clean_text:
-            session.append({"role": "assistant", "content": clean_text, "timestamp": datetime.now(UTC).isoformat()})
+            session.append({
+                "role": "assistant",
+                "content": clean_text,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "metrics": {"ttft_ms": ttft_ms, "tok_per_sec": tok_per_sec, "tokens": estimated_tokens, "chars": char_count}
+            })
 
         # Process tags in background
         if full_text:
@@ -970,7 +988,7 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
             except Exception:
                 pass
 
-        yield f"data: {json.dumps({'done': True, 'full_text': clean_text})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'full_text': clean_text, 'ttft_ms': ttft_ms, 'tok_per_sec': tok_per_sec, 'tokens': estimated_tokens, 'duration_ms': total_duration_ms})}\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
