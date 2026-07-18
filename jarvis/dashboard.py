@@ -13,7 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
-from config import QDRANT_HOST, SEARXNG_HOST, CRAWL4AI_HOST, CRAWL4AI_API_TOKEN, ALLOWED_USERS, VECTOR_DB_VERSION, SYNAPTIQ_ENABLED
+from config import QDRANT_HOST, SEARXNG_HOST, CRAWL4AI_HOST, CRAWL4AI_API_TOKEN, ALLOWED_USERS, VECTOR_DB_VERSION, SYNAPTIQ_ENABLED, LOG_FILE_PATH
 import state
 from llm_engine import engine
 from tag_processor import strip_action_tags, TagSafeStream
@@ -868,6 +868,47 @@ async def get_memory_graph(user_id: str = "alfio_dev"):
 
 
 # ==============================================================================
+# JARVIS LOG HELPERS
+# ==============================================================================
+
+def _resolve_log_path() -> str:
+    """Return the absolute log file path (config.py already resolves it)."""
+    return LOG_FILE_PATH
+
+
+def _tail_file(filepath: str, n: int = 500) -> list[str]:
+    """Read last N lines from a file efficiently (seeks from end)."""
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            # Simple read-last-N-lines via seek
+            f.seek(0, 2)  # end of file
+            bufsize = 8192
+            pos = f.tell()
+            lines = []
+            while pos > 0 and len(lines) < n:
+                read_size = min(bufsize, pos)
+                pos -= read_size
+                f.seek(pos)
+                chunk = f.read(read_size)
+                lines = chunk.splitlines() + lines
+            return lines[-n:]
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        return [f"[Error reading log file: {e}]"]
+
+
+JARVIS_LOG_SOURCE = {
+    "id": "jarvis",
+    "name": "Jarvis",
+    "status": "Running (process)",
+    "state": "running",
+    "image": "NeuroNet",
+    "type": "process",
+}
+
+
+# ==============================================================================
 # DOCKER HELPERS
 # ==============================================================================
 
@@ -944,9 +985,10 @@ FALLBACK_CONTAINERS = [
 
 async def _fetch_containers() -> list[dict]:
     data, err = await _docker_api("GET", "/containers/json?all=true")
+    result = [dict(JARVIS_LOG_SOURCE)]
     if err or not isinstance(data, list):
-        return FALLBACK_CONTAINERS
-    result = []
+        result.extend(FALLBACK_CONTAINERS[1:])  # skip jarvis fallback (use synthetic)
+        return result
     for c in data:
         names = [n.lstrip("/") for n in c.get("Names", [])]
         result.append({
@@ -984,11 +1026,32 @@ async def list_containers():
 
 
 @dashboard_router.get("/api/dashboard/containers/{name:path}/logs")
-async def get_container_logs(name: str, tail: int = 200):
+async def get_container_logs(name: str, tail: int = 500):
+    # ── Jarvis process logs (file-based) ──
+    if name in ("jarvis", "Jarvis"):
+        log_path = _resolve_log_path()
+        lines = _tail_file(log_path, n=tail)
+        return JSONResponse({
+            "logs": [{"container": "Jarvis", "message": l} for l in lines],
+            "container": "jarvis",
+            "source": "file",
+        })
+
+    # ── All = Jarvis + Docker containers ──
     if name == "all":
-        containers = await _fetch_containers()
         all_logs: list[dict] = []
+
+        # 1. Jarvis file logs
+        log_path = _resolve_log_path()
+        jarvis_lines = _tail_file(log_path, n=tail)
+        for line in jarvis_lines:
+            all_logs.append({"container": "Jarvis", "message": line})
+
+        # 2. Docker container logs
+        containers = await _fetch_containers()
         for c in containers:
+            if c.get("id") == "jarvis":
+                continue  # già inclusi sopra
             raw, err = await _docker_api("GET", f"/containers/{c['id']}/logs?stdout=1&stderr=1&tail={tail}", timeout=8.0)
             if err or not isinstance(raw, bytes):
                 all_logs.append({"container": c["name"], "message": f"[Error fetching logs: {err}]"})
@@ -997,6 +1060,7 @@ async def get_container_logs(name: str, tail: int = 200):
                     all_logs.append({"container": c["name"], "message": line})
         return JSONResponse({"logs": all_logs, "container": "all"})
 
+    # ── Docker container logs ──
     cid, err = await _resolve_container(name)
     if err or not cid:
         return JSONResponse({"error": err or "Container not found"}, status_code=404)
@@ -1006,8 +1070,7 @@ async def get_container_logs(name: str, tail: int = 200):
         return JSONResponse({"error": err or "Failed to fetch logs"}, status_code=500)
 
     lines = _parse_docker_logs(raw)
-    cname = name
-    return JSONResponse({"logs": [{"container": cname, "message": l} for l in lines], "container": cname})
+    return JSONResponse({"logs": [{"container": name, "message": l} for l in lines], "container": name})
 
 
 @dashboard_router.post("/api/dashboard/containers/{name:path}/restart")

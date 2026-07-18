@@ -4,12 +4,15 @@ Configurazione centralizzata — Costanti, variabili d'ambiente, hyperparameters
 
 import os
 import logging
+import logging.handlers
 import re
 
 # ==============================================================================
 # LOGGING
 # ==============================================================================
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+_default_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis.log")
+LOG_FILE_PATH = os.getenv("LOG_FILE_PATH", _default_log)
 numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
 
 class TagFormatter(logging.Formatter):
@@ -39,7 +42,21 @@ class TagFormatter(logging.Formatter):
 logging.getLogger().handlers.clear()
 handler = logging.StreamHandler()
 handler.setFormatter(TagFormatter("%(asctime)s - %(levelname)s - [%(tag)s] %(message)s"))
-logging.basicConfig(level=numeric_level, handlers=[handler], force=True)
+
+# File handler per persistenza log su disco
+_log_dir = os.path.dirname(LOG_FILE_PATH)
+if _log_dir:
+    os.makedirs(_log_dir, exist_ok=True)
+file_handler = logging.handlers.RotatingFileHandler(
+    LOG_FILE_PATH, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
+file_handler.setFormatter(TagFormatter("%(asctime)s - %(levelname)s - [%(tag)s] %(message)s"))
+
+logging.basicConfig(
+    level=numeric_level,
+    handlers=[handler, file_handler],
+    force=True,
+)
 
 logger = logging.getLogger("chameleon")
 
