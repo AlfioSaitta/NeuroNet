@@ -541,6 +541,10 @@ async def get_stats():
     except Exception:
         pass
 
+    # Session store stats
+    session_store = getattr(state, 'chat_session_store', None)
+    session_stats = session_store.get_stats() if session_store else None
+
     return JSONResponse({
         "rag_stats": {
             "indexed_files": len(state.rag_state),
@@ -584,6 +588,7 @@ async def get_stats():
             "trace_count": trace_count,
             "active_traces": active_traces_count,
             "mcp_v2_active": True,
+            "sessions": session_stats,
         }
     })
 
@@ -1043,11 +1048,20 @@ async def get_dashboard_telemetry():
     except Exception:
         pass
 
+    # Session store data
+    session_store = getattr(state, 'chat_session_store', None)
+    recent_sessions = session_store.list_sessions(limit=10) if session_store else []
+    session_stats = session_store.get_stats() if session_store else None
+
     return JSONResponse({
         "gatekeeper": gatekeeper_data,
         "error_counters": errors,
         "recent_traces": traces,
         "active_traces": active_traces_list,
+        "sessions": {
+            "stats": session_stats,
+            "recent": recent_sessions,
+        },
     })
 
 
