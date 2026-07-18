@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-07-18 (Synaptiq v2.0.5 + Watchdog Automation)
+> **Data ultimo aggiornamento:** 2026-07-18 (Synaptiq v2.0.5 + Watchdog Automation + Dashboard Admin Panel)
 
 ---
 
@@ -141,6 +141,7 @@ Master jarvis:8000
 │   ├── models/                  # File GGUF modelli LLM
 │   ├── skills/                  # Skill dinamiche caricabili a runtime
 │   ├── openai/                  # Sotto-pacchetto OpenAI API (modulare)
+│   ├── admin_panel/             # Dashboard web modulare (templates, JS, CSS)
 │   └── openai_router.py         # (Legacy) Router OpenAI — rimpiazzabile da openai/
 └── data/                        # Stato persistente (gitignored)
     ├── qdrant/                  # Dati Qdrant
@@ -181,6 +182,23 @@ Master jarvis:8000
 | `synaptiq_engine.py` | **Synaptiq Engine.** Wrapper asincrono thread-safe per Synaptiq v2.0.5 (LadybugBackend + run_pipeline). Analisi strutturale del codice, hybrid search, symbol context, traversal, dead code, community detection. Watchdog integration: `notify_file_event()` con debounce per-project 30s. | `synaptiq.core.*`, `asyncio` |
 | `synaptiq_bridge.py` | Bridge che fonde RAG (Qdrant) + Synaptiq (grafo) per hybrid code search. Replaces `code_intelligence.py`. | `synaptiq_engine`, `rag` (lazy) |
 | `code_intelligence.py` | **Legacy re-export.** `from synaptiq_bridge import hybrid_code_search` per retrocompatibilità. | `synaptiq_bridge` |
+
+### Sotto-pacchetto `jarvis/admin_panel/`
+
+Pacchetto dashboard web modulare estratto da `dashboard_template.py`. Template HTML, CSS e JS separati in file statici per manutenibilità.
+
+| File | Responsabilità |
+|---|---|
+| `__init__.py` | Router FastAPI `setup_admin_panel(app)`, mount static files, serve `index.html` su `/dashboard/` e `/admin/` |
+| `templates/index.html` | Template HTML dashboard (Chart.js, Sigma.js, stile cyberpunk). 644 righe, 57 inline style rimasti (solo dinamici/dimensioni font non standard) |
+| `static/css/style.css` | Foglio di stile unico (456 righe). 30+ classi utility aggiunte: `.mono`, `.text-muted`, `.flex`, `.gap-*`, `.grid-*`, `.mb-*`, `.mt-*`, `.p-*`, `.fw-*`, `.card-compact`, `.card-header-sm` |
+| `static/js/main.js` | Inizializzazione dashboard: cambio view, polling `/api/dashboard/*`, refresh metrics, modali, notifiche toast |
+| `static/js/charts.js` | Chart.js grafici: GPU usage (line 60s), inference counters, RAG chunks history. Responsive resize |
+| `static/js/graph.js` | Sigma.js graph viewer (689 righe). `renderSigmaGraph()` funzione condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. FA2, 7 event handler, stats panel, resize observer |
+| `static/js/chat.js` | Chat view: streaming SSE, paste event, drag-drop file, keydown '/' shortcut. Event listener consolidati in DOMContentLoaded (390 righe) |
+| `static/js/telemetry.js` | Polling telemetry (351 righe): 10 funzioni dominio-specifiche (`updateGPU()`, `updateModels()`, `updateHealth()`...), Page Visibility API per stop/resume polling su tab hidden |
+| `static/js/management.js` | Container/ingestion management: restart, log viewer con combo box, auto-refresh |
+| `static/js/logs.js` | Docker logs viewer con filtering e auto-scroll |
 
 ### Sotto-pacchetto `jarvis/openai/`
 
@@ -353,6 +371,13 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 
 | Data | Modifica | Impatto |
 |---|---|---|
+| 18/07 | **Dashboard — Admin Panel modulare** | `dashboard_template.py` rifattorizzato in `admin_panel/` sub-package: __init__.py router, 6 JS moduli, style.css, index.html. Backend `dashboard.py` immutato. Route `/dashboard/` e `/admin/` attive |
+| 18/07 | **graph.js — Deduplicato rendering Sigma.js** | Creata `renderSigmaGraph(config)` funzione condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. FA2, 7 event handler, stats, resize observer unificati. 856→689 righe (-19.5%) |
+| 18/07 | **index.html — Inline style ridotti -71%** | ~200 → 57 inline style. Rimpiazzati con 30+ classi utility CSS (.mono, .text-muted, .flex, .gap-*, .grid-*, .fw-*, .card-compact). Rimasti solo stili dinamici/display/font non standard |
+| 18/07 | **style.css — 30+ utility classi** | 406→456 righe. Aggiunte: `.mono`, `.text-muted`, `.flex`, `.gap-*`, `.mb-*`, `.mt-*`, `.p-*`, `.fw-*`, `.items-center`, `.justify-between`, `.card-compact`, `.card-header-sm`, `.grid-*`, `.text-sm/xs/xxs`, `.w-auto`, `.h-60/80` |
+| 18/07 | **telemetry.js — Refactor fetchStats() monolitica** | Splittata `fetchStats()` in 10 funzioni dominio-specifiche: `updateGPU()`, `updateFeatures()`, `updateRAGStats()`, `updateModels()`, `updateInference()`, `updateQdrantCollections()`, `updateAgentStats()`, `updateHealth()`, `updateSysStats()`, `updateSynaptiq()`. Aggiunta Page Visibility API: polling stop/resume su tab hidden |
+| 18/07 | **chat.js — Event listener consolidati** | paste, drag-drop, keydown '/' e `mermaid.initialize()` spostati in unico `DOMContentLoaded`, eliminati listener a livello modulo che causavano comportamenti imprevedibili |
+| 18/07 | **Bug fix: chat view display:flex** | Rimosso `display:flex` inline da `view-chat` che sovrascriveva `.view { display:none }`, mantenendo Chat sempre visibile indipendentemente dalla view attiva |
 | 18/07 | **Synaptiq Engine — Bug Fix Migration** | Risolti 6 bug nella migrazione da CodeGraph a Synaptiq v2.0.5: import crash (CRITICAL), KeyError (MEDIUM), extra brace dashboard (MEDIUM), badge OFF/IDLE (LOW), pathspec deprecation (LOW), label "CodeGraph" → "Code Context" (LOW) |
 | 18/07 | **Synaptiq — Watchdog Automation** | Implementata automazione completa: debounced per-project (30s) in `synaptiq_engine.py`, hook in `rag_queue_worker()`, initial analysis al boot in `main.py`. Helper `parse_external_projects()` in `config.py` per DRY |
 | 18/07 | **Synaptiq Review + Fixes** | Code review completa: `get_event_loop()` → `get_running_loop()`, try/except su `await task_ingest`, refactor parsing EXTERNAL_PROJECTS in funzione centralizzata |
@@ -467,7 +492,8 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/rag_reranker.py` | ✅ Nuovo | Reranker modulare: Qwen3-Reranker (transformers fp16 CPU) + fallback FlashRank ONNX |
 | `jarvis/rag_cache.py` | ✅ Nuovo | Cache semantica Qdrant + Web Knowledge persistence |
 | `jarvis/telegram_format.py` | ✅ Nuovo | Utility formattazione Telegram MarkdownV2/Markdown |
-| `jarvis/dashboard_template.py` | ✅ Nuovo | Template HTML/CSS/JS dashboard estratto da `dashboard.py` |
+| `jarvis/admin_panel/` (pacchetto) | ✅ **OTTIMIZZATO** | Dashboard web modulare: `__init__.py` router, 6 JS moduli (main, charts, graph, chat, telemetry, management, logs), style.css, index.html. graph.js deduplicato (-19.5%), inline style -71%, telemetry.js splittato in 10 funzioni + Page Visibility API, chat.js listener consolidati |
+| `jarvis/dashboard_template.py` | ➖ **RIFATTORIZZATO** | HTML/CSS/JS estratto in `admin_panel/` sub-package con moduli separati. Mantenuto come fallback legacy |
 | `jarvis/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls, ring buffer 500 trace. Prompt fields: system_prompt, rag_context, user_content, compressed_text, llm_response |
 | `jarvis/mcp_server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna |
 | `jarvis/_mcp_handlers.py` | ✅ Deprecato | Sostituito da `mcp_server_v2.py` |
