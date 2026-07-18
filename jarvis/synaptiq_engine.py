@@ -143,7 +143,7 @@ class SynaptiqEngine:
             )
             return data
         except Exception as e:
-            logger.error("Synaptiq analyze fallito: %s", e)
+            logger.exception("Synaptiq analyze fallito [%s]: %s", type(e).__name__, e)
             raise
 
     # ── Ricerca ────────────────────────────────────────────────────────────────
@@ -557,7 +557,7 @@ class SynaptiqEngine:
             return await self.analyze(project_path, full_rebuild=False)
         except Exception as e:
             logger.warning(
-                "Synaptiq analyze skipped per %s: %s", project_path, e,
+                "Synaptiq analyze skipped per %s: [%s] %s", project_path, type(e).__name__, e,
             )
             return {}
 
