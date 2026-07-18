@@ -520,6 +520,10 @@ HTML_CONTENT = r"""
                     </li>
                     <li><span>GPU (CUDA)</span> <span class="badge" id="health-cuda">...</span></li>
                     <li><span>MCP v2</span> <span class="badge badge-primary" id="mcp-v2-badge">✔ Streamable HTTP</span></li>
+                    <li style="display:flex;gap:4px;flex-wrap:wrap;">
+                        <span style="flex:1;">Synaptiq</span>
+                        <span class="badge" id="health-synaptiq">...</span>
+                    </li>
                 </ul>
                 <div style="display:flex;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.05);">
                     <button class="btn" onclick="restartIngestion()" style="font-size:0.65rem;padding:3px 8px;">⟳ Restart Ingestion</button>
@@ -550,6 +554,24 @@ HTML_CONTENT = r"""
                     <div>Bypass rate: <span id="gk-bypass-rate">--</span></div>
                     <div>Avg confidence: <span id="gk-avg-conf">--</span></div>
                     <div>Classifications: <span id="gk-classified">--</span></div>
+                </div>
+            </div>
+
+            <div class="card fade-in" style="padding: 16px;">
+                <div class="card-header" style="font-size: 0.85rem; margin-bottom: 8px;">
+                    <span class="dot dot-accent pulsing"></span> Synaptiq Engine
+                    <span style="flex:1;"></span>
+                    <span class="badge" id="sy-status-badge" style="font-size:0.6rem;">...</span>
+                </div>
+                <div class="metric-row" style="gap: 8px; margin-bottom: 6px;">
+                    <div class="metric">
+                        <div class="val" id="sy-nodes" style="font-size: 1.0rem; color: var(--secondary); font-family:'JetBrains Mono',monospace;">--</div>
+                        <div class="label" style="font-size: 0.6rem;">Nodes</div>
+                    </div>
+                    <div class="metric">
+                        <div class="val" id="sy-relations" style="font-size: 1.0rem; color: var(--secondary); font-family:'JetBrains Mono',monospace;">--</div>
+                        <div class="label" style="font-size: 0.6rem;">Relations</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1834,7 +1856,8 @@ HTML_CONTENT = r"""
                         memory: 'Memory (mem0)', ast_parser: 'AST Parser',
                         file_watcher: 'File Watcher', telegram: 'Telegram Bot',
                         cron: 'Cron Scheduler', searxng: 'SearXNG',
-                        crawl4ai: 'Crawl4AI', whisper: 'Voice I/O', userbots: 'Userbots'
+                        crawl4ai: 'Crawl4AI', whisper: 'Voice I/O', userbots: 'Userbots',
+                        synaptiq: 'Synaptiq'
                     };
                     for (const [key, label] of Object.entries(labels)) {
                         const active = f[key];
@@ -1947,6 +1970,43 @@ HTML_CONTENT = r"""
                         const parts = uptimeStr.split(' ');
                         navbarUptime.innerText = parts[0] || uptimeStr;
                     }
+                }
+
+                // ── Synaptiq engine card ──
+                if (data.synaptiq) {
+                    const sy = data.synaptiq;
+                    const syReady = sy.initialized && sy.available;
+                    // Status badge
+                    const syBadge = document.getElementById('sy-status-badge');
+                    if (syBadge) {
+                        if (!sy.available) {
+                            syBadge.innerText = 'NOT INSTALLED';
+                            syBadge.className = 'badge badge-danger';
+                        } else if (syReady) {
+                            syBadge.innerText = 'ACTIVE';
+                            syBadge.className = 'badge badge-primary';
+                        } else {
+                            syBadge.innerText = 'IDLE';
+                            syBadge.className = 'badge badge-warning';
+                        }
+                    }
+                    // Health badge in services list
+                    const syHealth = document.getElementById('health-synaptiq');
+                    if (syHealth) {
+                        if (!sy.available) {
+                            syHealth.innerText = 'N/A';
+                            syHealth.className = 'badge';
+                        } else if (syReady) {
+                            syHealth.innerText = 'ONLINE';
+                            syHealth.className = 'badge badge-primary';
+                        } else {
+                            syHealth.innerText = 'IDLE';
+                            syHealth.className = 'badge badge-warning';
+                        }
+                    }
+                    // Detail metrics
+                    document.getElementById('sy-nodes').innerText = sy.nodes_count ?? '--';
+                    document.getElementById('sy-relations').innerText = sy.relationships_count ?? '--';
                 }
 
             } catch (err) {

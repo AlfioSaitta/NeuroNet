@@ -48,7 +48,9 @@ from config import (
     VECTOR_DB_VERSION,
     API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, API_RATE_LIMIT_EMBED, EMBEDDING_DIMS, EXTERNAL_PROJECTS,
     WORKSPACE_DIR, WORKSPACE_PROJECTS,
-    MCP_ENABLED, MCP_AUTO_INIT
+    MCP_ENABLED, MCP_AUTO_INIT,
+    SYNAPTIQ_ENABLED, SYNAPTIQ_STORAGE_PATH, SYNAPTIQ_EMBEDDING_TIER,
+    parse_external_projects,
 )
 import state
 from rag import ingest_local_documents, rag_queue_worker, generate_project_tree, search_documents
@@ -409,9 +411,45 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Telemetry collector non avviato: {e}")
 
+    # Avvio Synaptiq Engine (grafo strutturale)
+    if SYNAPTIQ_ENABLED:
+        try:
+            from synaptiq_engine import synaptiq_engine
+            synaptiq_engine.storage_path = SYNAPTIQ_STORAGE_PATH
+            synaptiq_engine.embedding_tier = SYNAPTIQ_EMBEDDING_TIER
+            await synaptiq_engine.initialize()
+            logger.info(f"🧬 Synaptiq Engine avviato (storage={SYNAPTIQ_STORAGE_PATH})")
+
+            # Analisi iniziale su tutti i workspace dopo il completamento del RAG ingest
+            async def _synaptiq_initial_after_ingest():
+                try:
+                    await task_ingest
+                except Exception as e:
+                    logger.warning(
+                        "RAG ingest fallito, Synaptiq initial analysis saltata: %s", e,
+                    )
+                    return
+                projects = list(WORKSPACE_PROJECTS) + parse_external_projects()
+                await synaptiq_engine.run_initial_analysis(projects)
+
+            task_synaptiq = asyncio.create_task(_synaptiq_initial_after_ingest())
+            state.background_tasks.add(task_synaptiq)
+            task_synaptiq.add_done_callback(state.background_tasks.discard)
+        except Exception as e:
+            logger.warning(f"Synaptiq Engine non avviato: {e}")
+
     yield
 
     # Shutdown
+    # Arresto Synaptiq Engine
+    if SYNAPTIQ_ENABLED:
+        try:
+            from synaptiq_engine import synaptiq_engine
+            await synaptiq_engine.close()
+            logger.info("Synaptiq Engine fermato.")
+        except Exception as e:
+            logger.warning(f"Synaptiq Engine stop error: {e}")
+
     if observer:
         observer.stop()
         observer.join()
@@ -1364,3 +1402,87 @@ try:
     logger.info("MCP Server v2 su /api/mcp/v2 (Streamable HTTP)")
 except Exception as exc:
     logger.warning(f"MCP Server v2 non disponibile — installa 'mcp' package: pip install mcp ({exc})")
+
+
+# ═══════════════════════════════════════════
+# Synaptiq CodeGraph API Routes
+# ═══════════════════════════════════════════
+
+if SYNAPTIQ_ENABLED:
+    from synaptiq_engine import synaptiq_engine
+
+    @app.get("/api/synaptiq/status")
+    async def synaptiq_status():
+        """Stato del motore Synaptiq (grafo strutturale)."""
+        try:
+            s = await synaptiq_engine.status()
+            return s
+        except Exception as e:
+            return {"initialized": False, "error": str(e)}
+
+    @app.post("/api/synaptiq/analyze")
+    async def synaptiq_analyze(request: Request):
+        """Avvia analisi strutturale di un repository.
+
+        Body: {"path": "/percorso/repo", "full_rebuild": false}
+        """
+        body = await request.json()
+        repo_path = body.get("path", "")
+        full_rebuild = body.get("full_rebuild", False)
+        if not repo_path:
+            return JSONResponse({"error": "path required"}, status_code=400)
+        try:
+            result = await synaptiq_engine.analyze(repo_path, full_rebuild=full_rebuild)
+            return result
+        except FileNotFoundError:
+            return JSONResponse({"error": f"Percorso non trovato: {repo_path}"}, status_code=404)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    @app.get("/api/synaptiq/search")
+    async def synaptiq_search(q: str = "", limit: int = 10):
+        """Ricerca ibrida nel grafo strutturale (FTS + fuzzy + esatta)."""
+        if not q:
+            return {"results": []}
+        results = await synaptiq_engine.hybrid_search(q, limit=limit)
+        return {"results": results, "count": len(results)}
+
+    @app.get("/api/synaptiq/symbol")
+    async def synaptiq_symbol(name: str = ""):
+        """Contesto completo di un simbolo (callers, callees, type refs)."""
+        if not name:
+            return {"error": "name required"}, 400
+        ctx = await synaptiq_engine.get_symbol_context(name)
+        return ctx
+
+    @app.get("/api/synaptiq/traverse")
+    async def synaptiq_traverse(symbol: str = "", depth: int = 3, direction: str = "callers"):
+        """BFS traversal multi-hop."""
+        if not symbol:
+            return {"error": "symbol required"}, 400
+        results = await synaptiq_engine.traverse(symbol, depth=depth, direction=direction)
+        return {"symbol": symbol, "nodes": results, "count": len(results)}
+
+    @app.get("/api/synaptiq/impact")
+    async def synaptiq_impact(symbol: str = "", depth: int = 3):
+        """Analisi blast radius."""
+        if not symbol:
+            return {"error": "symbol required"}, 400
+        impact = await synaptiq_engine.get_impact(symbol, depth=depth)
+        return impact
+
+    @app.get("/api/synaptiq/dead-code")
+    async def synaptiq_dead_code():
+        """Elenco simboli non chiamati (candidati dead code)."""
+        dead = await synaptiq_engine.get_dead_code()
+        return {"dead_code": dead, "count": len(dead)}
+
+    @app.get("/api/synaptiq/communities")
+    async def synaptiq_communities():
+        """Info sulle comunità nel grafo."""
+        communities = await synaptiq_engine.get_communities()
+        return {"communities": communities}
+
+    logger.info("🧬 Route Synaptiq registrate: /api/synaptiq/*")
+else:
+    logger.info("🧬 Route Synaptiq non registrate (motore non disponibile)")

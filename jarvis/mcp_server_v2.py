@@ -258,6 +258,32 @@ async def chat_send(message: str, user_id: str = "mcp_user") -> str:
         return _json_text({"error": str(e)})
 
 
+@mcp.tool(name="code_intelligence", description="Ricerca ibrida RAG + Synaptiq: contesto semantico da Qdrant + analisi strutturale (simboli, callers, blast radius). Usa questo tool quando l'agente AI ha bisogno di capire come funziona un componente, trovare dipendenze, o esplorare il codice.")
+async def code_intelligence(query: str, project: str = "") -> str:
+    """
+    Esegue una ricerca ibrida sul codice: RAG vettoriale (Qdrant) + Synaptiq
+    (grafo strutturale). Restituisce contesto unificato Markdown.
+
+    Args:
+        query:   Descrizione in linguaggio naturale del componente da analizzare.
+        project: Nome del progetto (opzionale). Se vuoto, cerca in tutti i progetti.
+    """
+    try:
+        from synaptiq_bridge import hybrid_code_search
+        ctx = await hybrid_code_search(
+            query,
+            is_project_query=bool(project),
+            project_name=project if project else None,
+            user_message=query,
+        )
+        if ctx and ctx.strip():
+            return ctx
+        return "Nessun contesto trovato per la query specificata."
+    except Exception as e:
+        logger.exception(f"code_intelligence error")
+        return _json_text({"error": str(e)})
+
+
 # ──────────────────────────────────────────────
 # Resources (registrati su FastMCP)
 # ──────────────────────────────────────────────

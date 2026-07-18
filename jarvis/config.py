@@ -187,6 +187,30 @@ if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
 VECTOR_DB_VERSION = os.getenv("VECTOR_DB_VERSION", "v1")
 EXTERNAL_PROJECTS = os.getenv("EXTERNAL_PROJECTS", "")
 STATE_FILE = os.getenv("STATE_FILE", os.path.join(DATA_DIR, f"rag_state_{VECTOR_DB_VERSION}.json"))
+
+
+def parse_external_projects() -> list[str]:
+    """Parsa EXTERNAL_PROJECTS in lista di path assoluti.
+
+    Il formato è ``path:folder_name,path:folder_name,...``.
+    Restituisce una lista di path assoluti (con HOST_FS_PREFIX preposto).
+    """
+    raw = EXTERNAL_PROJECTS.strip()
+    if not raw:
+        return []
+    projects: list[str] = []
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        host_path, _fn = pair.split(":", 1)
+        project_root = (
+            os.path.join(HOST_FS_PREFIX, host_path.lstrip("/"))
+            if HOST_FS_PREFIX
+            else host_path
+        )
+        projects.append(project_root)
+    return projects
 CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "512"))
 CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "0"))
 MAX_CONCURRENT_EMBEDDINGS = int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", "8"))
@@ -401,6 +425,25 @@ USERBOT_PHONE = os.getenv("TELEGRAM_PHONE", "")
 _allowed_chats_env = os.getenv("ALLOWED_PRIVATE_CHATS", "")
 USERBOT_ALLOWED_CHATS = [int(x.strip()) if x.strip().lstrip('-').isdigit() else x.strip() for x in _allowed_chats_env.split(",") if x.strip()]
 
+
+# ==============================================================================
+# SYNAPTIQ (CodeGraph Engine) — v2.0.5
+# ==============================================================================
+
+SYNAPTIQ_ENABLED = False
+try:
+    from synaptiq_engine import synaptiq_engine, is_synaptiq_available, get_synaptiq_version  # noqa: F401
+    if is_synaptiq_available():
+        SYNAPTIQ_ENABLED = True
+        _sv = get_synaptiq_version()
+        logger.info(f"🧬 Synaptiq ATTIVO (v{_sv})")
+    else:
+        logger.info("🧬 Synaptiq non installato — skip")
+except ImportError:
+    logger.info("🧬 Synaptiq non disponibile — skip")
+
+SYNAPTIQ_STORAGE_PATH = os.getenv("SYNAPTIQ_STORAGE_PATH", "data/synaptiq/synaptiq.lb")
+SYNAPTIQ_EMBEDDING_TIER = os.getenv("SYNAPTIQ_EMBEDDING_TIER", "quality")
 
 # ==============================================================================
 # RIMOSSO: Legacy constants sovrascrivevano le variabili d'ambiente.

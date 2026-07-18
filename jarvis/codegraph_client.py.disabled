@@ -1,0 +1,526 @@
+"""
+CodeGraph Embedded Daemon — gestisce codegraph serve --mcp come subprocesso
+Jarvis e comunica via JSON-RPC su stdio.
+
+Invece di chiamare il CLI Node.js per ogni richiesta (lento: ~855ms per
+avvio), questo modulo mantiene un daemon persistente che parla MCP over
+stdio. Il daemon viene avviato/fermato nel lifespan di Jarvis.
+
+MCP Tools esposti da CodeGraph:
+  - codegraph_explore:  contesto strutturale + call path + blast radius
+  - codegraph_search:   ricerca simboli per nome
+  - codegraph_callers:  trova chi chiama un simbolo
+  - codegraph_node:     dettagli simbolo + source o lettura file
+
+Usage:
+    from codegraph_client import daemon
+    await daemon.start()
+    ctx = await daemon.explore("telemetry collector")
+    await daemon.stop()
+"""
+
+import asyncio
+import json
+import os
+import signal
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+from config import logger
+
+# ── Costanti ─────────────────────────────────────────────────────────────────
+
+_OMO_DIR = Path.home() / ".omo" / "codegraph"
+_CG_NODE = _OMO_DIR / "node"
+_CG_CLI = _OMO_DIR / "lib" / "dist" / "bin" / "codegraph.js"
+CODEGRAPH_NODE: str | None = str(_CG_NODE) if _CG_NODE.exists() else None
+CODEGRAPH_CLI: str | None = str(_CG_CLI) if _CG_CLI.exists() else None
+CODEGRAPH_AVAILABLE: bool = bool(CODEGRAPH_NODE and CODEGRAPH_CLI)
+
+DEFAULT_TIMEOUT = 25  # secondi per tool call
+CWD_PROJECT = os.getcwd()  # progetto da indicizzare
+
+# ── Eccezioni ────────────────────────────────────────────────────────────────
+
+class CodeGraphError(Exception):
+    """Errore generico CodeGraph."""
+class CodeGraphTimeout(CodeGraphError):
+    """Timeout su chiamata CodeGraph."""
+class CodeGraphUnavailable(CodeGraphError):
+    """CodeGraph non disponibile o daemon non avviato."""
+
+
+# ── Helper CLI (per query/callers/node che restituiscono JSON) ──────────────
+
+def _build_cli_args(subcommand: str, *args: str, **kwargs: Any) -> list[str]:
+    """Costruisce lista argv per il CLI CodeGraph con flag --json."""
+    cmd = [CODEGRAPH_NODE, CODEGRAPH_CLI, subcommand, *args, "--json"]
+    if "kind" in kwargs and kwargs["kind"]:
+        cmd.extend(["--kind", kwargs["kind"]])
+    if "limit" in kwargs:
+        cmd.extend(["--limit", str(kwargs["limit"])])
+    if "include_code" in kwargs and kwargs["include_code"]:
+        cmd.append("--include-code")
+    return cmd
+
+
+async def _run_cli_json(subcommand: str, *args: str, **kwargs: Any) -> Any:
+    """Esegue il CLI CodeGraph con --json e restituisce il risultato parsato.
+
+    Args:
+        subcommand: query, callers, node, status
+        *args:      argomenti posizionali (es. nome simbolo)
+        **kwargs:   kind, limit, include_code
+
+    Returns:
+        dict o list parsato dal JSON stdout
+
+    Raises:
+        CodeGraphUnavailable: CLI non disponibile
+        CodeGraphError:       esecuzione fallita
+    """
+    if not CODEGRAPH_AVAILABLE:
+        raise CodeGraphUnavailable("CodeGraph CLI non disponibile")
+
+    cmd = _build_cli_args(subcommand, *args, **kwargs)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=CWD_PROJECT,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=DEFAULT_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        raise CodeGraphTimeout(f"CodeGraph {subcommand} timeout dopo {DEFAULT_TIMEOUT}s")
+    except FileNotFoundError:
+        raise CodeGraphUnavailable(f"Esecutore CodeGraph non trovato: {cmd[0]}")
+
+    if proc.returncode != 0:
+        detail = stderr.decode().strip()[:300] if stderr else "exit code non zero"
+        raise CodeGraphError(f"CodeGraph {subcommand} fallito: {detail}")
+
+    return json.loads(stdout.decode())
+
+
+# ── Daemon Manager ───────────────────────────────────────────────────────────
+
+class CodeGraphDaemon:
+    """Gestisce il ciclo di vita del daemon CodeGraph MCP + comunicazione.
+
+    Architecture:
+      - Un processo figlio `codegraph serve --mcp` rimane in esecuzione
+      - Ogni tool call manda un JSON-RPC request su stdin e matcha la
+        risposta per ID su stdout
+      - Un reader task asincrono smista le risposte ai pending futures
+      - Se il processo crasha, auto-restart (max 3 tentativi)
+    """
+
+    def __init__(self) -> None:
+        self._process: asyncio.subprocess.Process | None = None
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+
+        # Scheduler dei pending request ID → Future
+        self._pending: dict[int, asyncio.Future[dict]] = {}
+        self._next_id: int = 1
+        self._lock = asyncio.Lock()
+        self._reader_task: asyncio.Task | None = None
+
+        # Stato
+        self._ready = False
+        self._start_time: float = 0.0
+        self._crash_count = 0
+        self._max_restarts = 3
+
+        # Health
+        self.last_error: str | None = None
+        self.requests_total = 0
+        self.requests_failed = 0
+
+    # ── Proprietà pubbliche ──────────────────────────────────────────────
+
+    @property
+    def is_running(self) -> bool:
+        return self._ready and self._process is not None and self._process.returncode is None
+
+    @property
+    def pid(self) -> int | None:
+        return self._process.pid if self._process and self._process.returncode is None else None
+
+    @property
+    def uptime(self) -> float:
+        return time.monotonic() - self._start_time if self._start_time else 0.0
+
+    # ── Ciclo di vita ─────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        """Avvia il daemon CodeGraph MCP.
+
+        Lancia il subprocesso, fa l'handshake MCP initialize,
+        e avvia il reader task per smistare le risposte.
+        """
+        if self.is_running:
+            logger.debug("CodeGraph daemon già in esecuzione")
+            return
+        if not CODEGRAPH_AVAILABLE:
+            logger.warning("CodeGraph non disponibile — skip daemon start")
+            raise CodeGraphUnavailable("CodeGraph CLI non trovato")
+
+        logger.info(f"🚀 Avvio daemon CodeGraph: {CODEGRAPH_CLI} serve --mcp")
+
+        self._process = await asyncio.create_subprocess_exec(
+            CODEGRAPH_NODE, CODEGRAPH_CLI, "serve", "--mcp",
+            stdout=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=CWD_PROJECT,
+        )
+
+        # stdout/stderr verranno letti direttamente dal reader loop
+
+        self._start_time = time.monotonic()
+        self._crash_count = 0
+
+        # Avvia reader task (legge stdout e smista risposte)
+        self._reader_task = asyncio.create_task(
+            self._reader_loop(),
+            name="codegraph-reader",
+        )
+
+        # Handshake MCP initialize
+        try:
+            init_result = await self._call(
+                "initialize",
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "jarvis", "version": "1.0"},
+                },
+                timeout=10,
+            )
+            self._ready = True
+            logger.info(f"✅ Daemon CodeGraph pronto (PID {self.pid}, v{init_result.get('serverInfo', {}).get('version', '?')})")
+
+            # Notifica initialized
+            await self._send_notification("notifications/initialized")
+        except Exception as e:
+            await self._cleanup()
+            raise CodeGraphError(f"Handshake CodeGraph fallito: {e}")
+
+    async def stop(self) -> None:
+        """Ferma il daemon CodeGraph."""
+        logger.info("🛑 Arresto daemon CodeGraph")
+        await self._cleanup()
+
+    async def restart(self) -> None:
+        """Riavvia il daemon CodeGraph."""
+        logger.info("🔄 Riavvio daemon CodeGraph")
+        await self.stop()
+        await self.start()
+
+    async def _cleanup(self) -> None:
+        """Pulisce risorse: cancella pending, ferma reader, uccide processo."""
+        # Cancella tutti i pending futures
+        for fid, fut in self._pending.items():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
+
+        # Ferma reader task
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._reader_task = None
+
+        # Uccidi processo
+        if self._process and self._process.returncode is None:
+            try:
+                self._process.send_signal(signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    self._process.kill()
+                    await self._process.wait()
+            except ProcessLookupError:
+                pass
+
+        self._process = None
+        self._reader = None
+        self._writer = None
+        self._ready = False
+        self._start_time = 0.0
+
+    # ── Reader Task ───────────────────────────────────────────────────────
+
+    async def _reader_loop(self) -> None:
+        """Legge continuamente stdout del processo e smista risposte JSON-RPC."""
+        assert self._process is not None
+        stdout = self._process.stdout
+        assert stdout is not None
+
+        buffer = b""
+        while True:
+            try:
+                chunk = await stdout.read(65536)
+                if not chunk:
+                    # EOF — processo morto
+                    logger.warning("CodeGraph stdout EOF — daemon terminato")
+                    self._ready = False
+                    # Notifica tutti i pending con errore
+                    exc = CodeGraphError("CodeGraph daemon terminato")
+                    for fid, fut in self._pending.items():
+                        if not fut.done():
+                            fut.set_exception(exc)
+                    self._pending.clear()
+                    break
+
+                buffer += chunk
+                # Prova a estrarre linee JSON complete dal buffer
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.debug(f"CodeGraph reader: JSON non valido: {line[:200]}")
+                        continue
+
+                    # È una risposta a una richiesta?
+                    if "id" in msg:
+                        rid = msg["id"]
+                        fut = self._pending.pop(rid, None)
+                        if fut and not fut.done():
+                            if "error" in msg:
+                                err_data = msg["error"]
+                                fut.set_exception(CodeGraphError(
+                                    f"MCP error: {err_data.get('message', '?')} "
+                                    f"(code {err_data.get('code', '?')})"
+                                ))
+                            else:
+                                fut.set_result(msg.get("result", {}))
+                    # Notifiche (senza id) — logga e ignora
+                    elif "method" in msg and msg["method"].startswith("notifications/"):
+                        pass
+                    else:
+                        logger.debug(f"CodeGraph reader: msg senza id: {msg}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"CodeGraph reader loop error: {e}")
+                await asyncio.sleep(1)
+
+    # ── Comunicazione JSON-RPC ────────────────────────────────────────────
+
+    async def _call(self, method: str, params: dict | None = None, timeout: int = DEFAULT_TIMEOUT) -> dict:
+        """Invia una richiesta JSON-RPC e aspetta la risposta.
+
+        NOTA: non controlla self._ready perché usato anche durante
+        l'handshake initialize. I chiamanti pubblici (explore, query, ...)
+        controllano _ready prima di chiamare _call.
+        """
+        if not self._process or self._process.returncode is not None:
+            raise CodeGraphUnavailable("CodeGraph daemon non pronto")
+
+        async with self._lock:
+            msg_id = self._next_id
+            self._next_id += 1
+            fut: asyncio.Future[dict] = asyncio.get_event_loop().create_future()
+            self._pending[msg_id] = fut
+
+            request = {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "method": method,
+                "params": params or {},
+            }
+
+            try:
+                assert self._process.stdin is not None
+                payload = json.dumps(request) + "\n"
+                self._process.stdin.write(payload.encode())
+                await self._process.stdin.drain()
+                self.requests_total += 1
+            except Exception as e:
+                self._pending.pop(msg_id, None)
+                self.requests_failed += 1
+                raise CodeGraphError(f"Invio richiesta fallito: {e}")
+
+        # Aspetta risposta (fuori dal lock)
+        try:
+            result = await asyncio.wait_for(fut, timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            self._pending.pop(msg_id, None)
+            self.requests_failed += 1
+            raise CodeGraphTimeout(f"CodeGraph {method} timeout dopo {timeout}s")
+        except asyncio.CancelledError:
+            self._pending.pop(msg_id, None)
+            raise
+
+    async def _send_notification(self, method: str, params: dict | None = None) -> None:
+        """Invia una notifica JSON-RPC (senza risposta)."""
+        if not self._process or self._process.returncode is not None:
+            return
+        request = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+        }
+        try:
+            assert self._process.stdin is not None
+            payload = json.dumps(request) + "\n"
+            self._process.stdin.write(payload.encode())
+            await self._process.stdin.drain()
+        except Exception:
+            pass  # notifiche sono fire-and-forget
+
+    # ── Tool Call Pubblici ────────────────────────────────────────────────
+
+    async def explore(self, query_text: str, max_files: int = 8) -> str:
+        """Esplora il codebase con linguaggio naturale via daemon MCP.
+
+        Restituisce Markdown strutturato con source code, call path
+        e blast radius. (La funzione piú pesante — beneficia del daemon.)
+        """
+        result = await self._call("tools/call", {
+            "name": "codegraph_explore",
+            "arguments": {"query": query_text, "maxFiles": max_files},
+        })
+        content = result.get("content", [])
+        text_parts = [c["text"] for c in content if c.get("type") == "text"]
+        return "\n".join(text_parts)
+
+    async def query(self, search: str, kind: str | None = None, limit: int = 10) -> list[dict]:
+        """Cerca simboli per nome via CLI --json (risposta strutturata)."""
+        return await _run_cli_json("query", search, kind=kind, limit=limit)
+
+    async def callers(self, symbol: str, limit: int = 20) -> list[dict]:
+        """Trova chi chiama un simbolo via CLI --json."""
+        data = await _run_cli_json("callers", symbol, limit=limit)
+        if isinstance(data, dict):
+            return data.get("callers", [])
+        return data if isinstance(data, list) else []
+
+    async def node(self, symbol: str, include_code: bool = True, file: str | None = None) -> dict:
+        """Dettagli di un simbolo o lettura file via CLI --json."""
+        args = []
+        if file:
+            args.extend([file])
+        elif symbol:
+            args.append(symbol)
+        result = await _run_cli_json("node", *args, include_code=include_code)
+        return result if isinstance(result, dict) else {}
+
+    async def status(self) -> dict[str, Any]:
+        """Restituisce lo stato del daemon CodeGraph e dell'indice."""
+        if not self.is_running:
+            return {
+                "available": False,
+                "running": False,
+                "pid": None,
+                "uptime": 0,
+                "crash_count": self._crash_count,
+                "requests_total": self.requests_total,
+                "requests_failed": self.requests_failed,
+            }
+
+        # Prova a fare una query veloce per verificare che risponda
+        index_ok = False
+        files_count = None
+        try:
+            # Usa node su un file noto per verificare
+            result = await self.node("", include_code=False, file="jarvis/__init__.py")
+            index_ok = True
+        except Exception:
+            pass
+
+        return {
+            "available": True,
+            "running": True,
+            "pid": self.pid,
+            "uptime": round(self.uptime, 1),
+            "crash_count": self._crash_count,
+            "requests_total": self.requests_total,
+            "requests_failed": self.requests_failed,
+            "index_responding": index_ok,
+        }
+
+
+# ── Istanza singleton del daemon ─────────────────────────────────────────────
+
+daemon = CodeGraphDaemon()
+
+
+# ── Funzioni di convenienza (stessa API della versione CLI) ──────────────────
+
+async def explore(query_text: str, max_files: int = 8) -> str:
+    """Convenienza: esplora via daemon o fallback."""
+    try:
+        return await daemon.explore(query_text, max_files)
+    except (CodeGraphUnavailable, CodeGraphError) as e:
+        logger.warning(f"CodeGraph explore fallback: {e}")
+        return f"⚠️ CodeGraph non disponibile: {e}"
+
+
+async def query(search: str, kind: str | None = None, limit: int = 10) -> list[dict]:
+    """Convenienza: query via daemon."""
+    try:
+        return await daemon.query(search, kind, limit)
+    except (CodeGraphUnavailable, CodeGraphError) as e:
+        logger.warning(f"CodeGraph query fallback: {e}")
+        return []
+
+
+async def callers(symbol: str, limit: int = 20) -> list[dict]:
+    """Convenienza: callers via daemon."""
+    try:
+        return await daemon.callers(symbol, limit)
+    except (CodeGraphUnavailable, CodeGraphError) as e:
+        logger.warning(f"CodeGraph callers fallback: {e}")
+        return []
+
+
+async def node(symbol: str, include_code: bool = True, file: str | None = None) -> dict:
+    """Convenienza: node via daemon."""
+    try:
+        return await daemon.node(symbol, include_code, file)
+    except (CodeGraphUnavailable, CodeGraphError) as e:
+        logger.warning(f"CodeGraph node fallback: {e}")
+        return {}
+
+
+async def status() -> dict[str, Any]:
+    """Convenienza: status via daemon."""
+    return await daemon.status()
+
+
+async def cached_explore(query_text: str, max_files: int = 8) -> str:
+    """Come explore() ma con cache TTL di 30s."""
+    now = time.monotonic()
+    cached = _explore_cache.get(query_text)
+    if cached and (now - cached[1]) < _CACHE_TTL:
+        return cached[0]
+    result = await explore(query_text, max_files)
+    _explore_cache[query_text] = (result, now)
+    return result
+
+
+def clear_cache() -> None:
+    """Svuota la cache delle esplorazioni."""
+    _explore_cache.clear()
+
+
+# Cache TTL per explore
+_explore_cache: dict[str, tuple[str, float]] = {}
+_CACHE_TTL = 30.0

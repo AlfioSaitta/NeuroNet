@@ -13,10 +13,14 @@ from typing import Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
-from config import QDRANT_HOST, SEARXNG_HOST, CRAWL4AI_HOST, CRAWL4AI_API_TOKEN, ALLOWED_USERS, VECTOR_DB_VERSION
+from config import QDRANT_HOST, SEARXNG_HOST, CRAWL4AI_HOST, CRAWL4AI_API_TOKEN, ALLOWED_USERS, VECTOR_DB_VERSION, SYNAPTIQ_ENABLED
 import state
 from llm_engine import engine
 from tag_processor import strip_action_tags, TagSafeStream
+try:
+    from synaptiq_engine import synaptiq_engine
+except ImportError:
+    synaptiq_engine = None
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +43,10 @@ class TelemetryCache:
     health: dict | None = None
     qdrant_collections: list | None = None
     sys_stats: dict | None = None  # uptime, load, disk, ram_mb
+    synaptiq: dict | None = None   # Synaptiq engine status
     last_gpu_ts: float = 0.0
     last_health_ts: float = 0.0
+    last_synaptiq_ts: float = 0.0
 
 _telemetry_cache = TelemetryCache()
 _TELEMETRY_POLL_INTERVAL = 5  # secondi
@@ -187,8 +193,23 @@ async def _collect_qdrant_cache() -> list:
     return collections
 
 
+async def _collect_synaptiq_cache() -> dict:
+    """Stato del motore Synaptiq (leggero: status dal singleton)."""
+    try:
+        if synaptiq_engine and synaptiq_engine.is_initialized:
+            return await synaptiq_engine.status()
+    except Exception:
+        pass
+    return {
+        "available": SYNAPTIQ_ENABLED,
+        "initialized": False,
+        "nodes_count": 0,
+        "relationships_count": 0,
+    }
+
+
 async def telemetry_collector_loop():
-    """Background task: raccoglie GPU + health + Qdrant ogni N secondi e li cache."""
+    """Background task: raccoglie GPU + health + Qdrant + Synaptiq ogni N secondi e li cache."""
     while True:
         try:
             # GPU (operazione pesante → eseguita in thread pool)
@@ -212,6 +233,14 @@ async def telemetry_collector_loop():
             _telemetry_cache.qdrant_collections = qdrant
         except Exception as e:
             logger.debug(f"Telemetry Qdrant collector: {e}")
+
+        try:
+            sy = await _collect_synaptiq_cache()
+            if sy:
+                _telemetry_cache.synaptiq = sy
+                _telemetry_cache.last_synaptiq_ts = time.time()
+        except Exception as e:
+            logger.debug(f"Telemetry Synaptiq collector: {e}")
 
         await asyncio.sleep(_TELEMETRY_POLL_INTERVAL)
 
@@ -486,6 +515,12 @@ async def get_stats():
 
     total_chunks = sum(len(f_data.get('chunks', [])) for f_data in state.rag_state.values())
 
+    # ── Synaptiq status dal cache ──
+    sy_data = _telemetry_cache.synaptiq or {
+        "available": SYNAPTIQ_ENABLED, "initialized": False,
+        "nodes_count": 0, "relationships_count": 0,
+    }
+
     features = {
         "llm": bool(engine and engine.chat_model),
         "embeddings": bool(engine and engine.embed_model),
@@ -499,6 +534,7 @@ async def get_stats():
         "crawl4ai": crawl4ai_up,
         "whisper": bool(state.telegram_app),
         "userbots": True,
+        "synaptiq": SYNAPTIQ_ENABLED and sy_data.get("initialized", False),
     }
 
     # Telemetry summary
@@ -549,6 +585,7 @@ async def get_stats():
             "load": sys_load,
             "disk": sys_disk
         },
+        "synaptiq": sy_data,
         "telemetry": {
             "gatekeeper": gatekeeper_data,
             "error_count": error_count,
@@ -556,6 +593,26 @@ async def get_stats():
             "active_traces": active_traces_count,
             "mcp_v2_active": True,
         }
+    })
+
+
+@dashboard_router.get("/api/dashboard/synaptiq")
+async def get_synaptiq_detail():
+    """Dettaglio stato Synaptiq: inizializzazione, nodi, relazioni."""
+    sy_cache = _telemetry_cache.synaptiq or {}
+    # Prova a recuperare fresh status se cache è vecchia (>15s)
+    if _telemetry_cache.last_synaptiq_ts < time.time() - 15:
+        try:
+            fresh = await _collect_synaptiq_cache()
+            if fresh:
+                sy_cache = fresh
+                _telemetry_cache.synaptiq = fresh
+                _telemetry_cache.last_synaptiq_ts = time.time()
+        except Exception:
+            pass
+    return JSONResponse({
+        "available": SYNAPTIQ_ENABLED,
+        "engine": sy_cache,
     })
 
 

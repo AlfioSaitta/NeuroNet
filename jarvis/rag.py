@@ -26,7 +26,7 @@ from collections import defaultdict
 from llm_engine import engine
 
 from config import (
-    logger, QDRANT_HOST, DOC_COLLECTION, DOC_DIR,
+    logger, MODEL_ID, DOC_DIR, AST_ENABLED,
     STATE_FILE, CHUNK_SIZE, CHUNK_OVERLAP, MAX_CONCURRENT_EMBEDDINGS,
     RAG_CONFIG, AST_ENABLED, GO, PY, JS, TSX,
     VECTOR_DB_VERSION,
@@ -36,6 +36,8 @@ from config import (
     EXTERNAL_PROJECTS, WORKSPACE_DIR, WORKSPACE_PROJECTS,
     DATA_DIR, HOST_FS_PREFIX,
     MODEL_PROFILE,
+    SYNAPTIQ_ENABLED,
+    parse_external_projects,
 )
 import state
 
@@ -117,7 +119,7 @@ class GitignoreFilter:
 
                 if PATHSPEC_ENABLED:
                     with open(ignore_path, 'r', errors='ignore') as f:
-                        self.specs[base] = pathspec.PathSpec.from_lines('gitwildmatch', f)
+                        self.specs[base] = pathspec.PathSpec.from_lines('gitignore', f)
 
     def is_ignored(self, rel_path):
         norm = rel_path.replace('\\', '/')
@@ -1548,7 +1550,27 @@ async def search_documents(query, is_project_query=False, project_name=None):
                     except Exception as e: logger.warning(f"Errore silenziato: {e}")
                     break
 
-        return "\n\n".join(rules_docs + primary_docs + secondary_docs)
+        # ── Arricchimento Synaptiq: annota chunk RAG con metadati grafo ────
+        sy_blocks = []
+        if is_project_query and SYNAPTIQ_ENABLED:
+            try:
+                from synaptiq_engine import synaptiq_engine
+                if synaptiq_engine.is_initialized:
+                    q = query[:100]
+                    sy_results = await synaptiq_engine.hybrid_search(q, limit=4)
+                    if sy_results:
+                        lines = ["\n<SYNAPTIQ_ENRICH>"]
+                        for s in sy_results[:4]:
+                            label = s.get("label", "?")
+                            fpath = s.get("file_path", "?")
+                            name = s.get("node_name", "?")
+                            lines.append(f"  {name} ({label}) — {fpath}")
+                        lines.append("</SYNAPTIQ_ENRICH>")
+                        sy_blocks = ["\n".join(lines)]
+            except Exception:
+                pass
+
+        return "\n\n".join(rules_docs + primary_docs + secondary_docs + sy_blocks)
     except Exception as e:
         logger.error(f"Errore search_documents: {e}")
         return ""
@@ -1703,6 +1725,25 @@ def _get_watchdog_rel_path(fp: str) -> str:
     return os.path.relpath(fp, DOC_DIR)
 
 
+def _find_project_root(filepath: str) -> str | None:
+    """Trova il project root a partire da un filepath assoluto.
+
+    Cerca prima in ``WORKSPACE_PROJECTS`` poi in ``EXTERNAL_PROJECTS``.
+    """
+    norm = os.path.normpath(filepath) + os.sep
+    # Cerca in WORKSPACE_PROJECTS
+    for proj in WORKSPACE_PROJECTS:
+        p_norm = os.path.normpath(proj) + os.sep
+        if norm.startswith(p_norm):
+            return os.path.normpath(proj)
+    # Cerca in EXTERNAL_PROJECTS
+    for ep in parse_external_projects():
+        p_norm = os.path.normpath(ep) + os.sep
+        if norm.startswith(p_norm):
+            return os.path.normpath(ep)
+    return None
+
+
 async def rag_queue_worker():
     """Worker asincrono che processa eventi di file dalla coda del watchdog con debounce."""
     sem = asyncio.Semaphore(MAX_CONCURRENT_EMBEDDINGS)
@@ -1753,7 +1794,19 @@ async def rag_queue_worker():
             
             # Aggiorna la cache del tree (Fix 9.4)
             await update_project_tree_cache()
-            
+
+            # ── Notifica Synaptiq dei file cambiati (debounced per progetto) ──
+            if SYNAPTIQ_ENABLED and pending:
+                try:
+                    from synaptiq_engine import synaptiq_engine
+                    # Usa il primo file del batch per determinare il progetto
+                    first_fp = next(iter(pending))
+                    project_root = _find_project_root(first_fp)
+                    if project_root:
+                        synaptiq_engine.notify_file_event(project_root)
+                except Exception:
+                    pass
+
             state.file_event_queue.task_done()
         except asyncio.CancelledError:
             logger.info("🛑 Spegnimento Graceful del worker Watchdog.")

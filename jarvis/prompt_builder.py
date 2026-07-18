@@ -22,6 +22,10 @@ from web_search import perform_web_search_and_crawl
 from tag_processor import build_tag_instructions
 from task_manager import get_open_tasks
 from llm_engine import engine, extract_content, GatekeeperResult
+try:
+    from synaptiq_engine import synaptiq_engine
+except ImportError:
+    synaptiq_engine = None
 from telemetry import PipelineTracer, GatekeeperStats
 import state
 
@@ -509,7 +513,18 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         if full_files_content:
             rag_ctx = full_files_content + "\n" + rag_ctx
 
-    # Auto web discovery
+        # Synaptiq structural context (solo per query di progetto)
+        cg_ctx = ""
+        if _is_project_query and synaptiq_engine and synaptiq_engine.is_initialized:
+            try:
+                sy_raw = await synaptiq_engine.pack_snippets(clean_msg, limit=8)
+                if sy_raw and len(sy_raw) > 100:
+                    cg_ctx = f"\n<SYNAPTIQ>\n{sy_raw[:3000]}\n</SYNAPTIQ>\n"
+                    logger.info(f"🧠 Synaptiq context: {len(sy_raw)} chars")
+            except Exception as e:
+                logger.debug(f"Synaptiq explore non disponibile: {e}")
+
+        # Auto web discovery
     _is_short_greeting = len(clean_msg.strip()) < 20 and not _is_project_query
     if not _is_short_greeting and not rag_ctx.strip() and not web_ctx:
         search_query = clean_msg
@@ -610,6 +625,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         rag_context_for_compress = rag_context_for_compress + "\n[WEB]\n" + web_final if rag_context_for_compress else "[WEB]\n" + web_final
     if mem_final:
         rag_context_for_compress = rag_context_for_compress + "\n[MEMORY]\n" + mem_final if rag_context_for_compress else "[MEMORY]\n" + mem_final
+    if cg_ctx:
+        rag_context_for_compress = rag_context_for_compress + "\n" + cg_ctx if rag_context_for_compress else cg_ctx
 
     raw_size = len(rag_context_for_compress) + len(history_str) + len(clean_msg)
 
@@ -709,6 +726,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         f"[RAG]\n{rag_final}\n\n" if rag_ctx else ""
     ) + (
         f"[WEB]\n{web_ctx}\n\n" if web_ctx else ""
+    ) + (
+        f"[SYNAPTIQ]\n{cg_ctx}\n\n" if cg_ctx else ""
     )
     tracer.set_rag_context(_rag_ctx_combined.strip())
 

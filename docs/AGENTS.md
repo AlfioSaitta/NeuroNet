@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-07-16 (MCP Server v2 Streamable HTTP)
+> **Data ultimo aggiornamento:** 2026-07-18 (Synaptiq v2.0.5 + Watchdog Automation)
 
 ---
 
@@ -178,6 +178,9 @@ Master jarvis:8000
 | `mcp_server.py` | Server MCP stdio per diagnostica AI esterna. 9 tool + 7 resources. | `urllib` (HTTP proxy a Jarvis) |
 | `mcp_server_v2.py` | **Nuovo Server MCP v2 (Streamable HTTP).** Endpoint POST `/api/mcp/v2`. 8 tool + 7 resources. | `fastapi`, `telemetry` |
 | `_mcp_handlers.py` | **(Deprecato)** Handler MCP condivisi. Sostituito dalla logica in `mcp_server_v2.py`. | `state`, `telemetry` |
+| `synaptiq_engine.py` | **Synaptiq Engine.** Wrapper asincrono thread-safe per Synaptiq v2.0.5 (LadybugBackend + run_pipeline). Analisi strutturale del codice, hybrid search, symbol context, traversal, dead code, community detection. Watchdog integration: `notify_file_event()` con debounce per-project 30s. | `synaptiq.core.*`, `asyncio` |
+| `synaptiq_bridge.py` | Bridge che fonde RAG (Qdrant) + Synaptiq (grafo) per hybrid code search. Replaces `code_intelligence.py`. | `synaptiq_engine`, `rag` (lazy) |
+| `code_intelligence.py` | **Legacy re-export.** `from synaptiq_bridge import hybrid_code_search` per retrocompatibilità. | `synaptiq_bridge` |
 
 ### Sotto-pacchetto `jarvis/openai/`
 
@@ -350,6 +353,9 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 
 | Data | Modifica | Impatto |
 |---|---|---|
+| 18/07 | **Synaptiq Engine — Bug Fix Migration** | Risolti 6 bug nella migrazione da CodeGraph a Synaptiq v2.0.5: import crash (CRITICAL), KeyError (MEDIUM), extra brace dashboard (MEDIUM), badge OFF/IDLE (LOW), pathspec deprecation (LOW), label "CodeGraph" → "Code Context" (LOW) |
+| 18/07 | **Synaptiq — Watchdog Automation** | Implementata automazione completa: debounced per-project (30s) in `synaptiq_engine.py`, hook in `rag_queue_worker()`, initial analysis al boot in `main.py`. Helper `parse_external_projects()` in `config.py` per DRY |
+| 18/07 | **Synaptiq Review + Fixes** | Code review completa: `get_event_loop()` → `get_running_loop()`, try/except su `await task_ingest`, refactor parsing EXTERNAL_PROJECTS in funzione centralizzata |
 | 16/07 | **MCP Server v2 Streamable HTTP** | Nuovo endpoint `/api/mcp/v2` — 8 tool + 7 resources. Rimossi endpoint SSE legacy. Conforme MCP Streamable HTTP (RFC 2025-11-25) |
 | 16/07 | **`_strip_thinking()` + compressione ottimizzata** | Rimuove tag `<think>`, analisi strutturate e meta-ragionamenti dalle risposte del Gatekeeper Qwen3.5. Compressor prompt riscritto con esempio INPUT/OUTPUT concreto |
 | 16/07 | **Prompt format rules** | System prompt aggiornato con regole esplicite per tabelle Markdown, code block, grassetto. Sezione finale obbligatoria `---` con Riepilogo/Attenzione |
@@ -466,6 +472,10 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/mcp_server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna |
 | `jarvis/_mcp_handlers.py` | ✅ Deprecato | Sostituito da `mcp_server_v2.py` |
 | `MCP Server v2` | ✅ **ATTIVO** | Streamable HTTP via `/api/mcp/v2` (protocollo MCP v2) |
+| `jarvis/synaptiq_engine.py` | ✅ **ATTIVO** | Synaptiq v2.0.5 wrapper: async thread-safe, hybrid search, symbol context, BFS traversal, dead code, community detection. Watchdog automation: `notify_file_event()` con debounce 30s per-project |
+| `jarvis/synaptiq_bridge.py` | ✅ **ATTIVO** | Bridge RAG+Synaptiq per hybrid code search nel prompting LLM. Sostituisce `code_intelligence.py` |
+| `jarvis/synaptiq_engine.py` (automazione) | ✅ **COMPLETATA** | Debounce per-project + `run_initial_analysis()` al boot + hook watchdog RAG |
+| `jarvis/config.py` (Synaptiq) | ✅ **CONFIGURATO** | `SYNAPTIQ_ENABLED`, `SYNAPTIQ_STORAGE_PATH`, `SYNAPTIQ_EMBEDDING_TIER`, `parse_external_projects()` |
 | `jarvis/Dockerfile` | ✅ CUDA 13.0 | overlay cuda-compiler-13-0 + cudart-dev + cublas-dev su base 12.2; llama-cpp-python buildato con GGML_CUDA=on |
 | `docker-compose.vps.yml` | ✅ Pronto | Stack Master senza GPU (no sezione deploy) |
 | `docker-compose.worker.yml` | ✅ Pronto | QDRANT_HOST da .env, volumi mem0+documents montati |
@@ -517,6 +527,11 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 - **Isolamento progetto**: il sistema ora supporta `conversation_id` per separare il contesto tra conversazioni concorrenti. Il Telegram usa `chat_id`, l'HTTP API accetta header `X-Conversation-Id` o body `conversation_id`.
 - **Memoria filtrata per progetto**: quando un progetto è attivo, Mem0 cerca solo ricordi di quel progetto. Per conversazione generica (saluti), la memoria non viene iniettata per evitare contaminazione.
 - **RAG cross-collection**: per query di codice senza progetto specificato, il RAG restituisce vuoto invece di cercare in tutte le collezioni, prevenendo contaminazione tra progetti.
+- **Synaptiq — Import Safety Pattern**: tutti gli import di `synaptiq_engine` e `synaptiq_bridge` DEVONO essere lazy (dentro funzioni, non a livello modulo) e protetti da `try/except Exception`. Eccezioni: `config.py` (a livello modulo ma protetto da `try/except ImportError`) e `synaptiq_bridge.py` (che importa `synaptiq_engine` a livello modulo perché è già lazy di per sé). Vedi §9 per il pattern esatto.
+- **Synaptiq — Auto-inizializzazione**: `SynaptiqEngine.analyze()` chiama `self.initialize()` se il motore non è ancora inizializzato. Quindi non serve inizializzare esplicitamente prima di chiamare analyze() — ma è preferibile farlo (main.py fa `await synaptiq_engine.initialize()`).
+- **Synaptiq — Dipendenza da `SYNAPTIQ_ENABLED`**: la variabile `SYNAPTIQ_ENABLED` in `config.py` determina se Synaptiq viene caricato. Il controllo è a 3 livelli: (1) tentativo di import, (2) `try/except ImportError`, (3) flag booleano. Tutti i moduli che usano Synaptiq DEVONO prima controllare `SYNAPTIQ_ENABLED`.
+- **Synaptiq — Watchdog Automation**: il watchdog RAG notifica Synaptiq via `synaptiq_engine.notify_file_event(project_root)` dopo ogni batch di eventi file. Synaptiq usa debounce per-project (30s). L'analisi iniziale parte in background dopo il completamento del RAG ingest.
+- **`codegraph_client.py` rinominato**: il vecchio file `codegraph_client.py` è stato rinominato `codegraph_client.py.disabled` e non deve essere riattivato. Tutta la funzionalità è migrata in `synaptiq_engine.py` + `synaptiq_bridge.py`.
 
 ### 🟢 APPROCCIO CORRETTO
 
@@ -542,6 +557,30 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 - Errori gestiti con `try/except` + `logger.warning/error` (NO `except: pass` silenzioso)
 - Context manager (`async with`) per risorse condivise
 - `ThreadPoolExecutor` per operazioni CPU-bound bloccanti (inferenza LLM)
+
+### Synaptiq — Import Safety Pattern (CRITICAL)
+
+Tutti gli import di moduli Synaptiq DEVONO seguire questo pattern per evitare crash a runtime se il pacchetto `synaptiq` non è installato:
+
+```python
+# ❌ NON FARE — import a livello modulo (crash se synaptiq non installato)
+from synaptiq_engine import synaptiq_engine  # CRASHA se synaptiq non installato
+
+# ✅ CORRETTO — import lazy dentro funzione + try/except
+def my_function():
+    if SYNAPTIQ_ENABLED:
+        try:
+            from synaptiq_engine import synaptiq_engine
+            await synaptiq_engine.analyze(path)
+        except Exception:
+            pass
+```
+
+**Dove si applica:** `main.py` (lifespan), `rag.py` (rag_queue_worker + search_documents), `dashboard.py`, `mcp_server_v2.py`, `prompt_builder.py`.
+
+**Eccezioni consentite:**
+- `config.py` — import a livello modulo ma dentro `try/except ImportError`
+- `synaptiq_bridge.py` — import a livello modulo perché è già un modulo bridge usato SOLO quando Synaptiq è attivo; il suo chiamante DEVE già avere il controllo `SYNAPTIQ_ENABLED`
 
 ### Endpoint API
 
@@ -854,6 +893,95 @@ CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" pip install llama-cpp-
 - `jarvis/config.py` (righe 285-304): `WATCHDOG_TIMEOUT`, `WATCHDOG_WATCH_MODE` letti da `.env` con default
 - `jarvis/main.py` (lifespan + watchdog_health): parametri passati a `PollingObserver()` e path watch basati su `WATCHDOG_WATCH_MODE`
 - `.env`: sezione `WATCHDOG FILESYSTEM` con valori ottimizzati
+
+---
+
+### 🐛 Bug 11 (2026-07-18): Synaptiq Migration — Module-Level Import Crash in `prompt_builder.py` e `dashboard.py`
+
+**Problema:** `prompt_builder.py:25` e `dashboard.py:20` importavano `from synaptiq_engine import synaptiq_engine` a livello modulo, SENZA try/except. Se il pacchetto `synaptiq` non era installato, l'intero modulo crashava all'import, impedendo l'avvio di Jarvis.
+
+**Diagnosi:** Durante la migrazione da CodeGraph a Synaptiq, i lazy import erano stati implementati in `main.py` e `rag.py` ma dimenticati in `prompt_builder.py` e `dashboard.py`. Il crash era silenzioso — Jarvis non partiva senza messaggio d'errore chiaro.
+
+**Soluzione:** Wrapped in `try/except ImportError`:
+```python
+try:
+    from synaptiq_engine import synaptiq_engine
+except ImportError:
+    synaptiq_engine = None
+```
+
+**Impatto:** CRITICAL — bloccava l'avvio di Jarvis senza Synaptiq installato. Risolto.
+
+---
+
+### 🐛 Bug 12 (2026-07-18): Synaptiq Bridge — KeyError su `meta`
+
+**Problema:** `synaptiq_bridge.py:203-205` accedeva a `result["meta"]` con bracket notation su un dict che poteva non avere la chiave `meta`, causando `KeyError` durante `format_symbol_context()`.
+
+**Soluzione:** Sostituito bracket access con `.get("meta", {})`:
+```python
+result.get("meta", {}).get(direction, [])
+```
+
+**File:** `jarvis/synaptiq_bridge.py` riga 203.
+
+**Impatto:** MEDIUM — crash a runtime su simboli senza metadati.
+
+---
+
+### 🐛 Bug 13 (2026-07-18): Dashboard Template — Extra `}` in JavaScript
+
+**Problema:** `dashboard_template.py` conteneva una `}` extra nell'oggetto JS `engineStatus`:
+```javascript
+engineStatus.relationships ?? 0,
+engineStatus.last_analyze_duration?.toFixed(2) ?? "--",
+},  // <-- BRACE EXTRA: chiudeva l'oggetto prima del tempo
+```
+Questa `}` chiudeva l'oggetto `engineStatus` prematuramente, causando un `SyntaxError` in tutto il JavaScript successivo. Risultato: dashboard mostrava `0` / `--` per tutti i valori.
+
+**Soluzione:** Rimossa la `}` extra.
+
+**File:** `jarvis/dashboard_template.py`.
+
+**Impatto:** MEDIUM — dashboard non funzionante per Synaptiq cards + tutte le feature successive.
+
+---
+
+### 🐛 Bug 14 (2026-07-18): Badge Synaptiq — Stato "OFFLINE" Errato per Engine Non Inizializzato
+
+**Problema:** La dashboard mostrava il badge Synaptiq Engine come "OFFLINE" (rosso) anche quando il motore era disponibile ma non ancora inizializzato (dopo il boot). Il badge avrebbe dovuto mostrare "IDLE" (giallo) — un avviso, non un errore.
+
+**Soluzione:** Modificata la logica del badge in `dashboard_template.py`:
+- `available=True, initialized=False` → "IDLE" (giallo)
+- `available=False` → "OFFLINE" (rosso)
+- `initialized=True` → "ONLINE" (verde)
+
+**Impatto:** BASSO — cosmetico, ma fuorviante per la diagnostica.
+
+---
+
+### 🐛 Bug 15 (2026-07-18): `pathspec` Deprecation — `gitwildmatch` → `gitignore`
+
+**Problema:** `rag.py:121` usava `gitwildmatch` come pattern factory per pathspec, che è deprecato in pathspec ≥0.12. Causava warning a runtime.
+
+**Soluzione:** Sostituito `gitwildmatch` con `gitignore`:
+```python
+spec = pathspec.PathSpec.from_lines("gitignore", lines)
+```
+
+**File:** `jarvis/rag.py` riga 121.
+
+**Impatto:** BASSO — solo warning.
+
+---
+
+### 🐛 Bug 16 (2026-07-18): Synaptiq Automation — `asyncio.get_event_loop()` Deprecato
+
+**Problema:** `synaptiq_engine.py:508,567` usava `asyncio.get_event_loop().time()` che è deprecato in Python 3.12+ in favore di `asyncio.get_running_loop().time()`.
+
+**Soluzione:** Sostituito con `asyncio.get_running_loop().time()` in `notify_file_event()` e `_debounced_analyze()`.
+
+**Impatto:** MINORE — warning di deprecazione, nessun crash.
 
 ---
 
