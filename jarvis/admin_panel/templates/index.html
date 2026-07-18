@@ -334,18 +334,66 @@
                             <div class="val text-danger" style="font-size: 1.2rem;" id="tele-error-count">0</div>
                             <div class="label text-xxs">Errors</div>
                         </div>
+                        <div class="metric">
+                            <div class="val text-secondary" style="font-size: 1.2rem;" id="tele-sessions-count">0</div>
+                            <div class="label text-xxs">Sessions</div>
+                        </div>
+                        <div class="metric">
+                            <div class="val text-primary" style="font-size: 1.2rem;" id="tele-sessions-turns">0</div>
+                            <div class="label text-xxs">Turns</div>
+                        </div>
                     </div>
-                    <div class="text-sm text-muted mb-4">Gatekeeper</div>
-                    <div id="gatekeeper-summary" class="mono text-xs">
-                        <div>Bypass rate: <span id="gk-bypass-rate">--</span></div>
-                        <div>Avg confidence: <span id="gk-avg-conf">--</span></div>
-                        <div>Classifications: <span id="gk-classified">--</span></div>
+                    <div class="flex gap-20">
+                        <div class="flex-1">
+                            <div class="text-sm text-muted mb-4">Gatekeeper</div>
+                            <div id="gatekeeper-summary" class="mono text-xs">
+                                <div>Bypass rate: <span id="gk-bypass-rate">--</span></div>
+                                <div>Avg confidence: <span id="gk-avg-conf">--</span></div>
+                                <div>Classifications: <span id="gk-classified">--</span></div>
+                            </div>
+                        </div>
+                        <div class="flex-1">
+                            <div class="text-sm text-muted mb-4">Model Distribution</div>
+                            <div id="model-distribution" class="mono text-xs">
+                                <span class="text-muted">Loading...</span>
+                            </div>
+                        </div>
                     </div>
                     <div id="traces-content" style="display:none;margin-top:12px;">
                         <div class="table-wrap">
                             <table class="mgmt-table text-sm">
-                                <thead><tr><th>ID</th><th class="text-right">Steps</th><th class="text-right">Duration</th><th class="text-right">Tokens</th><th class="text-center">Status</th></tr></thead>
-                                <tbody id="traces-table-body"><tr><td colspan="5" class="text-center text-muted">No traces yet</td></tr></tbody>
+                                <thead><tr>
+                                    <th>ID</th>
+                                    <th class="text-right">Model</th>
+                                    <th class="text-right">Tokens</th>
+                                    <th class="text-right">Duration</th>
+                                    <th class="text-right">TTFT</th>
+                                    <th class="text-right">tok/s</th>
+                                    <th class="text-center">Tools</th>
+                                    <th class="text-center">RAG</th>
+                                    <th class="text-center">Memory</th>
+                                    <th class="text-center">Status</th>
+                                </tr></thead>
+                                <tbody id="traces-table-body"><tr><td colspan="10" class="text-center text-muted">No traces yet</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sessions Panel -->
+            <div class="grid-container" style="grid-template-columns: 1fr;">
+                <div class="card p-16">
+                    <div class="card-header card-header-sm">
+                        <span class="dot dot-secondary pulsing"></span> Chat Sessions
+                        <span class="flex-1"></span>
+                        <button class="btn" onclick="toggleSessions()" style="font-size:0.6rem;padding:2px 6px;">Sessions <span id="toggle-sessions-icon">▶</span></button>
+                    </div>
+                    <div id="sessions-content" style="display:none;margin-top:12px;">
+                        <div class="table-wrap">
+                            <table class="mgmt-table text-sm">
+                                <thead><tr><th>ID</th><th class="text-right">Turns</th><th class="text-right">Tokens</th><th class="text-right">Duration</th><th class="text-center">Model</th><th class="text-right">Last Activity</th></tr></thead>
+                                <tbody id="sessions-table-body"><tr><td colspan="6" class="text-center text-muted">No sessions yet</td></tr></tbody>
                             </table>
                         </div>
                     </div>
@@ -608,6 +656,52 @@
     <div class="node-info" id="node-info">
         <h3>Node Details</h3>
         <div id="node-content"></div>
+    </div>
+</div>
+
+<!-- ── Trace Detail Modal ── -->
+<div class="trace-modal" id="trace-modal">
+    <div class="trace-modal-content">
+        <div class="trace-modal-header">
+            <h3>Trace Detail: <span id="trace-modal-id" class="mono text-primary"></span></h3>
+            <span class="close-modal" onclick="closeTraceModal()">&times;</span>
+        </div>
+        <div class="trace-modal-body" id="trace-modal-body">
+            <div class="trace-detail-grid">
+                <div class="trace-detail-section">
+                    <div class="tds-header">Overview</div>
+                    <div id="td-overview" class="mono text-sm"></div>
+                </div>
+                <div class="trace-detail-section">
+                    <div class="tds-header">Gatekeeper</div>
+                    <div id="td-gatekeeper" class="mono text-sm"></div>
+                </div>
+                <div class="trace-detail-section">
+                    <div class="tds-header">RAG & Memory</div>
+                    <div id="td-rag-memory" class="mono text-sm"></div>
+                </div>
+                <div class="trace-detail-section">
+                    <div class="tds-header">Web & Synaptiq</div>
+                    <div id="td-web-synaptiq" class="mono text-sm"></div>
+                </div>
+                <div class="trace-detail-section">
+                    <div class="tds-header">Compression</div>
+                    <div id="td-compression" class="mono text-sm"></div>
+                </div>
+                <div class="trace-detail-section">
+                    <div class="tds-header">Tools & Agentic Loop</div>
+                    <div id="td-tools" class="mono text-sm"></div>
+                </div>
+                <div class="trace-detail-section trace-detail-full">
+                    <div class="tds-header">LLM Calls</div>
+                    <div id="td-llm-calls" class="mono text-sm"></div>
+                </div>
+                <div class="trace-detail-section trace-detail-full">
+                    <div class="tds-header">Steps</div>
+                    <div id="td-steps" class="mono text-sm"></div>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 

@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════
-// NeuroNet Admin Panel — Telemetry Polling (stats + pipeline)
+// NeuroNet Admin Panel — Telemetry Polling (stats + pipeline + sessions)
 // ═══════════════════════════════════════════════════
 
 // ── Domain-specific update functions ──
@@ -193,6 +193,67 @@ function updateSynaptiq(sy) {
     document.getElementById('sy-relations').innerText = sy.relationships_count ?? '--';
 }
 
+// ── Model distribution from recent traces ──
+
+function updateModelDistribution(traces) {
+    const el = document.getElementById('model-distribution');
+    if (!traces || traces.length === 0) {
+        el.innerHTML = '<span class="text-muted">No data</span>';
+        return;
+    }
+    const models = {};
+    traces.forEach(t => {
+        const m = t.model_used || 'unknown';
+        models[m] = (models[m] || 0) + 1;
+    });
+    const total = traces.length;
+    el.innerHTML = Object.entries(models)
+        .sort((a, b) => b[1] - a[1])
+        .map(([m, c]) => {
+            const pct = ((c / total) * 100).toFixed(0);
+            const name = m.split('/').pop() || m;
+            return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+                <span style="overflow:hidden;text-overflow:ellipsis;max-width:140px;" title="${escapeHtml(m)}">${escapeHtml(name)}</span>
+                <span class="text-primary">${c} (${pct}%)</span>
+            </div>`;
+        })
+        .join('');
+}
+
+// ── Session updates ──
+
+function updateSessionTelemetry(sessions) {
+    if (!sessions) return;
+    const stats = sessions.stats;
+    if (stats) {
+        document.getElementById('tele-sessions-count').textContent = stats.total_sessions ?? 0;
+        document.getElementById('tele-sessions-turns').textContent = stats.total_turns ?? 0;
+    }
+    // Recent sessions table
+    const tbody = document.getElementById('sessions-table-body');
+    const list = sessions.recent;
+    if (list && list.length > 0) {
+        tbody.innerHTML = list.map(s => {
+            const shortId = (s.conversation_id || s.id || '').substring(0, 16);
+            const lastAct = s.last_activity ? new Date(s.last_activity * 1000).toLocaleString() : '--';
+            const duration = s.duration_hours != null
+                ? (s.duration_hours < 1 ? (s.duration_hours * 60).toFixed(0) + 'm' : s.duration_hours.toFixed(1) + 'h')
+                : '--';
+            const model = s.model || '--';
+            return `<tr onclick="openSessionDetail('${escapeHtml(s.conversation_id || s.id || '')}')" style="cursor:pointer;">
+                <td class="mono text-muted" style="padding:4px 8px;font-size:0.65rem;">${escapeHtml(shortId)}</td>
+                <td style="padding:4px 8px;text-align:right;">${s.turn_count ?? s.turns ?? 0}</td>
+                <td style="padding:4px 8px;text-align:right;">${s.total_tokens ?? '--'}</td>
+                <td style="padding:4px 8px;text-align:right;">${duration}</td>
+                <td style="padding:4px 8px;text-align:center;font-size:0.65rem;">${escapeHtml(model.split('/').pop() || model)}</td>
+                <td style="padding:4px 8px;text-align:right;font-size:0.65rem;color:var(--text-muted);">${lastAct}</td>
+            </tr>`;
+        }).join('');
+    } else {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No sessions yet</td></tr>';
+    }
+}
+
 // ── Stats Poll (3s) ──
 
 window.fetchStats = async function() {
@@ -231,6 +292,13 @@ window.fetchStats = async function() {
 
         updateSynaptiq(data.synaptiq);
 
+        // Session stats from telemetry
+        const tel = data.telemetry;
+        if (tel && tel.sessions) {
+            document.getElementById('tele-sessions-count').textContent = tel.sessions.total_sessions ?? 0;
+            document.getElementById('tele-sessions-turns').textContent = tel.sessions.total_turns ?? 0;
+        }
+
     } catch (err) {
         console.error('Failed to fetch telemetry', err);
     }
@@ -249,6 +317,149 @@ function toggleTraces() {
         icon.textContent = '▶';
     }
 }
+
+function toggleSessions() {
+    const content = document.getElementById('sessions-content');
+    const icon = document.getElementById('toggle-sessions-icon');
+    if (content.style.display === 'none') {
+        content.style.display = 'block';
+        icon.textContent = '▼';
+    } else {
+        content.style.display = 'none';
+        icon.textContent = '▶';
+    }
+}
+
+// ── Trace Detail Modal ──
+
+function openTraceModal(trace) {
+    const modal = document.getElementById('trace-modal');
+    document.getElementById('trace-modal-id').textContent = (trace.request_id || trace.id || '').substring(0, 16);
+
+    // Overview
+    const duration = trace.duration_ms ? (trace.duration_ms / 1000).toFixed(2) + 's' : '--';
+    const tokens = trace.total_tokens ?? (trace.total_prompt_tokens + trace.total_completion_tokens) || '--';
+    const model = (trace.model_used || '').split('/').pop() || '--';
+    const ttft = trace.ttft_ms != null ? trace.ttft_ms.toFixed(0) + 'ms' : '--';
+    const tokPerSec = trace.generation_speed_tok_s != null ? trace.generation_speed_tok_s.toFixed(1) : '--';
+    const streaming = trace.is_streaming ? '✓' : '✗';
+    document.getElementById('td-overview').innerHTML = `
+        <div class="td-row"><span class="td-label">Duration</span><span>${duration}</span></div>
+        <div class="td-row"><span class="td-label">Total Tokens</span><span>${tokens}</span></div>
+        <div class="td-row"><span class="td-label">Prompt / Completion</span><span>${trace.total_prompt_tokens ?? '--'} / ${trace.total_completion_tokens ?? '--'}</span></div>
+        <div class="td-row"><span class="td-label">Model</span><span class="text-primary">${escapeHtml(model)}</span></div>
+        <div class="td-row"><span class="td-label">TTFT</span><span>${ttft}</span></div>
+        <div class="td-row"><span class="td-label">Generation Speed</span><span>${tokPerSec} tok/s</span></div>
+        <div class="td-row"><span class="td-label">Streaming</span><span>${streaming}</span></div>
+        <div class="td-row"><span class="td-label">Steps</span><span>${(trace.steps || []).length}</span></div>
+        <div class="td-row"><span class="td-label">LLM Calls</span><span>${(trace.llm_calls || []).length}</span></div>
+        ${trace.error ? `<div class="td-row"><span class="td-label">Error</span><span class="text-danger">${escapeHtml(trace.error)}</span></div>` : ''}
+    `;
+
+    // Gatekeeper
+    const gk = trace.gatekeeper;
+    document.getElementById('td-gatekeeper').innerHTML = gk ? `
+        <div class="td-row"><span class="td-label">Intent</span><span class="text-primary">${escapeHtml(gk.intent || '--')}</span></div>
+        <div class="td-row"><span class="td-label">Confidence</span><span>${gk.confidence != null ? (gk.confidence * 100).toFixed(0) + '%' : '--'}</span></div>
+        <div class="td-row"><span class="td-label">Project</span><span>${escapeHtml(gk.project || '--')}</span></div>
+        <div class="td-row"><span class="td-label">Bypassed</span><span>${gk.bypassed ? '✓' : '✗'}</span></div>
+        <div class="td-row"><span class="td-label">Gatekeeper Model</span><span>${escapeHtml(trace.gatekeeper_model || '--')}</span></div>
+    ` : '<span class="text-muted">No gatekeeper data</span>';
+
+    // RAG & Memory
+    document.getElementById('td-rag-memory').innerHTML = `
+        <div class="td-row"><span class="td-label">RAG Context Length</span><span>${trace.rag_ctx_len ?? '--'}</span></div>
+        <div class="td-row"><span class="td-label">RAG Project</span><span>${escapeHtml(trace.rag_project || '--')}</span></div>
+        <div class="td-row"><span class="td-label">Memory Records</span><span>${trace.memory_records ?? '--'}</span></div>
+        <div class="td-row"><span class="td-label">Memory Search</span><span>${trace.memory_search_ms != null ? trace.memory_search_ms.toFixed(0) + 'ms' : '--'}</span></div>
+    `;
+
+    // Web & Synaptiq
+    document.getElementById('td-web-synaptiq').innerHTML = `
+        <div class="td-row"><span class="td-label">Web Search</span><span>${trace.web_search_performed ? '✓' : '✗'}</span></div>
+        <div class="td-row"><span class="td-label">Web Search Duration</span><span>${trace.web_search_duration_ms != null ? trace.web_search_duration_ms.toFixed(0) + 'ms' : '--'}</span></div>
+        <div class="td-row"><span class="td-label">Synaptiq</span><span>${trace.synaptiq_performed ? '✓' : '✗'}</span></div>
+        <div class="td-row"><span class="td-label">Synaptiq Chars</span><span>${trace.synaptiq_chars ?? '--'}</span></div>
+    `;
+
+    // Compression
+    document.getElementById('td-compression').innerHTML = `
+        <div class="td-row"><span class="td-label">Raw Size</span><span>${trace.compression_raw_size ?? '--'}</span></div>
+        <div class="td-row"><span class="td-label">Is Raw Fallback</span><span>${trace.compression_is_raw ? '✓' : '✗'}</span></div>
+    `;
+
+    // Tools
+    const toolNames = trace.tool_names;
+    document.getElementById('td-tools').innerHTML = `
+        <div class="td-row"><span class="td-label">Tool Calls</span><span>${trace.tool_calls_count ?? '--'}</span></div>
+        <div class="td-row"><span class="td-label">Agentic Depth</span><span>${trace.agentic_loop_depth ?? '--'}</span></div>
+        <div class="td-row"><span class="td-label">Tools Used</span><span>${toolNames && toolNames.length > 0 ? escapeHtml(toolNames.join(', ')) : 'none'}</span></div>
+    `;
+
+    // LLM Calls
+    const llmCalls = trace.llm_calls;
+    document.getElementById('td-llm-calls').innerHTML = llmCalls && llmCalls.length > 0
+        ? llmCalls.map((l, i) => `
+            <div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+                <div class="td-row"><span class="td-label">Call #${i + 1}</span><span>${escapeHtml(l.model || l.model_name || '?')}</span></div>
+                <div class="td-row"><span class="td-label">Tokens</span><span>${l.prompt_tokens || 0}↑ ${l.completion_tokens || 0}↓</span></div>
+                ${l.duration_ms ? `<div class="td-row"><span class="td-label">Duration</span><span>${(l.duration_ms / 1000).toFixed(1)}s</span></div>` : ''}
+            </div>
+        `).join('')
+        : '<span class="text-muted">No LLM calls</span>';
+
+    // Steps
+    const steps = trace.steps;
+    document.getElementById('td-steps').innerHTML = steps && steps.length > 0
+        ? steps.map(s => {
+            const stepDuration = s.duration_ms != null ? (s.duration_ms / 1000).toFixed(2) + 's' : '';
+            const statusIcon = s.status === 'error' ? '❌' : s.status === 'skipped' ? '⏭' : s.status === 'completed' || s.status === 'ok' ? '✓' : '⋯';
+            return `<div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.03);display:flex;justify-content:space-between;align-items:center;">
+                <span><span style="margin-right:6px;">${statusIcon}</span>${escapeHtml(s.step || s.name || '?')}</span>
+                <span class="text-muted" style="font-size:0.65rem;">${stepDuration}${s.status ? ' · ' + s.status : ''}</span>
+            </div>`;
+        }).join('')
+        : '<span class="text-muted">No steps recorded</span>';
+
+    modal.style.display = 'block';
+}
+
+function closeTraceModal() {
+    document.getElementById('trace-modal').style.display = 'none';
+}
+
+// Close modal on outside click
+document.addEventListener('click', function(e) {
+    const modal = document.getElementById('trace-modal');
+    if (e.target === modal) {
+        modal.style.display = 'none';
+    }
+});
+
+// Escape key closes modal
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        document.getElementById('trace-modal').style.display = 'none';
+    }
+});
+
+// ── Session Detail (fetches full session data) ──
+
+async function openSessionDetail(convId) {
+    if (!convId) return;
+    try {
+        const res = await fetch('/api/dashboard/telemetry');
+        const data = await res.json();
+        // We don't have a direct /api/dashboard/session/{id} endpoint, use the MCP tool via main
+        // Fallback: search sessions and find the matching one
+        // For now, show toast notification
+        showToast('Session ' + convId.substring(0, 12) + ' — use MCP tool get_session for full detail', 'info');
+    } catch(e) {
+        console.error('Session detail error', e);
+    }
+}
+
+// ── Telemetry fetch ──
 
 async function fetchTelemetry() {
     try {
@@ -276,6 +487,14 @@ async function fetchTelemetry() {
             document.getElementById('tele-active-traces').textContent = data.active_traces?.length ?? 0;
         }
 
+        // Model distribution
+        updateModelDistribution(data.recent_traces);
+
+        // Sessions
+        if (data.sessions) {
+            updateSessionTelemetry(data.sessions);
+        }
+
         // Recent traces table
         const tbody = document.getElementById('traces-table-body');
         if (data.recent_traces && data.recent_traces.length > 0) {
@@ -283,44 +502,36 @@ async function fetchTelemetry() {
             data.recent_traces.slice(0, 10).forEach(t => {
                 const tr = document.createElement('tr');
                 const duration = t.duration_ms ? (t.duration_ms / 1000).toFixed(1) + 's' : '--';
-                const tokens = t.total_tokens ?? '--';
+                const tokens = t.total_tokens ?? (t.total_prompt_tokens + t.total_completion_tokens) || '--';
                 const steps = t.steps?.length ?? 0;
                 const status = t.error ? '❌' : '✓';
-                const shortId = (t.request_id || t.id || '').substring(0, 12);
+                const shortId = (t.request_id || t.id || '').substring(0, 8);
+                const model = (t.model_used || '').split('/').pop() || '--';
+                const ttft = t.ttft_ms != null ? t.ttft_ms.toFixed(0) : '--';
+                const tokPerSec = t.generation_speed_tok_s != null ? t.generation_speed_tok_s.toFixed(1) : '--';
+                const toolCalls = t.tool_calls_count || t.agentic_loop_depth || 0;
+                const ragUsed = t.rag_ctx_len > 0 ? '📚' : '—';
+                const memUsed = t.memory_records > 0 ? '🧠' : '—';
                 tr.innerHTML = `
-                    <td class="text-muted" style="padding:4px 8px;">${escapeHtml(shortId)}</td>
-                    <td style="padding:4px 8px;text-align:right;">${steps}</td>
-                    <td style="padding:4px 8px;text-align:right;">${duration}</td>
+                    <td class="mono text-muted" style="padding:4px 8px;font-size:0.65rem;">${escapeHtml(shortId)}</td>
+                    <td style="padding:4px 8px;text-align:right;font-size:0.65rem;max-width:80px;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(t.model_used || '')}">${escapeHtml(model)}</td>
                     <td style="padding:4px 8px;text-align:right;">${tokens}</td>
+                    <td style="padding:4px 8px;text-align:right;">${duration}</td>
+                    <td style="padding:4px 8px;text-align:right;color:var(--secondary);">${ttft}ms</td>
+                    <td style="padding:4px 8px;text-align:right;color:var(--primary);">${tokPerSec}</td>
+                    <td style="padding:4px 8px;text-align:center;">${toolCalls > 0 ? '🔧' : '—'}</td>
+                    <td style="padding:4px 8px;text-align:center;">${ragUsed}</td>
+                    <td style="padding:4px 8px;text-align:center;">${memUsed}</td>
                     <td style="padding:4px 8px;text-align:center;">${status}</td>
                 `;
                 tr.style.cursor = 'pointer';
                 tr.onmouseenter = () => { tr.style.background = 'rgba(0,255,204,0.05)'; };
                 tr.onmouseleave = () => { tr.style.background = ''; };
-                tr.onclick = () => {
-                    const gatekeeperInfo = t.gatekeeper
-                        ? `Gatekeeper: ${t.gatekeeper.intent} (${(t.gatekeeper.confidence*100).toFixed(0)}%)\n`
-                        : '';
-                    const stepInfo = (t.steps || [])
-                        .map(s => `  ${s.step}: ${s.status} (${s.duration_ms}ms)`)
-                        .join('\n');
-                    const llmCalls = (t.llm_calls || [])
-                        .map(l => `  LLM: ${l.model || '?'} — ${l.prompt_tokens || 0}↑ ${l.completion_tokens || 0}↓`)
-                        .join('\n');
-                    alert(
-                        `Trace: ${t.request_id}\n` +
-                        `Duration: ${duration}\n` +
-                        `Total tokens: ${tokens}\n` +
-                        (t.error ? `Error: ${t.error}\n` : '') +
-                        `\n${gatekeeperInfo}` +
-                        `\nSteps:\n${stepInfo || '  (none)'}` +
-                        `\n\nLLM Calls:\n${llmCalls || '  (none)'}`
-                    );
-                };
+                tr.onclick = () => { openTraceModal(t); };
                 tbody.appendChild(tr);
             });
         } else {
-            tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;text-align:center;color:var(--text-muted);">No traces yet</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="10" style="padding:12px;text-align:center;color:var(--text-muted);">No traces yet</td></tr>';
         }
     } catch (err) {
         console.error('Failed to fetch telemetry', err);
