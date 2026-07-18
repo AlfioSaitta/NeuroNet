@@ -13,7 +13,7 @@ function switchView(viewName) {
     const sb = document.getElementById('sidebar');
     if (sb && window.innerWidth <= 600) sb.classList.remove('open');
     // Dispatch view load events
-    if (viewName === 'chat') { document.getElementById('chat-input')?.focus(); loadChatHistory(); }
+    if (viewName === 'chat') { document.getElementById('chat-input')?.focus(); loadSessionList(); loadChatHistory(); }
     if (viewName === 'rag') loadRAGData();
     if (viewName === 'models') loadModelsData();
     if (viewName === 'tasks') { loadTasksData(); loadCronData(); }
@@ -38,6 +38,18 @@ function toggleTheme() {
 function toggleSidebar() {
     document.getElementById('sidebar')?.classList.toggle('open');
 }
+
+function toggleChatSidebar() {
+    document.getElementById('chat-session-sidebar')?.classList.toggle('open');
+}
+
+// Close overlays on Escape
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        document.getElementById('sidebar')?.classList.remove('open');
+        document.getElementById('chat-session-sidebar')?.classList.remove('open');
+    }
+});
 
 // Init theme from localStorage
 (function() {

@@ -38,6 +38,7 @@
 <!-- ── Top Navbar ── -->
 <div class="top-navbar">
     <button class="hamburger-btn" onclick="toggleSidebar()" aria-label="Toggle sidebar">☰</button>
+    <button class="chat-toggle-btn" id="chat-toggle-btn" onclick="toggleChatSidebar()" aria-label="Toggle chat sessions">☰ Sessions</button>
     <div class="navbar-brand">
         <span class="logo">✦ NEURONET</span>
         <span class="version">v9.7</span>
@@ -423,29 +424,40 @@
         </div>
 
         <!-- ── VIEW: Chat ── -->
-        <div class="view flex-col" id="view-chat" style="padding:0;">
-            <div id="chat-messages" class="flex-1" style="overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px;">
-                <div class="chat-empty-state" id="chat-empty-state">
-                    <div class="icon">✦</div>
-                    <h2>NeuroNet Chat</h2>
-                    <p>Ask anything about your codebase, infrastructure, or let me help you reason through complex problems.</p>
-                    <div class="chat-suggestions">
-                        <button onclick="sendSuggested('What is the current system status?')">System status</button>
-                        <button onclick="sendSuggested('Show me recent errors')">Recent errors</button>
-                        <button onclick="sendSuggested('Summarize my recent changes')">Recent changes</button>
-                        <button onclick="sendSuggested('Analyze the most complex file in the project')">Analyze complexity</button>
+        <div class="view" id="view-chat">
+            <!-- ── Session Sidebar ── -->
+            <div id="chat-session-sidebar">
+                <div class="css-header">
+                    <span class="fw-600 text-sm" style="letter-spacing:1px;text-transform:uppercase;">Sessions</span>
+                    <button id="chat-new-btn" onclick="createNewSession()" title="New chat">✚</button>
+                </div>
+                <div id="chat-session-list"></div>
+            </div>
+            <!-- ── Chat Area ── -->
+            <div class="flex-col flex-1" style="overflow:hidden;">
+                <div id="chat-messages">
+                    <div class="chat-empty-state" id="chat-empty-state">
+                        <div class="icon">✦</div>
+                        <h2>NeuroNet Chat</h2>
+                        <p>Ask anything about your codebase, infrastructure, or let me help you reason through complex problems.</p>
+                        <div class="chat-suggestions">
+                            <button onclick="sendSuggested('What is the current system status?')">System status</button>
+                            <button onclick="sendSuggested('Show me recent errors')">Recent errors</button>
+                            <button onclick="sendSuggested('Summarize my recent changes')">Recent changes</button>
+                            <button onclick="sendSuggested('Analyze the most complex file in the project')">Analyze complexity</button>
+                        </div>
                     </div>
                 </div>
-            </div>
-            <div id="chat-input-container">
-                <div id="chat-image-previews" class="flex gap-8 flex-wrap mb-8"></div>
-                <div id="chat-input-row" class="flex gap-10" style="align-items:flex-end;">
-                    <label class="chat-btn" title="Attach image" style="cursor:pointer;font-size:1rem;">
-                        📎
-                        <input type="file" accept="image/*" multiple style="display:none;" onchange="handleFileSelect(event)">
-                    </label>
-                    <textarea id="chat-input" placeholder="Ask anything..." rows="1"></textarea>
-                    <button id="chat-send-btn" onclick="sendChatMessage()" title="Send">↑</button>
+                <div id="chat-input-container">
+                    <div id="chat-image-previews" class="flex gap-8 flex-wrap mb-8"></div>
+                    <div id="chat-input-row" class="flex gap-10" style="align-items:flex-end;">
+                        <label class="chat-btn" title="Attach image" style="cursor:pointer;font-size:1rem;">
+                            📎
+                            <input type="file" accept="image/*" multiple style="display:none;" onchange="handleFileSelect(event)">
+                        </label>
+                        <textarea id="chat-input" placeholder="Ask anything..." rows="1"></textarea>
+                        <button id="chat-send-btn" onclick="sendChatMessage()" title="Send">↑</button>
+                    </div>
                 </div>
             </div>
         </div>

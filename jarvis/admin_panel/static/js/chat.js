@@ -4,8 +4,9 @@
 
 let chatImages = [];
 let isChatStreaming = false;
-const chatConvId = 'dashboard_default';
+let chatConvId = 'dashboard_default';
 let abortController = null;
+let currentSessionId = 'dashboard_default';
 
 // Mermaid initialized inside DOMContentLoaded below
 
@@ -13,9 +14,78 @@ function showChatView(show) {
     switchView(show ? 'chat' : 'monitor');
 }
 
+// ── Session Management ──
+
+async function loadSessionList() {
+    try {
+        const resp = await fetch('/api/dashboard/sessions?limit=50');
+        const data = await resp.json();
+        const list = document.getElementById('chat-session-list');
+        list.innerHTML = '';
+        let found = false;
+        for (const s of data.sessions || []) {
+            const item = document.createElement('div');
+            const isActive = s.conversation_id === currentSessionId;
+            if (isActive) found = true;
+            item.className = 'session-item' + (isActive ? ' active' : '');
+            const title = s.title || s.conversation_id;
+            const dt = s.last_activity ? new Date(s.last_activity * 1000).toLocaleString() : '';
+            const turns = s.turn_count || 0;
+            item.innerHTML = `<div class="si-title-row"><span class="si-title">${escHtml(title.substring(0, 50))}</span>
+                <button class="si-del-btn" title="Delete session">✕</button></div>
+                <div class="si-meta"><span>${turns} turns</span><span>${dt}</span></div>`;
+            item.onclick = () => switchSession(s.conversation_id);
+            item.querySelector('.si-del-btn').onclick = (e) => {
+                e.stopPropagation();
+                deleteSession(s.conversation_id);
+            };
+            list.appendChild(item);
+        }
+        // Always show current session if not in list (legacy session)
+        if (!found && currentSessionId) {
+            const item = document.createElement('div');
+            item.className = 'session-item active';
+            item.innerHTML = `<div class="si-title-row"><span class="si-title">${escHtml(currentSessionId)}</span></div>
+                <div class="si-meta"><span>current</span></div>`;
+            item.onclick = () => switchSession(currentSessionId);
+            list.prepend(item);
+        }
+    } catch (e) {
+        console.error('Failed to load sessions', e);
+    }
+}
+
+async function createNewSession() {
+    try {
+        const resp = await fetch('/api/dashboard/sessions', { method: 'POST' });
+        const data = await resp.json();
+        if (data.conversation_id) {
+            await switchSession(data.conversation_id);
+        }
+    } catch (e) {
+        console.error('Failed to create session', e);
+    }
+}
+
+async function switchSession(convId) {
+    // Clear current messages
+    const container = document.getElementById('chat-messages');
+    const emptyState = document.getElementById('chat-empty-state');
+    container.querySelectorAll('.msg-bubble, .typing-indicator').forEach(m => m.remove());
+    currentSessionId = convId;
+    chatConvId = convId;
+    emptyState.style.display = 'flex';
+    // Reload session list to update active highlight
+    await loadSessionList();
+    // Load messages
+    await loadChatHistory();
+    scrollChat();
+}
+
 async function loadChatHistory() {
     try {
-        const resp = await fetch('/api/dashboard/chat-history?conversation_id=' + encodeURIComponent(chatConvId));
+        // Try ChatSessionStore first
+        const resp = await fetch('/api/dashboard/sessions/' + encodeURIComponent(currentSessionId) + '/messages');
         const data = await resp.json();
         const container = document.getElementById('chat-messages');
         const emptyState = document.getElementById('chat-empty-state');
@@ -23,12 +93,39 @@ async function loadChatHistory() {
         msgs.forEach(m => m.remove());
 
         if (!data.messages || data.messages.length === 0) {
+            // Fallback to legacy chat-history
+            const resp2 = await fetch('/api/dashboard/chat-history?conversation_id=' + encodeURIComponent(chatConvId));
+            const data2 = await resp2.json();
+            if (data2.messages && data2.messages.length > 0) {
+                emptyState.style.display = 'none';
+                for (const msg of data2.messages) {
+                    appendMessage(msg.role, msg.content, false, msg.metrics, msg.timestamp);
+                }
+                scrollChat();
+                return;
+            }
             emptyState.style.display = 'flex';
             return;
         }
         emptyState.style.display = 'none';
         for (const msg of data.messages) {
-            appendMessage(msg.role, msg.content, false, msg.metrics);
+            // Convert ChatSessionStore format to metrics display format
+            const ts = msg.timestamp ? msg.timestamp * 1000 : null; // Unix → JS timestamp
+            const promptTok = msg.prompt_tokens || 0;
+            const completionTok = msg.completion_tokens || 0;
+            const durationMs = msg.duration_ms || 0;
+            let metrics = null;
+            if (durationMs > 0 || promptTok + completionTok > 0) {
+                const tokPerSec = durationMs > 0
+                    ? Math.round((completionTok / (durationMs / 1000)) * 10) / 10
+                    : 0;
+                metrics = {
+                    ttft_ms: durationMs,
+                    tok_per_sec: tokPerSec,
+                    tokens: promptTok + completionTok,
+                };
+            }
+            appendMessage(msg.role, msg.content, false, metrics, ts);
         }
         scrollChat();
     } catch (e) {
@@ -36,7 +133,31 @@ async function loadChatHistory() {
     }
 }
 
-function appendMessage(role, content, isStreaming, metrics) {
+async function deleteSession(convId) {
+    if (!confirm('Delete this session and all its messages?')) return;
+    try {
+        const resp = await fetch('/api/dashboard/sessions/' + encodeURIComponent(convId), { method: 'DELETE' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        // If deleting the currently active session, create a new one
+        if (convId === currentSessionId) {
+            await createNewSession();
+        } else {
+            await loadSessionList();
+        }
+    } catch (e) {
+        console.error('Failed to delete session', e);
+        alert('Failed to delete session: ' + e.message);
+    }
+}
+
+function escHtml(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function appendMessage(role, content, isStreaming, metrics, timestamp) {
     const container = document.getElementById('chat-messages');
     const emptyState = document.getElementById('chat-empty-state');
     emptyState.style.display = 'none';
@@ -67,15 +188,30 @@ function appendMessage(role, content, isStreaming, metrics) {
     contentDiv.innerHTML = renderMarkdown(content || '');
     bubble.appendChild(contentDiv);
 
+    // Determine display timestamp
+    let timeStr;
+    if (timestamp) {
+        const d = new Date(timestamp);
+        if (!isNaN(d.getTime())) {
+            timeStr = d.toLocaleTimeString();
+        } else {
+            // Could be a formatted string like "2024-01-15 10:30:00"
+            const parsed = new Date(timestamp.replace(' ', 'T'));
+            timeStr = !isNaN(parsed.getTime()) ? parsed.toLocaleTimeString() : timestamp;
+        }
+    } else {
+        timeStr = new Date().toLocaleTimeString();
+    }
+
     const meta = document.createElement('div');
     meta.className = 'msg-meta';
     if (role === 'assistant' && metrics && metrics.ttft_ms != null) {
         const tokStr = (metrics.tok_per_sec != null)
             ? `<span style="color:var(--primary);font-family:'JetBrains Mono',monospace;font-size:0.65rem;">TTFT ${metrics.ttft_ms}ms · ${metrics.tok_per_sec} tok/s · ${metrics.tokens || '?'} tok</span>`
             : `<span style="color:var(--text-muted);font-size:0.65rem;">TTFT ${metrics.ttft_ms}ms</span>`;
-        meta.innerHTML = `${new Date().toLocaleTimeString()} · ${tokStr}`;
+        meta.innerHTML = `${timeStr} · ${tokStr}`;
     } else {
-        meta.textContent = new Date().toLocaleTimeString();
+        meta.textContent = timeStr;
     }
     bubble.appendChild(meta);
     container.appendChild(bubble);

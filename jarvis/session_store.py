@@ -169,6 +169,15 @@ class ChatSessionStore:
         items.sort(key=lambda x: x.get(sort_by, 0) or 0, reverse=reverse)
         return items[:limit]
 
+    def delete_session(self, conv_id: str) -> bool:
+        """Elimina una sessione e tutti i suoi turni."""
+        if conv_id not in self._sessions:
+            return False
+        self._sessions.pop(conv_id, None)
+        self._session_meta.pop(conv_id, None)
+        logger.info(f"🗑️ SessionStore: eliminata sessione {conv_id}")
+        return True
+
     def search_sessions(
         self, query: str, user_id: Optional[str] = None,
         limit: int = 20,

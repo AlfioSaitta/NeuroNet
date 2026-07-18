@@ -261,6 +261,32 @@ class ChatStreamRequest(BaseModel):
 def _get_session(conversation_id: str) -> deque:
     if conversation_id not in _chat_sessions:
         _chat_sessions[conversation_id] = deque(maxlen=MAX_HISTORY)
+        # Prova a caricare la cronologia dal ChatSessionStore persistente
+        try:
+            store = getattr(state, 'chat_session_store', None)
+            if store:
+                messages = store.get_session(conversation_id)
+                if messages:
+                    for msg in messages:
+                        prompt_tok = msg.get("prompt_tokens", 0) or 0
+                        completion_tok = msg.get("completion_tokens", 0) or 0
+                        duration_ms = msg.get("duration_ms", 0) or 0
+                        total_tok = prompt_tok + completion_tok
+                        tok_per_sec = round(completion_tok / max(duration_ms / 1000, 0.001), 1) if duration_ms > 0 else 0
+                        entry = {
+                            "role": msg.get("role", "user"),
+                            "content": msg.get("content", ""),
+                            "timestamp": msg.get("datetime", "") or "",
+                            "metrics": {
+                                "ttft_ms": duration_ms,
+                                "tok_per_sec": tok_per_sec,
+                                "tokens": total_tok,
+                                "chars": len(msg.get("content", "") or ""),
+                            } if total_tok > 0 or duration_ms > 0 else None,
+                        }
+                        _chat_sessions[conversation_id].append(entry)
+        except Exception as e:
+            logger.debug(f"Could not load session {conversation_id} from store: {e}")
     return _chat_sessions[conversation_id]
 
 
@@ -1143,6 +1169,62 @@ async def restart_ingestion():
 # ═══════════════════════════════════════════════════════════════
 
 
+@dashboard_router.get("/api/dashboard/sessions")
+async def list_dashboard_sessions(limit: int = 50):
+    """List all chat sessions from ChatSessionStore."""
+    store = getattr(state, 'chat_session_store', None)
+    if not store:
+        return JSONResponse({"sessions": []})
+    try:
+        sessions = store.list_sessions(limit=limit)
+        return JSONResponse({"sessions": sessions})
+    except Exception as e:
+        logger.warning(f"Error listing sessions: {e}")
+        return JSONResponse({"sessions": []})
+
+
+@dashboard_router.get("/api/dashboard/sessions/{conversation_id}/messages")
+async def get_dashboard_session_messages(conversation_id: str):
+    """Get all messages for a specific session."""
+    store = getattr(state, 'chat_session_store', None)
+    if not store:
+        return JSONResponse({"messages": [], "error": "Session store not available"})
+    try:
+        messages = store.get_session(conversation_id)
+        return JSONResponse({"messages": messages, "conversation_id": conversation_id})
+    except Exception as e:
+        logger.warning(f"Error getting session {conversation_id}: {e}")
+        return JSONResponse({"messages": [], "error": str(e)})
+
+
+@dashboard_router.post("/api/dashboard/sessions")
+async def create_dashboard_session():
+    """Create a new chat session, returns the conversation_id."""
+    import uuid
+    conv_id = str(uuid.uuid4())[:12]
+    return JSONResponse({"conversation_id": conv_id})
+
+
+@dashboard_router.delete("/api/dashboard/sessions/{conversation_id}")
+async def delete_dashboard_session(conversation_id: str):
+    """Delete a chat session from ChatSessionStore."""
+    store = getattr(state, 'chat_session_store', None)
+    if not store:
+        return JSONResponse({"error": "Session store not available"}, status_code=503)
+    try:
+        ok = store.delete_session(conversation_id)
+        # Pulisci anche il deque in memoria
+        _chat_sessions.pop(conversation_id, None)
+        # Persisti su disco
+        store.persist("./data/sessions.json")
+        if ok:
+            return JSONResponse({"status": "ok", "conversation_id": conversation_id})
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    except Exception as e:
+        logger.warning(f"Error deleting session {conversation_id}: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @dashboard_router.get("/api/dashboard/chat-history")
 async def get_chat_history(conversation_id: str = "dashboard_default"):
     """Return message history for the dashboard chat."""
@@ -1250,6 +1332,41 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
                 "timestamp": datetime.now(UTC).isoformat(),
                 "metrics": {"ttft_ms": ttft_ms, "tok_per_sec": tok_per_sec, "tokens": estimated_tokens, "chars": char_count}
             })
+
+        # Save to persistent ChatSessionStore
+        try:
+            store = getattr(state, 'chat_session_store', None)
+            if store:
+                from session_store import MessageTurn
+                # User turn
+                user_turn = MessageTurn(
+                    role="user",
+                    content=payload.message,
+                    timestamp=time.time(),
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    user_id=current_user_id,
+                )
+                store.add_turn(user_turn)
+                # Assistant turn
+                if clean_text:
+                    asst_turn = MessageTurn(
+                        role="assistant",
+                        content=clean_text,
+                        timestamp=time.time(),
+                        request_id=request_id,
+                        conversation_id=conversation_id,
+                        user_id=current_user_id,
+                        prompt_tokens=0,
+                        completion_tokens=estimated_tokens,
+                        duration_ms=total_duration_ms,
+                        model=getattr(engine, 'current_model_name', ''),
+                    )
+                    store.add_turn(asst_turn)
+                # Persistenza immediata su disco
+                store.persist("./data/sessions.json")
+        except Exception as e:
+            logger.warning(f"Failed to save to ChatSessionStore: {e}")
 
         # Process tags in background
         if full_text:

@@ -881,6 +881,8 @@ def _save_session_turn(tracer, role, content, user_id, conversation_id,
             gatekeeper_intent=_gk_intent,
         )
         state.chat_session_store.add_turn(turn)
+        # Persistenza immediata su disco per non perdere messaggi in caso di crash
+        state.chat_session_store.persist("./data/sessions.json")
     except Exception as e:
         logger.warning(f"SessionStore save error: {e}")
 

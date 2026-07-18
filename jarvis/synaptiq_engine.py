@@ -57,6 +57,11 @@ class SynaptiqEngine:
         self._last_analysis_time: dict[str, float] = {}
         self._pending_tasks: dict[str, asyncio.Task] = {}
 
+    @property
+    def is_initialized(self) -> bool:
+        """Whether initialize() has completed successfully."""
+        return self._initialized
+
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     async def initialize(self) -> None:
