@@ -451,26 +451,29 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         return messages
 
     # ════════════════════════════════════════════════════════════════
-    # CONTEXT GATHERING: Memoria + RAG + Web
+    # CONTEXT GATHERING: Memoria + RAG + Synaptiq (parallelo) + Web
     # ════════════════════════════════════════════════════════════════
     tracer.start_step("context_gathering")
 
-    if state.memory:
+    # ── Raccolta Memoria (indipendente) ──
+    async def _gather_memory():
+        if not state.memory:
+            return ""
         try:
             loop = asyncio.get_running_loop()
             _mem_limit = _user_override_mem_count if _user_override_mem_count > 0 else 5
             memory_results = []
 
-            general_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id}, limit=_mem_limit)
-            general_res = await loop.run_in_executor(state.mem0_executor, general_search)
-            if general_res:
-                memory_results.append(general_res)
+            gen_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id}, limit=_mem_limit)
+            gen_res = await loop.run_in_executor(state.mem0_executor, gen_search)
+            if gen_res:
+                memory_results.append(gen_res)
 
             if active_project:
-                project_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id, "project": active_project}, limit=_mem_limit)
-                project_res = await loop.run_in_executor(state.mem0_executor, project_search)
-                if project_res:
-                    memory_results.append(project_res)
+                proj_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id, "project": active_project}, limit=_mem_limit)
+                proj_res = await loop.run_in_executor(state.mem0_executor, proj_search)
+                if proj_res:
+                    memory_results.append(proj_res)
 
             all_memories = []
             if isinstance(memory_results, list):
@@ -478,14 +481,15 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                     extracted = extract_memories(r)
                     if extracted:
                         all_memories.append(extracted)
-            mem_ctx = "\n".join(all_memories) if all_memories else ""
+            return "\n".join(all_memories) if all_memories else ""
         except Exception as e:
             logger.warning(f"Errore memory search: {e}")
+            return ""
 
-    # RAG context
-    if latest_msg.startswith("/web "):
-        rag_ctx = ""
-    else:
+    # ── Raccolta RAG (indipendente) ──
+    async def _gather_rag():
+        if latest_msg.startswith("/web "):
+            return ""
         full_files_content = ""
         if _is_project_query:
             matches = set(re.findall(r'\b([\w\.\-/]+\.(?:py|js|ts|jsx|tsx|go|c|cpp|h|hpp|rs|sql|yaml|yml|md|json))\b', latest_msg))
@@ -509,22 +513,35 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
 
         if not _is_meta_query:
             _rag_project = _user_override_focus if _user_override_focus else active_project
-            rag_ctx = await search_documents(clean_msg, is_project_query=_is_project_query, project_name=_rag_project)
+            rag_ctx_local = await search_documents(clean_msg, is_project_query=_is_project_query, project_name=_rag_project)
+        else:
+            rag_ctx_local = ""
         if full_files_content:
-            rag_ctx = full_files_content + "\n" + rag_ctx
+            rag_ctx_local = full_files_content + "\n" + rag_ctx_local
+        return rag_ctx_local
 
-        # Synaptiq structural context (solo per query di progetto)
-        cg_ctx = ""
-        if _is_project_query and synaptiq_engine and synaptiq_engine.is_initialized:
-            try:
-                sy_raw = await synaptiq_engine.pack_snippets(clean_msg, limit=8)
-                if sy_raw and len(sy_raw) > 100:
-                    cg_ctx = f"\n<SYNAPTIQ>\n{sy_raw[:3000]}\n</SYNAPTIQ>\n"
-                    logger.info(f"🧠 Synaptiq context: {len(sy_raw)} chars")
-            except Exception as e:
-                logger.debug(f"Synaptiq explore non disponibile: {e}")
+    # ── Raccolta Synaptiq (indipendente) ──
+    async def _gather_synaptiq():
+        if latest_msg.startswith("/web "):
+            return ""
+        if not (_is_project_query and synaptiq_engine and synaptiq_engine.is_initialized):
+            return ""
+        try:
+            sy_raw = await synaptiq_engine.pack_snippets(clean_msg, limit=8)
+            if sy_raw and len(sy_raw) > 100:
+                logger.info(f"🧠 Synaptiq context: {len(sy_raw)} chars")
+                return f"\n<SYNAPTIQ>\n{sy_raw[:3000]}\n</SYNAPTIQ>\n"
+        except Exception as e:
+            logger.debug(f"Synaptiq explore non disponibile: {e}")
+        return ""
 
-        # Auto web discovery
+    # Esegui memoria, RAG e Synaptiq in parallelo
+    mem_task = asyncio.create_task(_gather_memory())
+    rag_task = asyncio.create_task(_gather_rag())
+    synaptiq_task = asyncio.create_task(_gather_synaptiq())
+    mem_ctx, rag_ctx, cg_ctx = await asyncio.gather(mem_task, rag_task, synaptiq_task)
+
+    # Auto web discovery (dipende da rag_ctx → non parallelizzabile con RAG)
     _is_short_greeting = len(clean_msg.strip()) < 20 and not _is_project_query
     if not _is_short_greeting and not rag_ctx.strip() and not web_ctx:
         search_query = clean_msg

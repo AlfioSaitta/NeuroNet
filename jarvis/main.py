@@ -134,7 +134,7 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(engine.load_models)
     logger.info("Modelli Llama caricati in locale (No Ollama).")
 
-    # Inizializzazione provider esterni (Gemini, ecc.)
+    # Inizializzazione provider esterni (Gemini, ecc.) — sincrono, veloce
     try:
         router = engine.init_provider_router()
         if router:
@@ -146,59 +146,154 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"ProviderRouter: errore inizializzazione: {e}")
 
+    # HTTP client — subito dopo, serve a molti moduli
     state.http_client = httpx.AsyncClient(timeout=300.0)
-    if QDRANT_HOST == "local":
-        state.qdrant = AsyncQdrantClient(path="./data/qdrant_local")
-        logger.info("[SYSTEM] Qdrant inizializzato in modalità LOCALE (in-process).")
-    else:
-        state.qdrant = AsyncQdrantClient(host=QDRANT_HOST, port=6333)
-        logger.info(f"[SYSTEM] Qdrant inizializzato in modalità HTTP (host: {QDRANT_HOST}).")
-    
-    # Pulizia automatica delle vecchie migrazioni Qdrant
-    await cleanup_old_collections()
 
-    try:
-        await state.qdrant.create_collection(
-            collection_name=f"semantic_cache_{VECTOR_DB_VERSION}",
-            vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
-        )
-        logger.info(f"[SYSTEM] Collezione semantic_cache_{VECTOR_DB_VERSION} creata con successo.")
-    except Exception as e:
-        # Ignore error if collection already exists
-        if "already exists" not in str(e).lower() and "409" not in str(e):
-            logger.warning(f"Errore silenziato in create_collection: {e}")
+    # ────────────────────────────────────────────────────────────────────
+    # Blocchi async indipendenti: Qdrant, Telegram, MCP in parallelo
+    # ────────────────────────────────────────────────────────────────────
 
-    # ── Collezione app_context per persistenza contesto progetto ──
-    try:
-        await state.qdrant.create_collection(
-            collection_name=state.APP_CONTEXT_COLLECTION,
-            vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
-        )
-        logger.info(f"[SYSTEM] Collezione {state.APP_CONTEXT_COLLECTION} creata con successo.")
-    except Exception as e:
-        if "already exists" not in str(e).lower() and "409" not in str(e):
-            logger.warning(f"Errore silenziato in create_collection app_context: {e}")
+    async def _init_qdrant():
+        """Inizializza Qdrant, crea collezioni, ripristina contesti."""
+        if QDRANT_HOST == "local":
+            state.qdrant = AsyncQdrantClient(path="./data/qdrant_local")
+            logger.info("[SYSTEM] Qdrant inizializzato in modalità LOCALE (in-process).")
+        else:
+            state.qdrant = AsyncQdrantClient(host=QDRANT_HOST, port=6333)
+            logger.info(f"[SYSTEM] Qdrant inizializzato in modalità HTTP (host: {QDRANT_HOST}).")
+        
+        await cleanup_old_collections()
 
-    # ── Ripristino contesto progetto persistito su Qdrant ──
-    try:
-        await state.restore_project_contexts_from_qdrant()
-    except Exception as e:
-        logger.warning(f"Errore restore contesti progetto: {e}")
+        try:
+            await state.qdrant.create_collection(
+                collection_name=f"semantic_cache_{VECTOR_DB_VERSION}",
+                vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
+            )
+            logger.info(f"[SYSTEM] Collezione semantic_cache_{VECTOR_DB_VERSION} creata con successo.")
+        except Exception as e:
+            if "already exists" not in str(e).lower() and "409" not in str(e):
+                logger.warning(f"Errore silenziato in create_collection: {e}")
 
-    # ==========================================================================
-    # PULIZIA SYMLINK IN DOC_DIR
-    # ==========================================================================
-    # I symlink in DOC_DIR non sono più creati: con followlinks=False in tutti
-    # gli os.walk di rag.py, il RAG e il project tree usano EXTERNAL_PROJECTS
-    # tramite percorso diretto. I symlink facevano sì che il PollingObserver
-    # del watchdog (che segue sempre i symlink) ricadesse in 119k file esterni
-    # ogni secondo, consumando ~56% CPU.
-    if os.path.exists(DOC_DIR):
-        for item in os.listdir(DOC_DIR):
-            item_path = os.path.join(DOC_DIR, item)
-            if os.path.islink(item_path):
-                os.remove(item_path)
-    # ==========================================================================
+        try:
+            await state.qdrant.create_collection(
+                collection_name=state.APP_CONTEXT_COLLECTION,
+                vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
+            )
+            logger.info(f"[SYSTEM] Collezione {state.APP_CONTEXT_COLLECTION} creata con successo.")
+        except Exception as e:
+            if "already exists" not in str(e).lower() and "409" not in str(e):
+                logger.warning(f"Errore silenziato in create_collection app_context: {e}")
+
+        try:
+            await state.restore_project_contexts_from_qdrant()
+        except Exception as e:
+            logger.warning(f"Errore restore contesti progetto: {e}")
+
+        # Pulizia symlink DOC_DIR
+        if os.path.exists(DOC_DIR):
+            for item in os.listdir(DOC_DIR):
+                item_path = os.path.join(DOC_DIR, item)
+                if os.path.islink(item_path):
+                    os.remove(item_path)
+
+    async def _init_telegram():
+        """Inizializza bot Telegram (solo se configurato)."""
+        if not (TELEGRAM_ENABLED and TELEGRAM_TOKEN and ALLOWED_USERS):
+            logger.info("📱 Bot Telegram disabilitato (Manca Token o Utenti Autorizzati).")
+            return
+        try:
+            from telegram.error import BadRequest, NetworkError
+
+            class _RetryHTTPXRequest(HTTPXRequest):
+                """HTTPXRequest con retry 5x su errori di rete (DNS, timeout, OSError)."""
+                async def _request_wrapper(self, url, method, **kw):
+                    for _attempt in range(5):
+                        try:
+                            return await super()._request_wrapper(url, method, **kw)
+                        except (OSError, NetworkError) as _e:
+                            if isinstance(_e, BadRequest):
+                                raise
+                            if _attempt < 4:
+                                logger.warning(f"DNS/Network error su Telegram API, retry {_attempt+2}/5: {_e}")
+                                await asyncio.sleep(2 ** _attempt + 0.5 * _attempt)
+                            else:
+                                raise
+
+            _base_req = _RetryHTTPXRequest(
+                read_timeout=120.0, write_timeout=120.0, connect_timeout=60.0,
+                pool_timeout=60.0, connection_pool_size=50,
+            )
+            logger.info("📡 Telegram HTTP client con retry DNS (5 tentativi) attivo")
+
+            state.telegram_app = (
+                ApplicationBuilder()
+                .token(TELEGRAM_TOKEN)
+                .request(_base_req)
+                .build()
+            )
+            state.telegram_app.add_handler(TypeHandler(Update, auth_middleware), group=-1)
+            state.telegram_app.add_handler(CommandHandler("start", telegram_start))
+            state.telegram_app.add_handler(CallbackQueryHandler(telegram_callback_handler))
+            state.telegram_app.add_handler(MessageHandler(
+                (filters.TEXT | filters.VOICE | filters.AUDIO | filters.Document.ALL) & (~filters.COMMAND),
+                handle_telegram_message
+            ))
+
+            await state.telegram_app.initialize()
+            await state.telegram_app.bot.set_my_commands([
+                BotCommand("start", "Mostra il menu principale a pulsanti")
+            ])
+            await state.telegram_app.start()
+            await state.telegram_app.updater.start_polling(drop_pending_updates=True)
+            logger.info("📱 Bot Telegram avviato all'interno del Proxy.")
+        except Exception as e:
+            logger.error(f"⚠️ Impossibile avviare Telegram: {e}")
+
+    async def _init_mcp():
+        """Inizializza server MCP (solo se configurato)."""
+        if not (MCP_ENABLED and MCP_AUTO_INIT):
+            return
+        try:
+            from mcp_client import init_mcp_from_config, get_mcp_manager
+            total = await init_mcp_from_config()
+            if total > 0:
+                logger.info(f"🔌 MCP: {total} servers initialized from config files")
+
+                if MCP_ENABLED:
+                    try:
+                        from skills_manager import register_skill_mcp_servers
+                        reg_count = register_skill_mcp_servers()
+                        if reg_count > 0:
+                            logger.info(f"🔌 MCP: {reg_count} skill-embedded servers registered")
+                            await get_mcp_manager().initialize_all()
+                    except ImportError:
+                        pass
+
+                from agent_tools import refresh_mcp_tools_async
+                mcp_count = await refresh_mcp_tools_async()
+                if mcp_count > 0:
+                    logger.info(f"🔌 MCP: {mcp_count} tools injected into TOOLS_SCHEMA")
+
+                mgr = get_mcp_manager()
+                for srv_name in mgr.list_servers():
+                    logger.info(f"  ├─ MCP Server: {srv_name}")
+
+        except ImportError as e:
+            logger.debug(f"MCP client not available (non-critical): {e}")
+        except Exception as e:
+            logger.warning(f"MCP initialization: {e}")
+
+    # Esegui i 3 blocchi async in parallelo
+    await asyncio.gather(
+        _init_qdrant(),
+        _init_telegram(),
+        _init_mcp(),
+        return_exceptions=True,
+    )
+
+    # ────────────────────────────────────────────────────────────────────
+    # Passo 2: servizi che dipendono da Qdrant + fire-and-forget
+    # ────────────────────────────────────────────────────────────────────
 
     # Avvio asincrono di Mem0 (con ritardo per il loopback proxy)
     task_mem0 = asyncio.create_task(init_mem0_delayed())
@@ -206,8 +301,6 @@ async def lifespan(app: FastAPI):
     task_mem0.add_done_callback(state.background_tasks.discard)
 
     # Ingestion iniziale documenti — ATTENDE il completamento del warmup Mem0
-    # (spaCy/BM25 lazy init) prima di processare workspace e aggiornare nodi.
-    # Questo evita race condition in cui RAG scrive chunk prima che Mem0 sia pronto.
     async def _ingest_after_mem0():
         await task_mem0
         await ingest_local_documents()
@@ -217,16 +310,11 @@ async def lifespan(app: FastAPI):
     task_ingest.add_done_callback(state.background_tasks.discard)
 
     # Watchdog filesystem (PollingObserver per compatibilità Docker bind mount / symlink)
-    # Nota: usiamo PollingObserver (non Observer/inotify) perché inotify:
-    #   - Non segue i symlink dentro DOC_DIR
-    #   - Non si propaga in modo affidabile attraverso i bind mount Docker (HOST_FS_PREFIX)
-    # PollingObserver periodicamente esegue os.stat() sui file — funziona sempre.
     if WATCHDOG_ENABLED:
         worker_task = asyncio.create_task(rag_queue_worker())
         state.background_tasks.add(worker_task)
         observer = Observer(timeout=WATCHDOG_TIMEOUT)
         
-        # Watch #1: DOC_DIR (legacy — skip se non esiste)
         if os.path.isdir(DOC_DIR):
             handler_doc = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, DOC_DIR)
             observer.schedule(handler_doc, DOC_DIR, recursive=True)
@@ -234,7 +322,6 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning(f"⚠️ DOC_DIR non trovato ({DOC_DIR}), watchdog su DOC_DIR saltato.")
         
-        # Watch #2: per-project (default) o full WORKSPACE_DIR
         if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
             if WATCHDOG_WATCH_MODE == "per_project":
                 for proj_dir in WORKSPACE_PROJECTS:
@@ -251,7 +338,6 @@ async def lifespan(app: FastAPI):
         observer.start()
         logger.info(f"👀 Watchdog PollingObserver Partito (timeout={WATCHDOG_TIMEOUT}s, mode={WATCHDOG_WATCH_MODE}).")
 
-        # Health monitor watchdog: verifica ogni 60s che i thread observer siano vivi
         async def watchdog_health():
             global observer
             while True:
@@ -264,7 +350,8 @@ async def lifespan(app: FastAPI):
                     if not emitter_alive or not dispatch_alive:
                         logger.warning(f"Watchdog: emitter={emitter_alive} dispatch={dispatch_alive} coda={qsize} — riavvio...")
                         observer.stop()
-                        observer.join(timeout=5)
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(None, lambda: observer.join(timeout=5))
                         observer = Observer(timeout=WATCHDOG_TIMEOUT)
                         if os.path.isdir(DOC_DIR):
                             new_handler_doc = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, DOC_DIR)
@@ -288,68 +375,6 @@ async def lifespan(app: FastAPI):
         state.background_tasks.add(health_task)
         health_task.add_done_callback(state.background_tasks.discard)
 
-    # Bot Telegram
-    if TELEGRAM_ENABLED and TELEGRAM_TOKEN and ALLOWED_USERS:
-        try:
-            # HTTPXRequest con retry automatico su OSError (DNS/network sporadici)
-            # PTB 21.x: _request_wrapper è un metodo, non un attributo → subclassing invece di monkey-patch
-            from telegram.error import BadRequest, NetworkError
-
-            class _RetryHTTPXRequest(HTTPXRequest):
-                """HTTPXRequest con retry 5x su errori di rete (DNS, timeout, OSError)."""
-
-                async def _request_wrapper(self, url, method, **kw):
-                    for _attempt in range(5):
-                        try:
-                            return await super()._request_wrapper(url, method, **kw)
-                        except (OSError, NetworkError) as _e:
-                            if isinstance(_e, BadRequest):
-                                raise
-                            if _attempt < 4:
-                                logger.warning(
-                                    f"DNS/Network error su Telegram API, retry {_attempt+2}/5: {_e}"
-                                )
-                                await asyncio.sleep(2 ** _attempt + 0.5 * _attempt)
-                            else:
-                                raise
-
-            _base_req = _RetryHTTPXRequest(
-                read_timeout=120.0,
-                write_timeout=120.0,
-                connect_timeout=60.0,
-                pool_timeout=60.0,
-                connection_pool_size=50,
-            )
-            logger.info("📡 Telegram HTTP client con retry DNS (5 tentativi) attivo")
-
-            state.telegram_app = (
-                ApplicationBuilder()
-                .token(TELEGRAM_TOKEN)
-                .request(_base_req)
-                .build()
-            )
-            # Middleware di sicurezza per bloccare utenti non autorizzati su tutti gli handler
-            state.telegram_app.add_handler(TypeHandler(Update, auth_middleware), group=-1)
-
-            state.telegram_app.add_handler(CommandHandler("start", telegram_start))
-            state.telegram_app.add_handler(CallbackQueryHandler(telegram_callback_handler))
-            state.telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VOICE | filters.AUDIO | filters.Document.ALL) & (~filters.COMMAND), handle_telegram_message))
-
-            await state.telegram_app.initialize()
-            
-            # Setup Menu Bot (Ora limitato a /start poiché usiamo la tastiera reply)
-            await state.telegram_app.bot.set_my_commands([
-                BotCommand("start", "Mostra il menu principale a pulsanti")
-            ])
-
-            await state.telegram_app.start()
-            await state.telegram_app.updater.start_polling(drop_pending_updates=True)
-            logger.info("📱 Bot Telegram avviato all'interno del Proxy.")
-        except Exception as e:
-            logger.error(f"⚠️ Impossibile avviare Telegram: {e}")
-    else:
-        logger.info("📱 Bot Telegram disabilitato (Manca Token o Utenti Autorizzati).")
-
     # Avvio Multi-Userbot MTProto
     try:
         task_userbots = asyncio.create_task(auto_start_existing())
@@ -364,45 +389,6 @@ async def lifespan(app: FastAPI):
         init_scheduler()
     except Exception as e:
         logger.error(f"Errore inizializzazione cron scheduler: {e}\n{traceback.format_exc()}")
-
-    # ═══════════════════════════════════════════
-    # MCP (Model Context Protocol) Initialization
-    # ═══════════════════════════════════════════
-    if MCP_ENABLED and MCP_AUTO_INIT:
-        try:
-            from mcp_client import init_mcp_from_config, get_mcp_manager
-            # Scan default config paths (.mcp.json, etc.)
-            total = await init_mcp_from_config()
-            if total > 0:
-                logger.info(f"🔌 MCP: {total} servers initialized from config files")
-
-                # Register skill-embedded MCP servers
-                if MCP_ENABLED:
-                    try:
-                        from skills_manager import register_skill_mcp_servers
-                        reg_count = register_skill_mcp_servers()
-                        if reg_count > 0:
-                            logger.info(f"🔌 MCP: {reg_count} skill-embedded servers registered")
-                            # Re-init to pick up new servers
-                            await get_mcp_manager().initialize_all()
-                    except ImportError:
-                        pass
-
-                # Refresh MCP tools in TOOLS_SCHEMA
-                from agent_tools import refresh_mcp_tools_async
-                mcp_count = await refresh_mcp_tools_async()
-                if mcp_count > 0:
-                    logger.info(f"🔌 MCP: {mcp_count} tools injected into TOOLS_SCHEMA")
-
-                # Log all registered servers
-                mgr = get_mcp_manager()
-                for srv_name in mgr.list_servers():
-                    logger.info(f"  ├─ MCP Server: {srv_name}")
-
-        except ImportError as e:
-            logger.debug(f"MCP client not available (non-critical): {e}")
-        except Exception as e:
-            logger.warning(f"MCP initialization: {e}")
 
     # Avvio background collector telemetria (GPU, health, Qdrant ogni 5s)
     try:
@@ -420,14 +406,11 @@ async def lifespan(app: FastAPI):
             await synaptiq_engine.initialize()
             logger.info(f"🧬 Synaptiq Engine avviato (storage={SYNAPTIQ_STORAGE_PATH})")
 
-            # Analisi iniziale su tutti i workspace dopo il completamento del RAG ingest
             async def _synaptiq_initial_after_ingest():
                 try:
                     await task_ingest
                 except Exception as e:
-                    logger.warning(
-                        "RAG ingest fallito, Synaptiq initial analysis saltata: %s", e,
-                    )
+                    logger.warning("RAG ingest fallito, Synaptiq initial analysis saltata: %s", e)
                     return
                 projects = list(WORKSPACE_PROJECTS) + parse_external_projects()
                 await synaptiq_engine.run_initial_analysis(projects)
