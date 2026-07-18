@@ -98,6 +98,28 @@ class PipelineTrace:
     compressed_text: Optional[str] = None
     llm_response: Optional[str] = None
 
+    # ── Nuovi campi telemetria estesa ──
+    conversation_id: str = ""
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    rag_ctx_len: int = 0
+    rag_project: Optional[str] = None
+    memory_records: int = 0
+    memory_search_ms: float = 0.0
+    web_search_performed: bool = False
+    web_search_duration_ms: float = 0.0
+    synaptiq_performed: bool = False
+    synaptiq_chars: int = 0
+    compression_raw_size: int = 0
+    compression_is_raw: bool = False
+    is_streaming: bool = False
+    model_used: str = ""
+    agentic_loop_depth: int = 0
+    tool_names: Optional[list[str]] = None
+    gatekeeper_model: str = ""
+    ttft_ms: Optional[float] = None
+    generation_speed_tok_s: Optional[float] = None
+
     def to_dict(self) -> dict:
         d = {
             "request_id": self.request_id,
@@ -111,6 +133,27 @@ class PipelineTrace:
             "gatekeeper": self.gatekeeper,
             "error": self.error,
             "tool_calls_count": self.tool_calls_count,
+            # Nuovi campi
+            "conversation_id": self.conversation_id,
+            "total_prompt_tokens": self.total_prompt_tokens,
+            "total_completion_tokens": self.total_completion_tokens,
+            "rag_ctx_len": self.rag_ctx_len,
+            "rag_project": self.rag_project,
+            "memory_records": self.memory_records,
+            "memory_search_ms": round(self.memory_search_ms, 1),
+            "web_search_performed": self.web_search_performed,
+            "web_search_duration_ms": round(self.web_search_duration_ms, 1),
+            "synaptiq_performed": self.synaptiq_performed,
+            "synaptiq_chars": self.synaptiq_chars,
+            "compression_raw_size": self.compression_raw_size,
+            "compression_is_raw": self.compression_is_raw,
+            "is_streaming": self.is_streaming,
+            "model_used": self.model_used,
+            "agentic_loop_depth": self.agentic_loop_depth,
+            "tool_names": self.tool_names,
+            "gatekeeper_model": self.gatekeeper_model,
+            "ttft_ms": round(self.ttft_ms, 1) if self.ttft_ms is not None else None,
+            "generation_speed_tok_s": round(self.generation_speed_tok_s, 2) if self.generation_speed_tok_s is not None else None,
         }
         # Includi campi prompt solo se popolati (per retrocompatibilità)
         if self.system_prompt is not None:
@@ -168,6 +211,27 @@ class PipelineTracer:
         self._user_content: Optional[str] = None
         self._compressed_text: Optional[str] = None
         self._llm_response: Optional[str] = None
+        # Nuovi campi telemetria estesa
+        self._conversation_id: str = ""
+        self._total_prompt_tokens: int = 0
+        self._total_completion_tokens: int = 0
+        self._rag_ctx_len: int = 0
+        self._rag_project: Optional[str] = None
+        self._memory_records: int = 0
+        self._memory_search_ms: float = 0.0
+        self._web_search_performed: bool = False
+        self._web_search_duration_ms: float = 0.0
+        self._synaptiq_performed: bool = False
+        self._synaptiq_chars: int = 0
+        self._compression_raw_size: int = 0
+        self._compression_is_raw: bool = False
+        self._is_streaming: bool = False
+        self._model_used: str = ""
+        self._agentic_loop_depth: int = 0
+        self._tool_names: Optional[list[str]] = None
+        self._gatekeeper_model: str = ""
+        self._ttft_ms: Optional[float] = None
+        self._generation_speed_tok_s: Optional[float] = None
 
     # ── Factory ─────────────────────────────────
 
@@ -341,6 +405,27 @@ class PipelineTracer:
             user_content=self._user_content,
             compressed_text=self._compressed_text,
             llm_response=self._llm_response,
+            # Nuovi campi
+            conversation_id=self._conversation_id,
+            total_prompt_tokens=self._total_prompt_tokens,
+            total_completion_tokens=self._total_completion_tokens,
+            rag_ctx_len=self._rag_ctx_len,
+            rag_project=self._rag_project,
+            memory_records=self._memory_records,
+            memory_search_ms=self._memory_search_ms,
+            web_search_performed=self._web_search_performed,
+            web_search_duration_ms=self._web_search_duration_ms,
+            synaptiq_performed=self._synaptiq_performed,
+            synaptiq_chars=self._synaptiq_chars,
+            compression_raw_size=self._compression_raw_size,
+            compression_is_raw=self._compression_is_raw,
+            is_streaming=self._is_streaming,
+            model_used=self._model_used,
+            agentic_loop_depth=self._agentic_loop_depth,
+            tool_names=self._tool_names,
+            gatekeeper_model=self._gatekeeper_model,
+            ttft_ms=self._ttft_ms,
+            generation_speed_tok_s=self._generation_speed_tok_s,
         )
 
         # Inserimento thread-safe nel ring buffer (state.pipeline_traces)
