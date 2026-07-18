@@ -50,7 +50,7 @@ async function fetchLogs() {
         const data = await res.json();
         if (data.logs) {
             display.textContent = data.logs.map(l => `[${l.container}] ${l.message}`).join('\n');
-            display.scrollTop = display.scrollHeight;
+            requestAnimationFrame(() => { display.scrollTop = display.scrollHeight; });
         } else if (data.error) {
             display.textContent = 'Error: ' + data.error;
         }

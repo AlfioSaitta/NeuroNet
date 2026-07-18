@@ -194,6 +194,10 @@ body {
 .view { display: none; padding: 20px 24px; flex-direction: column; gap: 20px; height: 100%; }
 .view.active { display: flex; }
 
+/* Logs view: scroll solo dentro log-display */
+#view-logs { overflow: hidden; }
+#view-logs .card.flex-col { display: flex; flex-direction: column; overflow: hidden; }
+
 /* ── Grid & Cards ── */
 .grid-container {
     display: grid;
