@@ -459,6 +459,13 @@ async def lifespan(app: FastAPI):
         except ImportError:
             pass
 
+    # Salvataggio sessioni chat su disco
+    try:
+        if state.chat_session_store:
+            state.chat_session_store.persist("./data/sessions.json")
+    except Exception as e:
+        logger.warning(f"SessionStore persist error during shutdown: {e}")
+
     await state.qdrant.close()
     await state.http_client.aclose()
 
@@ -823,6 +830,60 @@ async def get_telemetry_pending_ops():
 if not hasattr(state, '_start_time'):
     state._start_time = time.time()
 
+# Inizializzazione Chat Session Store per tracciamento sessioni complete
+from session_store import ChatSessionStore
+if state.chat_session_store is None:
+    state.chat_session_store = ChatSessionStore(max_sessions=500, max_turns_per_session=200)
+    # Prova a caricare sessioni persistenti dal disco
+    _store_path = "./data/sessions.json"
+    state.chat_session_store.load(_store_path)
+
+
+# ────────────────────────────────────────────────
+# Helper: salvataggio turno chat nel SessionStore
+# ────────────────────────────────────────────────
+
+
+def _save_session_turn(tracer, role, content, user_id, conversation_id,
+                       model="", prompt_tokens=0, completion_tokens=0,
+                       tool_calls=None, error=None):
+    """Salva un turno chat nel ChatSessionStore (fire-and-forget).
+
+    Chiamato dopo ogni risposta LLM sia in streaming che non-stream.
+    Il salvataggio è asincrono e non blocca la risposta al client.
+    """
+    if not content or not state.chat_session_store:
+        return
+    try:
+        from session_store import MessageTurn
+        _project = None
+        _gk_intent = None
+        if tracer:
+            _project = getattr(tracer, '_rag_project', None)
+            _gk = getattr(tracer, '_gatekeeper', None)
+            if _gk:
+                _gk_intent = _gk.get("intent")
+        turn = MessageTurn(
+            role=role,
+            content=content,
+            timestamp=time.time(),
+            request_id=tracer.request_id if tracer else "",
+            conversation_id=conversation_id,
+            user_id=user_id,
+            project=_project,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            duration_ms=0.0,
+            model=model,
+            has_tool_calls=bool(tool_calls),
+            tool_names=[tc.get("function", {}).get("name", "unknown") for tc in tool_calls] if tool_calls else None,
+            error=error,
+            gatekeeper_intent=_gk_intent,
+        )
+        state.chat_session_store.add_turn(turn)
+    except Exception as e:
+        logger.warning(f"SessionStore save error: {e}")
+
 
 # ═══════════════════════════════════════════
 # MCP Server v2
@@ -900,6 +961,8 @@ async def ollama_chat(payload: ChatRequest, request: Request):
     # ── Pipeline Telemetry ──
     request_id = str(uuid.uuid4())[:12] if not is_internal else None
     tracer = PipelineTracer.begin(user_message=raw_messages[-1]["content"][:200] if raw_messages else "", user_id=current_user_id) if not is_internal else None
+    if tracer:
+        tracer._conversation_id = str(conversation_id)
 
     if not is_internal:
         tracer.start_step("build_omniscient_prompt")
@@ -999,6 +1062,14 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         content = ollama_resp["message"].get("content", "")
         if tracer:
             tracer.set_llm_response(content)
+            # Popola tracer con metadati risposta
+            tracer._model_used = body["model"]
+            tracer._is_streaming = False
+            tracer._total_prompt_tokens = usage.get("prompt_tokens", 0)
+            tracer._total_completion_tokens = usage.get("completion_tokens", 0)
+            _tool_names_list = [tc.get("function", {}).get("name", "unknown") for tc in tool_calls] if tool_calls else None
+            tracer._tool_names = _tool_names_list
+            tracer._agentic_loop_depth = len(tool_calls) if tool_calls else 0
             tracer.finish()
 
         # Strip tag veloce (regex, senza handler) per la risposta immediata.
@@ -1018,6 +1089,23 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             except Exception as e:
                 logger.warning(f"⚠️ Background tag processing error: {e}")
 
+        # Salva turno nel ChatSessionStore (fire-and-forget)
+        _save_session_turn(
+            tracer=tracer, role="assistant", content=content,
+            user_id=current_user_id, conversation_id=str(conversation_id),
+            model=body["model"], prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            tool_calls=tool_calls if tool_calls else None,
+            error=None,
+        )
+        # Salva anche il messaggio utente (primo turno)
+        if raw_messages:
+            _save_session_turn(
+                tracer=tracer, role="user",
+                content=raw_messages[-1].get("content", "") if isinstance(raw_messages[-1], dict) else str(raw_messages[-1]),
+                user_id=current_user_id, conversation_id=str(conversation_id),
+            )
+
         return JSONResponse(status_code=200, content=ollama_resp)
         
     else:
@@ -1025,6 +1113,8 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         async def stream_gen():
             if tracer:
                 tracer.start_step("gemma_generation_stream")
+            _stream_start = time.monotonic()
+            _first_token_recorded = False
             gen = await engine.generate_chat_with_router(body["messages"], tools=body.get("tools"), options=body.get("options"), stream=True, preferred_provider=provider)
             if isinstance(gen, dict) and "error" in gen:
                 if tracer:
@@ -1039,6 +1129,11 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                 if "choices" in chunk and len(chunk["choices"]) > 0:
                     delta = chunk["choices"][0].get("delta", {})
                     content = delta.get("content", "")
+                    # Misura TTFT al primo chunk con contenuto
+                    if not _first_token_recorded and content:
+                        _first_token_recorded = True
+                        if tracer:
+                            tracer._ttft_ms = (time.monotonic() - _stream_start) * 1000
                     full_chunks.append(content)
 
                     # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
@@ -1098,7 +1193,28 @@ async def ollama_chat(payload: ChatRequest, request: Request):
 
             if tracer:
                 tracer.set_llm_response(full_text)
+                # Popola tracer con metadati risposta streaming
+                tracer._model_used = body["model"]
+                tracer._is_streaming = True
+                # Calcola generation_speed_tok_s se abbiamo TTFT e durata totale
+                _gen_duration = (time.monotonic() - _stream_start) * 1000
+                if _gen_duration > 0 and len(full_text) > 0:
+                    # Stima tok/s: ~4 char per token in media
+                    tracer._generation_speed_tok_s = (len(full_text) / 4) / (_gen_duration / 1000)
                 tracer.finish()
+
+            # Salva turno nel ChatSessionStore (fire-and-forget)
+            _save_session_turn(
+                tracer=tracer, role="assistant", content=full_text,
+                user_id=current_user_id, conversation_id=str(conversation_id),
+                model=body["model"],
+            )
+            if raw_messages:
+                _save_session_turn(
+                    tracer=tracer, role="user",
+                    content=raw_messages[-1].get("content", "") if isinstance(raw_messages[-1], dict) else str(raw_messages[-1]),
+                    user_id=current_user_id, conversation_id=str(conversation_id),
+                )
 
         return StreamingResponse(stream_gen(), media_type="application/x-ndjson")
 
