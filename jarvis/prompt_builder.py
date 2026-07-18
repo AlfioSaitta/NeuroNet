@@ -375,6 +375,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     
     # Registra risultato gatekeeper nel tracer e nelle stats
     tracer.set_gatekeeper(intent=gk.intent, project=gk.project, confidence=gk.confidence, bypassed=_bypassed)
+    tracer._gatekeeper_model = "bypass" if _bypassed else "qwen"
     _record_gatekeeper_stats(gk.intent, gk.confidence, _bypassed, gk.project)
     
     # ── ROUTING: project / meta / general ──
@@ -578,6 +579,15 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     }
     tracer.end_step("context_gathering", details=ctx_details)
 
+    # ── Popola tracer con dati contesto ──
+    _rag_project = (_user_override_focus if _user_override_focus else active_project) if _is_project_query else None
+    tracer._rag_ctx_len = len(rag_ctx) if rag_ctx else 0
+    tracer._rag_project = _rag_project
+    tracer._memory_records = len(mem_ctx.split("\n")) if mem_ctx else 0
+    tracer._web_search_performed = bool(web_ctx)
+    tracer._synaptiq_performed = bool(cg_ctx)
+    tracer._synaptiq_chars = len(cg_ctx) if cg_ctx else 0
+
     # ════════════════════════════════════════════════════════════════
     # STEP 3: QWEN3.5 CAVEMAN PROMPT COMPRESSION (solo project/meta)
     # ════════════════════════════════════════════════════════════════
@@ -687,6 +697,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         "budget": MAX_BUDGET,
     }
     tracer.end_step("caveman_compression", details=comp_details)
+    tracer._compression_raw_size = raw_size
+    tracer._compression_is_raw = _compression_is_raw
 
     # ════════════════════════════════════════════════════════════════
     # STEP 4: BUILD GEMMA 4 PROMPT
