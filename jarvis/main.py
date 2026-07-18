@@ -549,6 +549,9 @@ app.add_middleware(
 from dashboard import dashboard_router
 app.include_router(dashboard_router)
 
+from admin_panel import setup_admin_panel
+setup_admin_panel(app)
+
 
 # ==============================================================================
 # ENDPOINTS

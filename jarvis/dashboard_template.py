@@ -44,7 +44,25 @@ HTML_CONTENT = r"""
             --warning: #ffcc00;
             --text-main: #f8fafc;
             --text-muted: #94a3b8;
+            --sidebar-bg: rgba(8, 12, 18, 0.95);
+            --sidebar-hover: rgba(0, 255, 204, 0.06);
+            --sidebar-active: rgba(0, 255, 204, 0.12);
             --card-radius: 16px;
+        }
+        [data-theme="light"] {
+            --bg-base: #f0f2f5;
+            --glass-bg: rgba(255, 255, 255, 0.7);
+            --glass-border: rgba(0, 0, 0, 0.08);
+            --primary: #059669;
+            --secondary: #0284c7;
+            --accent: #7c3aed;
+            --danger: #dc2626;
+            --warning: #d97706;
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --sidebar-bg: rgba(255, 255, 255, 0.95);
+            --sidebar-hover: rgba(5, 150, 105, 0.06);
+            --sidebar-active: rgba(5, 150, 105, 0.12);
         }
         * { box-sizing: border-box; }
         body {
@@ -60,29 +78,32 @@ HTML_CONTENT = r"""
                 radial-gradient(circle at 0% 0%, rgba(123, 44, 191, 0.15), transparent 30%),
                 radial-gradient(circle at 100% 100%, rgba(0, 255, 204, 0.1), transparent 30%);
         }
+        [data-theme="light"] body {
+            background-image: 
+                radial-gradient(circle at 0% 0%, rgba(124, 58, 237, 0.06), transparent 30%),
+                radial-gradient(circle at 100% 100%, rgba(5, 150, 105, 0.04), transparent 30%);
+        }
 
         /* ── Top Navbar ── */
         .top-navbar {
             height: 56px;
             flex-shrink: 0;
-            background: rgba(10, 15, 20, 0.85);
+            background: var(--sidebar-bg);
             backdrop-filter: blur(20px);
             border-bottom: 1px solid var(--glass-border);
             display: flex;
             align-items: center;
-            padding: 0 24px;
-            gap: 16px;
+            padding: 0 16px;
+            gap: 12px;
             z-index: 100;
-            -webkit-app-region: drag;
         }
         .navbar-brand {
             display: flex;
             align-items: center;
-            gap: 12px;
-            -webkit-app-region: no-drag;
+            gap: 10px;
         }
         .navbar-brand .logo {
-            font-weight: 800; font-size: 1.3rem;
+            font-weight: 800; font-size: 1.2rem;
             background: linear-gradient(90deg, var(--primary), var(--secondary));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
@@ -90,78 +111,143 @@ HTML_CONTENT = r"""
             white-space: nowrap;
         }
         .navbar-brand .version {
-            font-family: 'JetBrains Mono', monospace; font-size: 0.6rem;
-            color: var(--text-muted); padding: 2px 8px;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.55rem;
+            color: var(--text-muted); padding: 2px 6px;
             border: 1px solid rgba(255,255,255,0.06);
             border-radius: 4px; background: rgba(255,255,255,0.03);
         }
-        .navbar-divider {
-            width: 1px; height: 28px;
-            background: rgba(255,255,255,0.06);
-            flex-shrink: 0;
-        }
-        .navbar-nav {
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            -webkit-app-region: no-drag;
-        }
-        .nav-pill {
-            background: transparent;
-            border: none;
-            color: var(--text-muted);
-            padding: 6px 16px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-family: 'Inter', sans-serif;
-            font-size: 0.8rem;
-            font-weight: 500;
-            transition: all 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .nav-pill:hover { color: var(--text-main); background: rgba(255,255,255,0.05); }
-        .nav-pill.active {
-            color: var(--primary);
-            background: rgba(0,255,204,0.1);
-        }
-        .nav-pill .nav-icon { font-size: 1rem; }
         .navbar-spacer { flex: 1; }
         .navbar-status {
             display: flex;
             align-items: center;
-            gap: 12px;
-            -webkit-app-region: no-drag;
+            gap: 8px;
         }
         .status-chip {
             display: flex;
             align-items: center;
-            gap: 5px;
-            padding: 3px 10px;
+            gap: 4px;
+            padding: 2px 8px;
             border-radius: 6px;
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.06);
-            font-size: 0.7rem;
+            font-size: 0.65rem;
             font-family: 'JetBrains Mono', monospace;
             color: var(--text-muted);
             white-space: nowrap;
         }
-        .status-chip .dot { margin: 0; width: 7px; height: 7px; flex-shrink: 0; }
-        .status-chip .label { color: var(--text-muted); margin-right: 2px; }
+        .status-chip .dot { margin: 0; width: 6px; height: 6px; flex-shrink: 0; }
+        .status-chip .label { color: var(--text-muted); margin-right: 2px; display: none; }
         .status-chip .value { color: var(--text-main); font-weight: 600; }
         .status-chip .value.good { color: var(--primary); }
         .status-chip .value.warm { color: var(--warning); }
         .status-chip .value.hot { color: var(--danger); }
+        .hamburger-btn {
+            display: none; background: none; border: none; color: var(--text-muted);
+            font-size: 1.4rem; cursor: pointer; padding: 4px; line-height: 1;
+        }
+        .hamburger-btn:hover { color: var(--text-main); }
 
-        .main-content {
+        /* ── App Layout (sidebar + main) ── */
+        .app-layout {
+            display: flex;
             flex: 1;
-            padding: 24px 28px;
-            overflow-y: auto;
+            overflow: hidden;
+        }
+
+        /* ── Sidebar ── */
+        .sidebar {
+            width: 200px;
+            flex-shrink: 0;
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--glass-border);
             display: flex;
             flex-direction: column;
-            gap: 20px;
+            padding: 8px 0;
+            overflow-y: auto;
+            z-index: 50;
+            transition: transform 0.3s ease;
         }
+        .sidebar-section-label {
+            font-size: 0.6rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-muted);
+            padding: 12px 16px 4px;
+            font-weight: 600;
+            opacity: 0.5;
+        }
+        .sidebar-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 16px;
+            cursor: pointer;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            font-weight: 500;
+            transition: all 0.15s;
+            border-left: 3px solid transparent;
+            text-decoration: none;
+            background: none;
+            border-right: none;
+            border-top: none;
+            border-bottom: none;
+            width: 100%;
+            text-align: left;
+            font-family: 'Inter', sans-serif;
+        }
+        .sidebar-item:hover {
+            background: var(--sidebar-hover);
+            color: var(--text-main);
+        }
+        .sidebar-item.active {
+            color: var(--primary);
+            background: var(--sidebar-active);
+            border-left-color: var(--primary);
+        }
+        .sidebar-item .si-icon { font-size: 1.1rem; width: 22px; text-align: center; flex-shrink: 0; }
+        .sidebar-item .si-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .sidebar-spacer { flex: 1; }
+        .sidebar-footer {
+            padding: 8px 16px;
+            border-top: 1px solid var(--glass-border);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .theme-toggle-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            cursor: pointer;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            background: none;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.15s;
+        }
+        .theme-toggle-btn:hover {
+            background: var(--sidebar-hover);
+            color: var(--text-main);
+        }
+
+        /* ── Main Content ── */
+        .main-content {
+            flex: 1;
+            overflow-y: auto;
+            position: relative;
+        }
+        .view {
+            display: none;
+            padding: 20px 24px;
+            flex-direction: column;
+            gap: 20px;
+            height: 100%;
+        }
+        .view.active { display: flex; }
 
         .grid-container {
             display: grid;
@@ -232,6 +318,8 @@ HTML_CONTENT = r"""
             font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; font-weight: 600;
         }
         .btn:hover { background: var(--primary); color: #000; box-shadow: 0 0 15px var(--primary); }
+        .btn-danger { background: rgba(255, 51, 102, 0.1); color: var(--danger); border-color: rgba(255, 51, 102, 0.3); }
+        .btn-danger:hover { background: var(--danger); color: #fff; box-shadow: 0 0 15px var(--danger); }
 
         .modal {
             display: none; position: fixed; z-index: 1000;
@@ -324,10 +412,6 @@ HTML_CONTENT = r"""
         .gpu-processes pre { font-size: 0.7rem; margin: 0; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; max-height: 120px; overflow-y: auto; }
 
         /* ── Chat Styles ── */
-        #chat-view { display: none; flex-direction: column; height: 100%; flex: 1; }
-        #chat-view.active { display: flex; }
-        #monitoring-view.active { display: flex; flex-direction: column; gap: 24px; flex: 1; }
-        #monitoring-view.hidden { display: none; }
         #chat-messages { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth; min-height: 0; }
         .chat-empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; color: var(--text-muted); text-align: center; padding: 40px; }
         .chat-empty-state .icon { font-size: 3rem; opacity: 0.3; }
@@ -385,25 +469,63 @@ HTML_CONTENT = r"""
         .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
         @keyframes typingDot { 0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); } 30% { opacity: 1; transform: scale(1.2); } }
         @keyframes msgIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        .chat-btn-active { background: rgba(0,255,204,0.15); border-color: var(--primary); color: var(--primary); }
+
+        /* ── Management Section Specifics ── */
+        .table-wrap { overflow-x: auto; }
+        .mgmt-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        .mgmt-table th { text-align: left; padding: 8px 12px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.5px; border-bottom: 1px solid var(--glass-border); }
+        .mgmt-table td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+        .mgmt-table tr:hover { background: rgba(0,255,204,0.03); }
+        .mgmt-table .actions { display: flex; gap: 6px; }
+        .form-input { background: rgba(0,0,0,0.4); border: 1px solid var(--glass-border); border-radius: 6px; padding: 8px 12px; color: var(--text-main); font-family: 'Inter', sans-serif; font-size: 0.8rem; outline: none; width: 100%; }
+        .form-input:focus { border-color: var(--primary); }
+        .form-row { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+        .form-row label { color: var(--text-muted); font-size: 0.75rem; min-width: 80px; flex-shrink: 0; }
+        .toast {
+            position: fixed; bottom: 24px; right: 24px; z-index: 2000;
+            background: var(--glass-bg); border: 1px solid var(--glass-border);
+            padding: 12px 20px; border-radius: 10px; backdrop-filter: blur(20px);
+            font-size: 0.8rem; color: var(--text-main);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            display: none; animation: fadeIn 0.3s ease;
+            max-width: 400px;
+        }
+        .toast.success { border-color: var(--primary); }
+        .toast.error { border-color: var(--danger); }
+
+        /* ── Responsive ── */
+        @media (max-width: 900px) {
+            .sidebar { width: 56px; }
+            .sidebar-item .si-label { display: none; }
+            .sidebar-item { justify-content: center; padding: 10px; }
+            .sidebar-section-label { display: none; }
+            .sidebar-footer .theme-toggle-btn span { display: none; }
+            .theme-toggle-btn { justify-content: center; }
+            .sidebar-spacer { display: none; }
+            .hamburger-btn { display: block; }
+            .status-chip .label { display: none; }
+        }
+        @media (max-width: 600px) {
+            .sidebar { position: fixed; left: 0; top: 56px; bottom: 0; transform: translateX(-100%); width: 200px; }
+            .sidebar.open { transform: translateX(0); }
+            .sidebar-item .si-label { display: inline; }
+            .sidebar-section-label { display: block; }
+            .sidebar-footer .theme-toggle-btn span { display: inline; }
+            .view { padding: 12px; }
+            .grid-container { grid-template-columns: 1fr !important; }
+            .navbar-status { gap: 4px; }
+            .status-chip { padding: 2px 5px; font-size: 0.6rem; }
+        }
     </style>
 </head>
 <body>
 
     <!-- ── Top Navbar ── -->
     <nav class="top-navbar">
+        <button class="hamburger-btn" onclick="toggleSidebar()" title="Toggle sidebar">☰</button>
         <div class="navbar-brand">
             <span class="logo">NEURONET</span>
-            <span class="version">v8.6.7</span>
-        </div>
-        <div class="navbar-divider"></div>
-        <div class="navbar-nav">
-            <button id="nav-monitor-btn" class="nav-pill active" onclick="showChatView(false)">
-                <span class="nav-icon">📊</span> Monitor
-            </button>
-            <button id="nav-chat-btn" class="nav-pill" onclick="showChatView(true)">
-                <span class="nav-icon">💬</span> Chat
-            </button>
+            <span class="version">v9.7.0</span>
         </div>
         <div class="navbar-spacer"></div>
         <div class="navbar-status">
@@ -426,8 +548,59 @@ HTML_CONTENT = r"""
         </div>
     </nav>
 
-    <div class="main-content">
-        <div id="monitoring-view" class="active">
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-section-label">Views</div>
+            <button class="sidebar-item active" data-view="monitor" onclick="switchView('monitor')">
+                <span class="si-icon">📊</span>
+                <span class="si-label">Monitor</span>
+            </button>
+            <button class="sidebar-item" data-view="chat" onclick="switchView('chat')">
+                <span class="si-icon">💬</span>
+                <span class="si-label">Chat</span>
+            </button>
+            <button class="sidebar-item" data-view="graph" onclick="switchView('graph')">
+                <span class="si-icon">🔍</span>
+                <span class="si-label">Code Graph</span>
+            </button>
+            <button class="sidebar-item" data-view="rag" onclick="switchView('rag')">
+                <span class="si-icon">📚</span>
+                <span class="si-label">RAG</span>
+            </button>
+            <button class="sidebar-item" data-view="models" onclick="switchView('models')">
+                <span class="si-icon">🤖</span>
+                <span class="si-label">Models</span>
+            </button>
+            <button class="sidebar-item" data-view="tasks" onclick="switchView('tasks')">
+                <span class="si-icon">📋</span>
+                <span class="si-label">Tasks</span>
+            </button>
+            <button class="sidebar-item" data-view="logs" onclick="switchView('logs')">
+                <span class="si-icon">📜</span>
+                <span class="si-label">Logs</span>
+            </button>
+            <button class="sidebar-item" data-view="analytics" onclick="switchView('analytics')">
+                <span class="si-icon">📈</span>
+                <span class="si-label">Analytics</span>
+            </button>
+            <button class="sidebar-item" data-view="settings" onclick="switchView('settings')">
+                <span class="si-icon">⚙️</span>
+                <span class="si-label">Settings</span>
+            </button>
+            <div class="sidebar-spacer"></div>
+            <div class="sidebar-footer">
+                <button class="theme-toggle-btn" onclick="toggleTheme()">
+                    <span id="theme-icon">🌙</span>
+                    <span id="theme-label">Dark</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- View: Monitor (Dashboard) -->
+            <div id="view-monitor" class="view active">
         <!-- Top metric cards row -->
         <div class="grid-container" style="grid-template-columns: repeat(2, 1fr);">
             <div class="card fade-in">
@@ -755,35 +928,156 @@ HTML_CONTENT = r"""
                 </div>
             </div>
         </div>
-    </div>
+    </div> <!-- end #view-monitor -->
 
-    <!-- ── Chat View ── -->
-    <div id="chat-view">
-        <div id="chat-messages">
-            <div class="chat-empty-state" id="chat-empty-state">
-                <div class="icon">💬</div>
-                <h2>Neural Chat</h2>
-                <p>Interact with Jarvis directly from the control panel. Ask questions, request code analysis, or explore the system.</p>
-                <div class="chat-suggestions">
-                    <button onclick="sendSuggested('What can you do?')">What can you do?</button>
-                    <button onclick="sendSuggested('Show me the system status')">System status</button>
-                    <button onclick="sendSuggested('Analyze the current project structure')">Analyze project</button>
-                    <button onclick="sendSuggested('What is the latest pipeline trace?')">Latest trace</button>
+            <!-- View: Chat -->
+            <div id="view-chat" class="view">
+                <div id="chat-messages" style="flex:1;">
+                    <div class="chat-empty-state" id="chat-empty-state">
+                        <div class="icon">💬</div>
+                        <h2>Neural Chat</h2>
+                        <p>Interact with Jarvis directly from the control panel. Ask questions, request code analysis, or explore the system.</p>
+                        <div class="chat-suggestions">
+                            <button onclick="sendSuggested('What can you do?')">What can you do?</button>
+                            <button onclick="sendSuggested('Show me the system status')">System status</button>
+                            <button onclick="sendSuggested('Analyze the current project structure')">Analyze project</button>
+                            <button onclick="sendSuggested('What is the latest pipeline trace?')">Latest trace</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="chat-input-container">
+                    <div id="chat-image-previews"></div>
+                    <div id="chat-input-row">
+                        <button id="chat-attach-btn" class="chat-btn" onclick="document.getElementById('chat-file-input').click()" title="Attach image">📎</button>
+                        <input type="file" id="chat-file-input" accept="image/png,image/jpeg,image/webp" multiple style="display:none;" onchange="handleFileSelect(event)">
+                        <textarea id="chat-input" rows="1" placeholder="Message Jarvis..." onkeydown="handleInputKeydown(event)"></textarea>
+                        <button id="chat-send-btn" onclick="sendChatMessage()" title="Send">➤</button>
+                    </div>
                 </div>
             </div>
-        </div>
 
-        <div id="chat-input-container">
-            <div id="chat-image-previews"></div>
-            <div id="chat-input-row">
-                <button id="chat-attach-btn" class="chat-btn" onclick="document.getElementById('chat-file-input').click()" title="Attach image">📎</button>
-                <input type="file" id="chat-file-input" accept="image/png,image/jpeg,image/webp" multiple style="display:none;" onchange="handleFileSelect(event)">
-                <textarea id="chat-input" rows="1" placeholder="Message Jarvis..." onkeydown="handleInputKeydown(event)"></textarea>
-                <button id="chat-send-btn" onclick="sendChatMessage()" title="Send">➤</button>
+            <!-- View: Code Graph (uses graph modal) -->
+            <div id="view-graph" class="view">
+                <div class="card">
+                    <div class="card-header"><span class="dot dot-primary"></span> Vector Network Graph</div>
+                    <p style="color:var(--text-muted);font-size:0.85rem;margin:0 0 12px;">Explore Qdrant vector collections as interactive graphs. Click a collection below to visualize similarity relationships between vectors.</p>
+                    <div id="graph-collections-list"><ul class="data-list" id="qdrant-graph-list"><li style="color:var(--text-muted);">Loading collections...</li></ul></div>
+                </div>
             </div>
-        </div>
-    </div>
-    </div>
+
+            <!-- View: RAG Management -->
+            <div id="view-rag" class="view">
+                <div class="grid-container">
+                    <div class="card">
+                        <div class="card-header"><span class="dot dot-primary"></span> RAG Collections</div>
+                        <div class="table-wrap"><table class="mgmt-table"><thead><tr><th>Collection</th><th>Points</th><th>Dimension</th><th>Actions</th></tr></thead><tbody id="rag-collections-body"><tr><td colspan="4" style="text-align:center;color:var(--text-muted);">Loading...</td></tr></tbody></table></div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header"><span class="dot dot-accent"></span> RAG Operations</div>
+                        <div style="display:flex;flex-direction:column;gap:12px;">
+                            <button class="btn" onclick="triggerReindex()" style="padding:8px 16px;font-size:0.8rem;">⟳ Re-index All Documents</button>
+                            <div><label style="color:var(--text-muted);font-size:0.75rem;">Delete Collection:</label><div class="form-row" style="margin-top:6px;"><input class="form-input" id="rag-delete-name" placeholder="Collection name" style="max-width:250px;"><button class="btn btn-danger" onclick="deleteCollection()" style="padding:8px 16px;">🗑 Delete</button></div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- View: Models -->
+            <div id="view-models" class="view">
+                <div class="grid-container">
+                    <div class="card">
+                        <div class="card-header"><span class="dot dot-primary"></span> Current Model</div>
+                        <div id="current-model-detail" style="font-family:'JetBrains Mono',monospace;font-size:0.8rem;">
+                            <div class="metric-row" id="current-model-info"><div class="metric"><div class="val" id="cm-name" style="font-size:1rem;">--</div><div class="label">Model</div></div><div class="metric"><div class="val" id="cm-ngl" style="font-size:1rem;">--</div><div class="label">GPU Layers</div></div><div class="metric"><div class="val" id="cm-ctx" style="font-size:1rem;">--</div><div class="label">Context</div></div></div>
+                        </div>
+                    </div>
+                    <div class="card" style="grid-column:span 1;">
+                        <div class="card-header"><span class="dot dot-accent"></span> Available Models</div>
+                        <div class="table-wrap" style="max-height:400px;overflow-y:auto;"><table class="mgmt-table"><thead><tr><th>Name</th><th>Size</th><th>Action</th></tr></thead><tbody id="models-list-body"><tr><td colspan="3" style="text-align:center;color:var(--text-muted);">Loading...</td></tr></tbody></table></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- View: Tasks -->
+            <div id="view-tasks" class="view">
+                <div class="grid-container">
+                    <div class="card">
+                        <div class="card-header"><span class="dot dot-primary"></span> Tasks</div>
+                        <div class="form-row" style="gap:8px;"><input class="form-input" id="task-desc-input" placeholder="New task description..." style="flex:1;"><select class="form-input" id="task-priority-input" style="max-width:100px;padding:6px;"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select><button class="btn" onclick="addTask()" style="padding:8px 16px;">+ Add</button></div>
+                        <div class="table-wrap" style="max-height:350px;overflow-y:auto;"><table class="mgmt-table"><thead><tr><th>ID</th><th>Description</th><th>Priority</th><th>Status</th><th>Action</th></tr></thead><tbody id="tasks-list-body"><tr><td colspan="5" style="text-align:center;color:var(--text-muted);">Loading...</td></tr></tbody></table></div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header"><span class="dot dot-accent"></span> Cron Jobs</div>
+                        <div class="table-wrap" style="max-height:350px;overflow-y:auto;"><table class="mgmt-table"><thead><tr><th>Name</th><th>Schedule</th><th>Action</th><th>Status</th></tr></thead><tbody id="cron-list-body"><tr><td colspan="4" style="text-align:center;color:var(--text-muted);">Loading...</td></tr></tbody></table></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- View: Logs -->
+            <div id="view-logs" class="view">
+                <div class="card" style="display:flex;flex-direction:column;flex:1;">
+                    <div class="card-header">
+                        <span class="dot dot-primary pulsing"></span> Container Logs
+                        <span style="flex:1;"></span>
+                        <select id="log-container-select" onchange="fetchLogs()" style="background:rgba(0,0,0,0.4);color:var(--text-main);padding:4px 8px;border:1px solid var(--glass-border);border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:0.75rem;">
+                            <option value="all">All Containers</option>
+                        </select>
+                        <label style="color:var(--text-muted);font-size:0.7rem;display:flex;align-items:center;gap:4px;cursor:pointer;margin-left:8px;">
+                            <input type="checkbox" id="log-auto-refresh" checked onchange="toggleAutoRefresh()"> Auto
+                        </label>
+                        <button class="btn" onclick="fetchLogs()" style="font-size:0.7rem;margin-left:8px;">Refresh</button>
+                    </div>
+                    <div style="flex:1;overflow-y:auto;background:rgba(0,0,0,0.3);border-radius:8px;">
+                        <pre id="log-display" style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;padding:16px;margin:0;white-space:pre-wrap;word-break:break-all;color:var(--text-main);"></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- View: Analytics -->
+            <div id="view-analytics" class="view">
+                <div class="grid-container">
+                    <div class="card">
+                        <div class="card-header"><span class="dot dot-primary"></span> Inference Overview</div>
+                        <div class="metric-row">
+                            <div class="metric"><div class="val" id="ana-total-req" style="font-size:1.4rem;">0</div><div class="label">Total Requests</div></div>
+                            <div class="metric"><div class="val" id="ana-prompt-tok" style="font-size:1.4rem;color:var(--secondary);">0</div><div class="label">Prompt Tokens</div></div>
+                            <div class="metric"><div class="val" id="ana-compl-tok" style="font-size:1.4rem;color:var(--primary);">0</div><div class="label">Completion Tokens</div></div>
+                            <div class="metric"><div class="val" id="ana-error-count" style="font-size:1.4rem;color:var(--danger);">0</div><div class="label">Errors</div></div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header"><span class="dot dot-accent"></span> Gatekeeper Performance</div>
+                        <div id="gatekeeper-detail" style="font-family:'JetBrains Mono',monospace;font-size:0.8rem;">
+                            <div class="metric-row">
+                                <div class="metric"><div class="val" id="ana-gk-bypass" style="font-size:1.2rem;">--</div><div class="label">Bypass Rate</div></div>
+                                <div class="metric"><div class="val" id="ana-gk-conf" style="font-size:1.2rem;">--</div><div class="label">Avg Confidence</div></div>
+                                <div class="metric"><div class="val" id="ana-gk-class" style="font-size:1.2rem;">--</div><div class="label">Classified</div></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><span class="dot dot-warning"></span> Error Distribution</div>
+                    <div id="error-distribution" style="font-family:'JetBrains Mono',monospace;font-size:0.8rem;"><span style="color:var(--text-muted);">Loading...</span></div>
+                </div>
+            </div>
+
+            <!-- View: Settings -->
+            <div id="view-settings" class="view">
+                <div class="grid-container">
+                    <div class="card">
+                        <div class="card-header"><span class="dot dot-primary"></span> Configuration</div>
+                        <div id="settings-list" style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;"><span style="color:var(--text-muted);">Loading...</span></div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header"><span class="dot dot-accent"></span> System Info</div>
+                        <div id="system-info" style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;"><span style="color:var(--text-muted);">Loading...</span></div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div> <!-- end .app-layout -->
 
     <div id="graph-modal" class="modal">
         <div class="modal-header">
@@ -816,25 +1110,6 @@ HTML_CONTENT = r"""
     </div>
 
     <!-- Log Viewer Modal -->
-    <div id="log-modal" class="modal" style="display:none;">
-        <div class="modal-header">
-            <h2><span class="dot dot-primary pulsing"></span> Container Logs</h2>
-            <div style="display:flex;align-items:center;gap:10px;">
-                <select id="log-container-select" onchange="fetchLogs()" style="background:rgba(0,0,0,0.8);color:#fff;padding:4px 8px;border:1px solid var(--glass-border);border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:0.75rem;">
-                    <option value="all">All Containers</option>
-                </select>
-                <label style="color:var(--text-muted);font-size:0.7rem;display:flex;align-items:center;gap:4px;cursor:pointer;">
-                    <input type="checkbox" id="log-auto-refresh" checked onchange="toggleAutoRefresh()"> Auto
-                </label>
-                <button class="btn" onclick="fetchLogs()" style="font-size:0.7rem;">Refresh</button>
-            </div>
-            <div class="close-modal" onclick="closeLogModal()">&times;</div>
-        </div>
-        <div style="height:100%;padding-top:56px;overflow-y:auto;">
-            <pre id="log-display" style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;padding:16px;margin:0;white-space:pre-wrap;word-break:break-all;color:var(--text-main);"></pre>
-        </div>
-    </div>
-
     <script>
         let isModalOpen = false;
         let sigmaInstance = null;
@@ -847,6 +1122,303 @@ HTML_CONTENT = r"""
         let fa2AutoPauseTimer = null;
 
         const graphFilter = { ext: 'ALL', query: '', minDegree: 0, group: 'ALL' };
+
+        // ═══════════════════════════════════════════════════
+        // View Switching, Theme, Sidebar
+        // ═══════════════════════════════════════════════════
+        function switchView(viewName) {
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+            const view = document.getElementById('view-' + viewName);
+            if (view) view.classList.add('active');
+            const item = document.querySelector(`.sidebar-item[data-view="${viewName}"]`);
+            if (item) item.classList.add('active');
+            // Close mobile sidebar
+            const sb = document.getElementById('sidebar');
+            if (sb && window.innerWidth <= 600) sb.classList.remove('open');
+            // Dispatch view load events
+            if (viewName === 'chat') { document.getElementById('chat-input')?.focus(); loadChatHistory(); }
+            if (viewName === 'rag') loadRAGData();
+            if (viewName === 'models') loadModelsData();
+            if (viewName === 'tasks') { loadTasksData(); loadCronData(); }
+            if (viewName === 'logs') { loadContainers(); fetchLogs(); if (document.getElementById('log-auto-refresh')?.checked) { if (logInterval) clearInterval(logInterval); logInterval = setInterval(fetchLogs, 5000); } }
+            if (viewName === 'analytics') loadAnalyticsData();
+            if (viewName === 'settings') loadSettingsData();
+            if (viewName === 'graph') loadGraphCollections();
+            if (viewName === 'monitor') { /* already polls via setInterval */ }
+        }
+
+        function toggleTheme() {
+            const html = document.documentElement;
+            const isLight = html.getAttribute('data-theme') === 'light';
+            html.setAttribute('data-theme', isLight ? 'dark' : 'light');
+            document.getElementById('theme-icon').textContent = isLight ? '🌙' : '☀️';
+            document.getElementById('theme-label').textContent = isLight ? 'Dark' : 'Light';
+            localStorage.setItem('neuronet-theme', isLight ? 'dark' : 'light');
+            // Re-init mermaid with correct theme
+            try { mermaid.initialize({ startOnLoad: false, theme: isLight ? 'default' : 'dark' }); } catch(e) {}
+        }
+
+        function toggleSidebar() {
+            document.getElementById('sidebar')?.classList.toggle('open');
+        }
+
+        // Init theme from localStorage
+        (function() {
+            const saved = localStorage.getItem('neuronet-theme');
+            if (saved === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+                document.getElementById('theme-icon').textContent = '☀️';
+                document.getElementById('theme-label').textContent = 'Light';
+            }
+        })();
+
+        // ═══════════════════════════════════════════════════
+        // Data Loading for Management Views
+        // ═══════════════════════════════════════════════════
+
+        async function loadRAGData() {
+            try {
+                const res = await fetch('/api/dashboard/rag/collections');
+                const data = await res.json();
+                const tbody = document.getElementById('rag-collections-body');
+                if (!data.collections || data.collections.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);">No collections</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = data.collections.map(c => `
+                    <tr>
+                        <td style="font-family:'JetBrains Mono',monospace;">${c.name}</td>
+                        <td>${c.points ?? '?'}</td>
+                        <td>${c.dimension ?? '?'}</td>
+                        <td class="actions"><button class="btn" onclick="openGraphModal('${c.name}')" style="font-size:0.6rem;padding:2px 6px;">Graph</button></td>
+                    </tr>
+                `).join('');
+            } catch(e) {
+                document.getElementById('rag-collections-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--danger);">Error loading collections</td></tr>';
+            }
+        }
+
+        async function triggerReindex() {
+            try {
+                const res = await fetch('/api/dashboard/rag/reindex', { method: 'POST' });
+                const data = await res.json();
+                showToast(data.status === 'ok' ? 'Re-index started' : 'Error: ' + (data.error || 'unknown'), data.status === 'ok' ? 'success' : 'error');
+            } catch(e) { showToast('Error: ' + e.message, 'error'); }
+        }
+
+        async function deleteCollection() {
+            const name = document.getElementById('rag-delete-name').value.trim();
+            if (!name) return showToast('Enter a collection name', 'error');
+            if (!confirm('Delete collection "' + name + '"?')) return;
+            try {
+                const res = await fetch('/api/dashboard/rag/collection/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name: name}) });
+                const data = await res.json();
+                if (data.status === 'ok') { showToast('Collection deleted', 'success'); loadRAGData(); }
+                else showToast('Error: ' + (data.error || 'unknown'), 'error');
+            } catch(e) { showToast('Error: ' + e.message, 'error'); }
+        }
+
+        async function loadModelsData() {
+            try {
+                const res = await fetch('/api/dashboard/models');
+                const data = await res.json();
+                // Current model
+                const cm = data.current;
+                if (cm) {
+                    document.getElementById('cm-name').textContent = cm.name || '--';
+                    document.getElementById('cm-ngl').textContent = cm.n_gpu_layers ?? '--';
+                    document.getElementById('cm-ctx').textContent = cm.n_ctx ?? '--';
+                } else {
+                    document.getElementById('cm-name').textContent = 'No model loaded';
+                }
+                // Available models
+                const tbody = document.getElementById('models-list-body');
+                if (!data.available || data.available.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text-muted);">No models found in models/ directory</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = data.available.map(m => `
+                    <tr>
+                        <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">${m.name}</td>
+                        <td>${m.size_gb} GB</td>
+                        <td class="actions"><button class="btn" onclick="switchModel('${m.path}')" style="font-size:0.6rem;padding:2px 6px;">Switch</button></td>
+                    </tr>
+                `).join('');
+            } catch(e) { document.getElementById('models-list-body').innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--danger);">Error loading models</td></tr>'; }
+        }
+
+        async function switchModel(path) {
+            if (!confirm('Switch to this model?')) return;
+            try {
+                const res = await fetch('/api/dashboard/models/switch', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path: path}) });
+                const data = await res.json();
+                showToast(data.status === 'ok' ? data.message : 'Error: ' + (data.error || 'unknown'), data.status === 'ok' ? 'success' : 'error');
+                if (data.status === 'ok') loadModelsData();
+            } catch(e) { showToast('Error: ' + e.message, 'error'); }
+        }
+
+        async function loadTasksData() {
+            try {
+                const res = await fetch('/api/dashboard/tasks');
+                const data = await res.json();
+                const tbody = document.getElementById('tasks-list-body');
+                if (!data.tasks || data.tasks.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);">No tasks</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = data.tasks.map(t => `
+                    <tr>
+                        <td style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--text-muted);">${t.id}</td>
+                        <td>${escapeHtml(t.description)}</td>
+                        <td><span class="badge ${t.priority === 'high' ? 'badge-danger' : t.priority === 'medium' ? 'badge-warning' : 'badge-primary'}">${t.priority}</span></td>
+                        <td><span class="badge ${t.status === 'done' ? 'badge-primary' : 'badge-warning'}">${t.status}</span></td>
+                        <td class="actions"><button class="btn" onclick="deleteTask('${t.id}')" style="font-size:0.6rem;padding:2px 6px;background:rgba(255,51,102,0.1);color:var(--danger);border-color:rgba(255,51,102,0.3);">✕</button></td>
+                    </tr>
+                `).join('');
+            } catch(e) { document.getElementById('tasks-list-body').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--danger);">Error</td></tr>'; }
+        }
+
+        async function addTask() {
+            const desc = document.getElementById('task-desc-input').value.trim();
+            if (!desc) return;
+            const priority = document.getElementById('task-priority-input').value;
+            try {
+                const res = await fetch('/api/dashboard/tasks', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({description: desc, priority: priority}) });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    document.getElementById('task-desc-input').value = '';
+                    loadTasksData();
+                    showToast('Task created', 'success');
+                } else showToast('Error: ' + (data.error || 'unknown'), 'error');
+            } catch(e) { showToast('Error: ' + e.message, 'error'); }
+        }
+
+        async function deleteTask(taskId) {
+            if (!confirm('Delete task ' + taskId + '?')) return;
+            try {
+                const res = await fetch('/api/dashboard/tasks/' + taskId, { method: 'DELETE' });
+                const data = await res.json();
+                if (data.status === 'ok') { loadTasksData(); showToast('Task deleted', 'success'); }
+                else showToast('Error: ' + (data.error || 'unknown'), 'error');
+            } catch(e) { showToast('Error: ' + e.message, 'error'); }
+        }
+
+        async function loadCronData() {
+            try {
+                const res = await fetch('/api/dashboard/cron');
+                const data = await res.json();
+                const tbody = document.getElementById('cron-list-body');
+                if (!data.jobs || data.jobs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);">No cron jobs</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = data.jobs.map(j => `
+                    <tr>
+                        <td style="font-family:'JetBrains Mono',monospace;">${escapeHtml(j.name)}</td>
+                        <td style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;">${escapeHtml(j.schedule || j.trigger)}</td>
+                        <td style="font-size:0.75rem;">${escapeHtml(j.action)}</td>
+                        <td><span class="badge ${j.enabled ? 'badge-primary' : 'badge-warning'}">${j.enabled ? 'Active' : 'Paused'}</span></td>
+                    </tr>
+                `).join('');
+            } catch(e) { document.getElementById('cron-list-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--danger);">Error</td></tr>'; }
+        }
+
+        async function loadAnalyticsData() {
+            try {
+                const [infRes, teleRes] = await Promise.all([
+                    fetch('/api/dashboard/analytics/inference'),
+                    fetch('/api/dashboard/telemetry')
+                ]);
+                const inf = await infRes.json();
+                const tele = await teleRes.json();
+
+                if (inf.counters) {
+                    document.getElementById('ana-total-req').textContent = inf.counters.total_requests ?? 0;
+                    document.getElementById('ana-prompt-tok').textContent = inf.counters.total_prompt_tokens ?? 0;
+                    document.getElementById('ana-compl-tok').textContent = inf.counters.total_completion_tokens ?? 0;
+                }
+                if (tele.error_counters) {
+                    const errCount = Object.values(tele.error_counters).reduce((a, b) => a + b, 0);
+                    document.getElementById('ana-error-count').textContent = errCount;
+                }
+                const gk = inf.gatekeeper || tele.gatekeeper;
+                if (gk) {
+                    const bypassRate = gk.total_classified > 0 ? ((gk.bypassed / gk.total_classified) * 100).toFixed(1) + '%' : '--';
+                    const avgConf = gk.avg_confidence ? (gk.avg_confidence * 100).toFixed(1) + '%' : '--';
+                    document.getElementById('ana-gk-bypass').textContent = bypassRate;
+                    document.getElementById('ana-gk-conf').textContent = avgConf;
+                    document.getElementById('ana-gk-class').textContent = gk.total_classified ?? '--';
+                }
+                // Error distribution
+                const errDiv = document.getElementById('error-distribution');
+                if (tele.error_counters && Object.keys(tele.error_counters).length > 0) {
+                    errDiv.innerHTML = Object.entries(tele.error_counters).map(([k, v]) =>
+                        `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04);"><span>${escapeHtml(k)}</span><span style="color:var(--danger);font-weight:600;">${v}</span></div>`
+                    ).join('');
+                } else {
+                    errDiv.innerHTML = '<span style="color:var(--text-muted);">No errors recorded</span>';
+                }
+            } catch(e) {
+                console.error('Analytics load error', e);
+            }
+        }
+
+        async function loadSettingsData() {
+            try {
+                const [setRes, sysRes] = await Promise.all([
+                    fetch('/api/dashboard/settings'),
+                    fetch('/api/dashboard/system/info')
+                ]);
+                const setData = await setRes.json();
+                const sysData = await sysRes.json();
+
+                const setDiv = document.getElementById('settings-list');
+                if (setData.settings) {
+                    setDiv.innerHTML = Object.entries(setData.settings).map(([k, v]) =>
+                        `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04);"><span style="color:var(--secondary);">${k}</span><span>${v == null ? '--' : escapeHtml(String(v))}</span></div>`
+                    ).join('');
+                }
+
+                const sysDiv = document.getElementById('system-info');
+                sysDiv.innerHTML = Object.entries(sysData).map(([k, v]) =>
+                    `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04);"><span style="color:var(--secondary);">${k.replace(/_/g, ' ')}</span><span>${v == null ? '--' : escapeHtml(String(v))}</span></div>`
+                ).join('');
+            } catch(e) {
+                console.error('Settings load error', e);
+            }
+        }
+
+        async function loadGraphCollections() {
+            try {
+                const res = await fetch('/api/dashboard/stats');
+                const data = await res.json();
+                const list = document.getElementById('qdrant-graph-list');
+                if (data.qdrant_collections && data.qdrant_collections.length > 0) {
+                    list.innerHTML = data.qdrant_collections.map(c => {
+                        const name = typeof c === 'string' ? c : c.name;
+                        const pts = typeof c === 'string' ? '' : (c.points ?? '');
+                        return `<li style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);"><span style="font-family:'JetBrains Mono',monospace;">${name} ${pts ? '<span style="color:var(--text-muted);font-size:0.7rem;">('+pts+' pts)</span>' : ''}</span><button class="btn" onclick="openGraphModal('${name}')">Visualize</button></li>`;
+                    }).join('');
+                } else {
+                    list.innerHTML = '<li style="color:var(--text-muted);">No collections found</li>';
+                }
+            } catch(e) { document.getElementById('qdrant-graph-list').innerHTML = '<li style="color:var(--danger);">Error loading collections</li>'; }
+        }
+
+        function showToast(msg, type) {
+            let toast = document.getElementById('toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'toast';
+                toast.className = 'toast';
+                document.body.appendChild(toast);
+            }
+            toast.textContent = msg;
+            toast.className = 'toast ' + (type || '');
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 3000);
+        }
 
         function toggleFA2() {
             if (!fa2Layout) return;
@@ -2024,17 +2596,13 @@ HTML_CONTENT = r"""
         let logInterval = null;
 
         function openLogModal() {
-            document.getElementById('log-modal').style.display = 'block';
+            switchView('logs');
             loadContainers();
             fetchLogs();
-            if (document.getElementById('log-auto-refresh').checked) {
+            if (document.getElementById('log-auto-refresh')?.checked) {
+                if (logInterval) clearInterval(logInterval);
                 logInterval = setInterval(fetchLogs, 5000);
             }
-        }
-
-        function closeLogModal() {
-            document.getElementById('log-modal').style.display = 'none';
-            if (logInterval) { clearInterval(logInterval); logInterval = null; }
         }
 
         function toggleAutoRefresh() {
@@ -2212,15 +2780,7 @@ HTML_CONTENT = r"""
         mermaid.initialize({ startOnLoad: false, theme: 'dark', themeVariables: { primaryColor: '#00ffcc', primaryTextColor: '#f8fafc', primaryBorderColor: '#00ffcc', lineColor: '#00b8ff', secondaryColor: '#7b2cbf', tertiaryColor: '#05070a' } });
 
         function showChatView(show) {
-            document.getElementById('monitoring-view').classList.toggle('active', !show);
-            document.getElementById('monitoring-view').classList.toggle('hidden', show);
-            document.getElementById('chat-view').classList.toggle('active', show);
-            document.getElementById('nav-monitor-btn').classList.toggle('chat-btn-active', !show);
-            document.getElementById('nav-chat-btn').classList.toggle('chat-btn-active', show);
-            if (show) {
-                document.getElementById('chat-input').focus();
-                loadChatHistory();
-            }
+            switchView(show ? 'chat' : 'monitor');
         }
 
         async function loadChatHistory() {
@@ -2536,7 +3096,7 @@ HTML_CONTENT = r"""
 
         // Handle paste (images from clipboard)
         document.addEventListener('paste', (e) => {
-            if (!document.getElementById('chat-view').classList.contains('active')) return;
+            if (!document.getElementById('view-chat').classList.contains('active')) return;
             const items = e.clipboardData.items;
             for (const item of items) {
                 if (item.type.startsWith('image/') && chatImages.length < 4) {
@@ -2586,7 +3146,7 @@ HTML_CONTENT = r"""
         // Focus input when pressing / anywhere
         document.addEventListener('keydown', (e) => {
             if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
-                if (document.getElementById('chat-view').classList.contains('active')) {
+                if (document.getElementById('view-chat').classList.contains('active')) {
                     e.preventDefault();
                     document.getElementById('chat-input').focus();
                 }

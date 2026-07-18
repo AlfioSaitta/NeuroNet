@@ -11,7 +11,7 @@ from datetime import datetime, UTC
 from collections import deque
 from typing import Optional
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from config import QDRANT_HOST, SEARXNG_HOST, CRAWL4AI_HOST, CRAWL4AI_API_TOKEN, ALLOWED_USERS, VECTOR_DB_VERSION, SYNAPTIQ_ENABLED
 import state
@@ -25,8 +25,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 dashboard_router = APIRouter()
-
-from dashboard_template import HTML_CONTENT
 
 # ── Chat session state (in-memory ring buffer per conversation) ──
 _chat_sessions: dict[str, deque] = {}
@@ -264,12 +262,6 @@ def _get_session(conversation_id: str) -> deque:
     if conversation_id not in _chat_sessions:
         _chat_sessions[conversation_id] = deque(maxlen=MAX_HISTORY)
     return _chat_sessions[conversation_id]
-
-
-@dashboard_router.get("/")
-@dashboard_router.get("/dashboard")
-async def get_dashboard():
-    return HTMLResponse(HTML_CONTENT)
 
 
 def collect_sys_metrics():
@@ -1196,6 +1188,350 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
         yield f"data: {json.dumps({'done': True, 'full_text': clean_text, 'ttft_ms': ttft_ms, 'tok_per_sec': tok_per_sec, 'tokens': estimated_tokens, 'duration_ms': total_duration_ms})}\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
+
+
+# ═══════════════════════════════════════════════════════════════
+# New Management Endpoints
+# ═══════════════════════════════════════════════════════════════
+
+
+# ── Model Management ──
+
+@dashboard_router.get("/api/dashboard/models")
+async def list_models():
+    """List available GGUF models + current active model info."""
+    import glob
+    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+    available = []
+    try:
+        for f in sorted(glob.glob(os.path.join(models_dir, "*.gguf"))):
+            fname = os.path.basename(f)
+            fsize = os.path.getsize(f)
+            available.append({
+                "name": fname,
+                "path": f,
+                "size_gb": round(fsize / (1024**3), 2),
+            })
+    except Exception as e:
+        logger.warning(f"Error scanning models dir: {e}")
+
+    current = None
+    try:
+        if engine and engine.chat_model:
+            cm = engine.chat_model
+            mp = getattr(cm, 'model_path', '') or ''
+            current = {
+                "name": mp.split('/')[-1] if mp else "Loaded",
+                "path": mp,
+                "n_gpu_layers": getattr(cm, 'n_gpu_layers', '?'),
+                "n_ctx": getattr(cm, 'n_ctx', lambda: '?')() if hasattr(cm, 'n_ctx') else '?',
+            }
+    except Exception as e:
+        logger.warning(f"Error reading current model: {e}")
+
+    return JSONResponse({"available": available, "current": current})
+
+
+@dashboard_router.post("/api/dashboard/models/switch")
+async def switch_model(request: Request):
+    """Switch active chat model by GGUF path."""
+    body = await request.json()
+    model_path = body.get("path", "")
+    if not model_path:
+        return JSONResponse({"error": "Missing 'path' in body"}, status_code=400)
+    if not os.path.isfile(model_path):
+        return JSONResponse({"error": f"Model file not found: {model_path}"}, status_code=400)
+
+    try:
+        import config
+        config.LLAMA_MODEL_PATH = model_path
+        # Resetta il motore: il prossimo messaggio ricaricherà il modello
+        if engine:
+            engine.chat_model = None
+        logger.info("🔁 Model switched to %s (reload on next request)", model_path)
+        return JSONResponse({"status": "ok", "message": f"Model switched to {os.path.basename(model_path)}. Will reload on next request."})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@dashboard_router.get("/api/dashboard/models/profiles")
+async def list_model_profiles():
+    """Return model profiles detected by model_profiles.py."""
+    try:
+        import model_profiles as mp
+        profiles = {}
+        for attr in dir(mp):
+            if not attr.startswith('_') and not attr.startswith('detect'):
+                obj = getattr(mp, attr)
+                if callable(obj) and hasattr(obj, '__module__'):
+                    continue
+            if attr in ('MODEL_FAMILIES', 'detect_model_family'):
+                profiles[attr] = getattr(mp, attr)
+        # Try detect_model_family on current model
+        current_family = None
+        if engine and engine.chat_model:
+            mp2 = getattr(engine.chat_model, 'model_path', '')
+            try:
+                current_family = mp.detect_model_family(mp2 or "")
+            except Exception:
+                pass
+        return JSONResponse({"profiles": profiles, "current_family": current_family})
+    except Exception as e:
+        return JSONResponse({"profiles": {}, "current_family": None, "error": str(e)})
+
+
+# ── RAG Management ──
+
+@dashboard_router.get("/api/dashboard/rag/collections")
+async def get_rag_collections():
+    """Detailed Qdrant collection info."""
+    try:
+        res = await state.http_client.get(
+            f"http://{QDRANT_HOST}:6333/collections", timeout=3.0
+        )
+        if res.status_code != 200:
+            return JSONResponse({"collections": [], "error": "Qdrant not responding"})
+
+        data = res.json()
+        raw_collections = data.get("result", {}).get("collections", [])
+        detailed = []
+        for c in raw_collections:
+            name = c["name"]
+            try:
+                info = await state.http_client.get(
+                    f"http://{QDRANT_HOST}:6333/collections/{name}", timeout=2.0
+                )
+                if info.status_code == 200:
+                    result = info.json().get("result", {})
+                    pts = result.get("points_count", 0)
+                    vectors_config = result.get("config", {}).get("params", {}).get("vectors", {})
+                    dims = None
+                    if isinstance(vectors_config, dict):
+                        dims = vectors_config.get("size")
+                    elif isinstance(vectors_config, dict) and vectors_config:
+                        first = list(vectors_config.values())[0]
+                        dims = first.get("size") if isinstance(first, dict) else None
+                    detailed.append({
+                        "name": name,
+                        "points": pts,
+                        "dimension": dims,
+                        "status": result.get("status", "unknown"),
+                    })
+                    continue
+            except Exception:
+                pass
+            detailed.append({"name": name, "points": 0})
+
+        return JSONResponse({"collections": detailed})
+    except Exception as e:
+        return JSONResponse({"collections": [], "error": str(e)})
+
+
+@dashboard_router.post("/api/dashboard/rag/reindex")
+async def trigger_rag_reindex(request: Request):
+    """Trigger RAG re-indexing."""
+    from rag import ingest_local_documents
+    state.is_reindexing = True
+    task = asyncio.create_task(ingest_local_documents())
+    state.background_tasks.add(task)
+    task.add_done_callback(state.background_tasks.discard)
+    return JSONResponse({"status": "ok", "message": "RAG re-index started"})
+
+
+@dashboard_router.post("/api/dashboard/rag/collection/delete")
+async def delete_rag_collection(request: Request):
+    """Delete a Qdrant collection."""
+    body = await request.json()
+    name = body.get("name", "")
+    if not name:
+        return JSONResponse({"error": "Missing 'name' in body"}, status_code=400)
+    try:
+        res = await state.http_client.delete(
+            f"http://{QDRANT_HOST}:6333/collections/{name}", timeout=5.0
+        )
+        if res.status_code == 200:
+            return JSONResponse({"status": "ok", "message": f"Collection '{name}' deleted"})
+        return JSONResponse({"error": f"Qdrant returned {res.status_code}: {res.text}"}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── Tasks & Cron Management ──
+
+@dashboard_router.get("/api/dashboard/tasks")
+async def list_tasks():
+    """List all tasks."""
+    try:
+        from task_manager import load_tasks
+        tasks_data = load_tasks()
+        tasks_list = []
+        for tid, t in tasks_data.items():
+            tasks_list.append({
+                "id": tid,
+                "description": t.get("description", ""),
+                "priority": t.get("priority", "medium"),
+                "status": t.get("status", "pending"),
+                "deadline": t.get("deadline", ""),
+                "created": t.get("created", ""),
+            })
+        return JSONResponse({"tasks": tasks_list})
+    except Exception as e:
+        return JSONResponse({"tasks": [], "error": str(e)})
+
+
+@dashboard_router.post("/api/dashboard/tasks")
+async def add_task(request: Request):
+    """Add a new task."""
+    from task_manager import save_tasks, load_tasks
+    body = await request.json()
+    desc = body.get("description", "")
+    priority = body.get("priority", "medium")
+    deadline = body.get("deadline", "")
+
+    if not desc:
+        return JSONResponse({"error": "Missing 'description' in body"}, status_code=400)
+
+    try:
+        tasks = load_tasks()
+        tid = str(uuid.uuid4())[:8]
+        from datetime import datetime, UTC
+        tasks[tid] = {
+            "description": desc,
+            "priority": priority,
+            "status": "pending",
+            "deadline": deadline,
+            "created": datetime.now(UTC).isoformat(),
+        }
+        save_tasks(tasks)
+        return JSONResponse({"status": "ok", "task_id": tid, "message": "Task created"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@dashboard_router.delete("/api/dashboard/tasks/{task_id}")
+async def delete_task(task_id: str):
+    """Delete a task."""
+    from task_manager import delete_task as _delete
+    try:
+        _delete(task_id)
+        return JSONResponse({"status": "ok", "message": f"Task {task_id} deleted"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@dashboard_router.get("/api/dashboard/cron")
+async def list_cron_jobs():
+    """List cron jobs."""
+    try:
+        from cron_agent import load_jobs
+        jobs = load_jobs()
+        jobs_list = []
+        for jid, j in jobs.items():
+            jobs_list.append({
+                "id": jid,
+                "name": j.get("name", jid),
+                "trigger": j.get("trigger", ""),
+                "schedule": j.get("schedule", ""),
+                "action": j.get("action", ""),
+                "enabled": j.get("enabled", True),
+            })
+        return JSONResponse({"jobs": jobs_list})
+    except Exception as e:
+        return JSONResponse({"jobs": [], "error": str(e)})
+
+
+# ── Settings & System Info ──
+
+SETTINGS_KEYS = [
+    "LLAMA_MODEL_PATH", "N_GPU_LAYERS", "LLM_NUM_CTX", "LLM_FLASH_ATTN",
+    "QDRANT_HOST", "SEARXNG_HOST", "CRAWL4AI_HOST", "EMBEDDING_DIMS",
+    "WATCHDOG_ENABLED", "WATCHDOG_TIMEOUT", "VECTOR_DB_VERSION",
+    "SYNAPTIQ_ENABLED", "ALLOWED_USERS",
+]
+
+SETTINGS_OVERRIDES: dict = {}
+
+
+@dashboard_router.get("/api/dashboard/settings")
+async def get_settings():
+    """Return current config values (read-only)."""
+    import config
+    result = {}
+    for key in SETTINGS_KEYS:
+        val = SETTINGS_OVERRIDES.get(key)
+        if val is None:
+            val = getattr(config, key, None)
+        # Convertirli in form serializable
+        if isinstance(val, (list, tuple)):
+            val = list(val)
+        result[key] = val
+    return JSONResponse({"settings": result})
+
+
+@dashboard_router.post("/api/dashboard/settings")
+async def update_settings(request: Request):
+    """Update in-memory settings."""
+    body = await request.json()
+    updated = []
+    for key, val in body.items():
+        if key in SETTINGS_KEYS:
+            SETTINGS_OVERRIDES[key] = val
+            updated.append(key)
+    return JSONResponse({"status": "ok", "updated": updated, "message": f"{len(updated)} settings updated in memory"})
+
+
+@dashboard_router.get("/api/dashboard/system/info")
+async def get_system_info():
+    """System info: hostname, platform, python, uptime, docker."""
+    import platform
+    result = {
+        "hostname": platform.node(),
+        "platform": platform.platform(),
+        "python_version": platform.python_version(),
+        "uptime": "N/A",
+        "docker_available": os.path.exists("/var/run/docker.sock") or os.path.exists("/run/docker.sock"),
+    }
+    try:
+        with open('/proc/uptime') as f:
+            uptime_seconds = float(f.readline().split()[0])
+            d = int(uptime_seconds // 86400)
+            h = int((uptime_seconds % 86400) // 3600)
+            m = int((uptime_seconds % 3600) // 60)
+            result["uptime"] = f"{d}d {h}h {m}m"
+    except Exception:
+        pass
+    return JSONResponse(result)
+
+
+# ── Analytics ──
+
+@dashboard_router.get("/api/dashboard/analytics/inference")
+async def get_inference_analytics():
+    """Inference counters and history grouped by time."""
+    total_requests = getattr(state, 'total_requests', 0)
+    total_prompt_tokens = getattr(state, 'total_prompt_tokens', 0)
+    total_completion_tokens = getattr(state, 'total_completion_tokens', 0)
+
+    history = list(getattr(state, 'inference_history', []))[-200:]
+    gatekeeper = getattr(state, 'gatekeeper_stats', None)
+    gk_data = gatekeeper.to_dict() if gatekeeper and hasattr(gatekeeper, 'to_dict') else None
+
+    return JSONResponse({
+        "counters": {
+            "total_requests": total_requests,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
+        },
+        "history": history,
+        "gatekeeper": gk_data,
+    })
+
+
+@dashboard_router.get("/api/dashboard/analytics/errors")
+async def get_error_analytics():
+    """Error distribution."""
+    errors = dict(getattr(state, 'error_counters', {}))
+    return JSONResponse({"error_counters": errors, "total_errors": sum(errors.values()) if errors else 0})
 
 
 # Lazy import for tag processing
