@@ -338,7 +338,7 @@ function openTraceModal(trace) {
 
     // Overview
     const duration = trace.duration_ms ? (trace.duration_ms / 1000).toFixed(2) + 's' : '--';
-    const tokens = trace.total_tokens ?? (trace.total_prompt_tokens + trace.total_completion_tokens) || '--';
+    const tokens = (trace.total_tokens ?? (trace.total_prompt_tokens + trace.total_completion_tokens)) || '--';
     const model = (trace.model_used || '').split('/').pop() || '--';
     const ttft = trace.ttft_ms != null ? trace.ttft_ms.toFixed(0) + 'ms' : '--';
     const tokPerSec = trace.generation_speed_tok_s != null ? trace.generation_speed_tok_s.toFixed(1) : '--';
@@ -480,12 +480,12 @@ async function fetchTelemetry() {
             document.getElementById('gk-avg-conf').textContent = avgConf;
 
             document.getElementById('gk-classified').textContent = gk.total_classified ?? '--';
-
-            // Trace / error counts
-            document.getElementById('tele-trace-count').textContent = data.recent_traces?.length ?? 0;
-            document.getElementById('tele-error-count').textContent = Object.keys(data.error_counters || {}).length || 0;
-            document.getElementById('tele-active-traces').textContent = data.active_traces?.length ?? 0;
         }
+
+        // Trace / error counts (sempre, anche senza gatekeeper)
+        document.getElementById('tele-trace-count').textContent = data.recent_traces?.length ?? 0;
+        document.getElementById('tele-error-count').textContent = Object.keys(data.error_counters || {}).length || 0;
+        document.getElementById('tele-active-traces').textContent = data.active_traces?.length ?? 0;
 
         // Model distribution
         updateModelDistribution(data.recent_traces);
@@ -502,7 +502,7 @@ async function fetchTelemetry() {
             data.recent_traces.slice(0, 10).forEach(t => {
                 const tr = document.createElement('tr');
                 const duration = t.duration_ms ? (t.duration_ms / 1000).toFixed(1) + 's' : '--';
-                const tokens = t.total_tokens ?? (t.total_prompt_tokens + t.total_completion_tokens) || '--';
+                const tokens = (t.total_tokens ?? (t.total_prompt_tokens + t.total_completion_tokens)) || '--';
                 const steps = t.steps?.length ?? 0;
                 const status = t.error ? '❌' : '✓';
                 const shortId = (t.request_id || t.id || '').substring(0, 8);
