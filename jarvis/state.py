@@ -244,3 +244,6 @@ gatekeeper_stats: dict | None = None  # Verrà inizializzato come GatekeeperStat
 
 # Contatori di errore per diagnostica MCP
 error_counters: dict[str, int] = {}
+
+# Chat Session Store — sessioni chat complete per analisi agenti AI
+chat_session_store: "ChatSessionStore | None" = None  # Inizializzato in main.py lifespan
