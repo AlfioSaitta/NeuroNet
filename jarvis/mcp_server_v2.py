@@ -329,6 +329,78 @@ async def pending_ops() -> str:
 
 
 # ──────────────────────────────────────────────
+# Session Resources
+# ──────────────────────────────────────────────
+
+
+def _get_store():
+    s = _import_state()
+    return getattr(s, 'chat_session_store', None)
+
+
+@mcp.resource(uri="jarvis://sessions/list", name="Sessions List", description="Lista delle sessioni chat disponibili con metadati.", mime_type="application/json")
+async def sessions_list() -> str:
+    store = _get_store()
+    if not store:
+        return _json_text({"sessions": [], "error": "Session store not initialized"})
+    return _json_text({"sessions": store.list_sessions(limit=50)})
+
+
+# ──────────────────────────────────────────────
+# Session Tools
+# ──────────────────────────────────────────────
+
+
+@mcp.tool(name="list_sessions", description="Lista sessioni chat con metadati (turn count, progetto, ultima attività).")
+def list_sessions(limit: int = 20, sort_by: str = "last_activity", user_id: str = "") -> str:
+    store = _get_store()
+    if not store:
+        return _json_text({"error": "Session store not initialized"})
+    uid = user_id if user_id else None
+    return _json_text({
+        "sessions": store.list_sessions(limit=min(limit, 200), sort_by=sort_by, user_id=uid),
+    })
+
+
+@mcp.tool(name="get_session", description="Recupera una sessione chat completa per conversation_id con tutti i turni.")
+def get_session(conversation_id: str) -> str:
+    store = _get_store()
+    if not store:
+        return _json_text({"error": "Session store not initialized"})
+    turns = store.get_session(conversation_id)
+    if not turns:
+        return _json_text({"error": f"Session '{conversation_id}' not found"})
+    return _json_text({"conversation_id": conversation_id, "turns": turns, "turn_count": len(turns)})
+
+
+@mcp.tool(name="search_sessions", description="Cerca testo in tutte le sessioni chat. Restituisce snippet del primo match per sessione.")
+def search_sessions(query: str, user_id: str = "", limit: int = 20) -> str:
+    store = _get_store()
+    if not store:
+        return _json_text({"error": "Session store not initialized"})
+    uid = user_id if user_id else None
+    return _json_text({"results": store.search_sessions(query, user_id=uid, limit=limit)})
+
+
+@mcp.tool(name="get_session_stats", description="Statistiche aggregate su tutte le sessioni chat (tokens, turni, durata).")
+def get_session_stats() -> str:
+    store = _get_store()
+    if not store:
+        return _json_text({"error": "Session store not initialized"})
+    return _json_text({"stats": store.get_stats()})
+
+
+@mcp.tool(name="export_session", description="Esporta una sessione chat in formato JSON o Markdown per analisi esterna.")
+def export_session(conversation_id: str, format: str = "json") -> str:
+    store = _get_store()
+    if not store:
+        return _json_text({"error": "Session store not initialized"})
+    if format not in ("json", "markdown"):
+        return _json_text({"error": "Formato non supportato. Usa 'json' o 'markdown'."})
+    return store.export_session(conversation_id, format=format)
+
+
+# ──────────────────────────────────────────────
 # FastAPI route handler — MCP Streamable HTTP
 # ──────────────────────────────────────────────
 # Implementazione diretta su route FastAPI per evitare
@@ -352,7 +424,7 @@ async def _get_tools_list() -> list[dict]:
 async def _get_resources_list() -> list[dict]:
     """Recupera la lista risorse dalla registry FastMCP."""
     resources = await mcp.list_resources()
-    return [
+    result = [
         {
             "uri": str(r.uri),
             "name": r.name or "",
@@ -361,6 +433,14 @@ async def _get_resources_list() -> list[dict]:
         }
         for r in resources
     ]
+    # Aggiungi resource template per sessioni dinamiche
+    result.append({
+        "uri": "jarvis://sessions/{conversation_id}",
+        "name": "Chat Session",
+        "description": "Sessione chat completa per conversation_id. Sostituisci {conversation_id} con l'ID della sessione.",
+        "mimeType": "application/json",
+    })
+    return result
 
 
 # Tool handler map
@@ -387,6 +467,7 @@ _RESOURCE_HANDLERS: dict[str, callable] = {
     "jarvis://system/status": _get_status_dict,
     "jarvis://model/info": _get_model_info_dict,
     "jarvis://system/pending_ops": _get_pending_ops_dict,
+    "jarvis://sessions/list": lambda: {"sessions": _get_store().list_sessions(limit=50) if _get_store() else []},
 }
 
 
@@ -469,6 +550,14 @@ async def handle_mcp_post(body: dict) -> dict:
     if method == "resources/read":
         uri = (params or {}).get("uri", "")
         handler = _RESOURCE_HANDLERS.get(uri)
+        # Fallback per resource dinamiche (sessioni, template)
+        if handler is None and uri.startswith("jarvis://sessions/"):
+            _conv_id = uri[len("jarvis://sessions/"):]
+            store = _get_store()
+            if store:
+                turns = store.get_session(_conv_id)
+                if turns:
+                    handler = lambda: {"conversation_id": _conv_id, "turns": turns, "turn_count": len(turns)}
         if not handler:
             return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": f"Unknown resource: {uri}"}}
         try:

@@ -134,6 +134,57 @@ def _get_pending_ops_dict() -> dict:
     }
 
 
+# ── Session Store helper ──
+
+
+def _get_store():
+    s = _import_state()
+    return getattr(s, 'chat_session_store', None)
+
+
+def _list_sessions(limit: int = 20, sort_by: str = "last_activity", user_id: str = "") -> dict:
+    store = _get_store()
+    if not store:
+        return {"error": "Session store not initialized"}
+    uid = user_id if user_id else None
+    return {"sessions": store.list_sessions(limit=min(limit, 200), sort_by=sort_by, user_id=uid)}
+
+
+def _get_session(conversation_id: str) -> dict:
+    store = _get_store()
+    if not store:
+        return {"error": "Session store not initialized"}
+    turns = store.get_session(conversation_id)
+    if not turns:
+        return {"error": f"Session '{conversation_id}' not found"}
+    return {"conversation_id": conversation_id, "turns": turns, "turn_count": len(turns)}
+
+
+def _search_sessions(query: str, user_id: str = "", limit: int = 20) -> dict:
+    store = _get_store()
+    if not store:
+        return {"error": "Session store not initialized"}
+    uid = user_id if user_id else None
+    return {"results": store.search_sessions(query, user_id=uid, limit=limit)}
+
+
+def _get_session_stats() -> dict:
+    store = _get_store()
+    if not store:
+        return {"error": "Session store not initialized"}
+    return {"stats": store.get_stats()}
+
+
+def _export_session(conversation_id: str, format: str = "json") -> dict:
+    store = _get_store()
+    if not store:
+        return {"error": "Session store not initialized"}
+    if format not in ("json", "markdown"):
+        return {"error": "Formato non supportato. Usa 'json' o 'markdown'."}
+    text = store.export_session(conversation_id, format=format)
+    return {"content": text, "format": format, "conversation_id": conversation_id}
+
+
 def _list_tools() -> list[dict]:
     return [
         {"name": "get_recent_traces",
@@ -160,6 +211,34 @@ def _list_tools() -> list[dict]:
         {"name": "get_pending_ops",
          "description": "Operazioni pendenti: background tasks, coda watchdog.",
          "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "list_sessions",
+         "description": "Lista sessioni chat con metadati (turn count, progetto, ultima attività).",
+         "inputSchema": {"type": "object", "properties": {
+             "limit": {"type": "integer", "default": 20},
+             "sort_by": {"type": "string", "default": "last_activity"},
+             "user_id": {"type": "string", "default": ""},
+         }}},
+        {"name": "get_session",
+         "description": "Recupera una sessione chat completa per conversation_id con tutti i turni.",
+         "inputSchema": {"type": "object", "properties": {
+             "conversation_id": {"type": "string"},
+         }, "required": ["conversation_id"]}},
+        {"name": "search_sessions",
+         "description": "Cerca testo in tutte le sessioni chat. Restituisce snippet del primo match per sessione.",
+         "inputSchema": {"type": "object", "properties": {
+             "query": {"type": "string"},
+             "user_id": {"type": "string", "default": ""},
+             "limit": {"type": "integer", "default": 20},
+         }, "required": ["query"]}},
+        {"name": "get_session_stats",
+         "description": "Statistiche aggregate su tutte le sessioni chat (tokens, turni, durata).",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "export_session",
+         "description": "Esporta una sessione chat in formato JSON o Markdown per analisi esterna.",
+         "inputSchema": {"type": "object", "properties": {
+             "conversation_id": {"type": "string"},
+             "format": {"type": "string", "default": "json"},
+         }, "required": ["conversation_id"]}},
     ]
 
 
@@ -180,6 +259,22 @@ def _call_tool(params: Optional[dict]) -> dict:
         "get_status": _get_status_dict,
         "get_model_info": _get_model_info_dict,
         "get_pending_ops": _get_pending_ops_dict,
+        "list_sessions": lambda: _list_sessions(
+            limit=args.get("limit", 20),
+            sort_by=args.get("sort_by", "last_activity"),
+            user_id=args.get("user_id", ""),
+        ),
+        "get_session": lambda: _get_session(args.get("conversation_id", "")),
+        "search_sessions": lambda: _search_sessions(
+            query=args.get("query", ""),
+            user_id=args.get("user_id", ""),
+            limit=args.get("limit", 20),
+        ),
+        "get_session_stats": lambda: _get_session_stats(),
+        "export_session": lambda: _export_session(
+            conversation_id=args.get("conversation_id", ""),
+            format=args.get("format", "json"),
+        ),
     }
 
     handler = tool_map.get(tool_name)
@@ -206,6 +301,8 @@ def _list_resources() -> list[dict]:
         {"uri": "jarvis://system/status", "name": "System Status", "mimeType": "application/json"},
         {"uri": "jarvis://model/info", "name": "Model Info", "mimeType": "application/json"},
         {"uri": "jarvis://system/pending_ops", "name": "Pending Ops", "mimeType": "application/json"},
+        {"uri": "jarvis://sessions/list", "name": "Recent Sessions", "mimeType": "application/json"},
+        {"uri": "jarvis://sessions/stats", "name": "Session Stats", "mimeType": "application/json"},
     ]
 
 
@@ -222,9 +319,16 @@ def _read_resource(params: Optional[dict]) -> dict:
         "jarvis://system/status": _get_status_dict,
         "jarvis://model/info": _get_model_info_dict,
         "jarvis://system/pending_ops": _get_pending_ops_dict,
+        "jarvis://sessions/list": lambda: _list_sessions(limit=20),
+        "jarvis://sessions/stats": _get_session_stats,
     }
 
     handler = resource_map.get(uri)
+    # Fallback per resource dinamiche (sessioni singole)
+    if handler is None and uri.startswith("jarvis://sessions/"):
+        conv_id = uri[len("jarvis://sessions/"):]
+        if conv_id and conv_id not in ("list", "stats"):
+            handler = lambda: _get_session(conv_id)
     if not handler:
         return {"error": f"Unknown resource: {uri}", "code": -32602}
 
