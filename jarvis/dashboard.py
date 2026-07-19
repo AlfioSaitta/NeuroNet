@@ -1636,42 +1636,87 @@ async def list_cron_jobs():
 
 # ── Settings & System Info ──
 
-SETTINGS_KEYS = [
-    "LLAMA_MODEL_PATH", "N_GPU_LAYERS", "LLM_NUM_CTX", "LLM_FLASH_ATTN",
-    "QDRANT_HOST", "SEARXNG_HOST", "CRAWL4AI_HOST", "EMBEDDING_DIMS",
-    "WATCHDOG_ENABLED", "WATCHDOG_TIMEOUT", "VECTOR_DB_VERSION",
-    "SYNAPTIQ_ENABLED", "ALLOWED_USERS",
-]
+SETTINGS_META = {
+    # (key, type, editable, label, category, description)
+    "LLAMA_MODEL_PATH":     ("text",   True,  "LLM Model Path",     "🧠 Inferenza",    "Percorso del file GGUF del modello di chat principale"),
+    "LLM_NUM_CTX":          ("number", True,  "Context Size (n_ctx)", "🧠 Inferenza",   "Dimensione massima del contesto in token"),
+    "LLM_FLASH_ATTN":       ("bool",   True,  "Flash Attention",    "🧠 Inferenza",    "Abilita Flash Attention per ridurre VRAM del 30-50%"),
+    "GATEKEEPER_MODEL_PATH": ("text",  True,  "Gatekeeper Model",   "🧠 Inferenza",    "Percorso del modello GGUF per Gatekeeper (vuoto = disabilitato)"),
+    "GATEKEEPER_N_CTX":     ("number", True,  "Gatekeeper Context",  "🧠 Inferenza",   "Contesto massimo per Gatekeeper"),
+    "QDRANT_HOST":          ("text",   True,  "Qdrant Host",        "🔌 Servizi",      "Host del database vettoriale Qdrant ('local' = embedded)"),
+    "SEARXNG_HOST":         ("text",   True,  "SearXNG URL",        "🔌 Servizi",      "URL del motore di ricerca SearXNG"),
+    "CRAWL4AI_HOST":        ("text",   True,  "Crawl4AI URL",       "🔌 Servizi",      "URL del crawler web Crawl4AI"),
+    "WATCHDOG_ENABLED":     ("bool",   True,  "Watchdog Filesystem", "⚙️ Sistema",     "Abilita il monitoraggio real-time del filesystem per RAG"),
+    "WATCHDOG_TIMEOUT":     ("number", True,  "Watchdog Interval",   "⚙️ Sistema",     "Secondi tra scansioni watchdog"),
+    "EMBEDDING_DIMS":       ("number", True,  "Embedding Dimensions","📚 RAG",          "Dimensionalità delle embedding (richiede re-ingestione)"),
+    # Hidden (non mostrati in UI)
+    "N_GPU_LAYERS":         ("number", False, "",                    "",               ""),
+    "VECTOR_DB_VERSION":    ("text",   False, "",                    "",               ""),
+    "SYNAPTIQ_ENABLED":     ("bool",   False, "",                    "",               ""),
+    "ALLOWED_USERS":        ("text",   False, "",                    "",               ""),
+}
 
 SETTINGS_OVERRIDES: dict = {}
 
 
 @dashboard_router.get("/api/dashboard/settings")
 async def get_settings():
-    """Return current config values (read-only)."""
+    """Return current config values with metadata."""
     import config
     result = {}
-    for key in SETTINGS_KEYS:
+    visible = []
+    for key, meta in SETTINGS_META.items():
+        typ, editable, label, category, description = meta
+        # Skip hidden settings (those without a label)
+        if not label:
+            continue
         val = SETTINGS_OVERRIDES.get(key)
         if val is None:
             val = getattr(config, key, None)
-        # Convertirli in form serializable
         if isinstance(val, (list, tuple)):
             val = list(val)
-        result[key] = val
-    return JSONResponse({"settings": result})
+        result[key] = {"value": val, "type": typ, "editable": editable, "label": label, "category": category, "description": description}
+        visible.append(key)
+    return JSONResponse({"settings": result, "order": visible})
 
 
 @dashboard_router.post("/api/dashboard/settings")
 async def update_settings(request: Request):
-    """Update in-memory settings."""
+    """Update in-memory settings. Validates types and editable flag."""
     body = await request.json()
     updated = []
+    errors = []
     for key, val in body.items():
-        if key in SETTINGS_KEYS:
-            SETTINGS_OVERRIDES[key] = val
-            updated.append(key)
-    return JSONResponse({"status": "ok", "updated": updated, "message": f"{len(updated)} settings updated in memory"})
+        meta = SETTINGS_META.get(key)
+        if not meta:
+            errors.append(f"Unknown setting: {key}")
+            continue
+        typ, editable, *_ = meta
+        if not editable:
+            errors.append(f"Setting '{key}' is read-only")
+            continue
+        # Type coercion
+        try:
+            if typ == "number":
+                val = int(val)
+            elif typ == "bool":
+                if isinstance(val, str):
+                    val = val.lower() in ("true", "1", "yes")
+                else:
+                    val = bool(val)
+            else:
+                val = str(val)
+        except (ValueError, TypeError):
+            errors.append(f"Invalid value type for '{key}'")
+            continue
+        SETTINGS_OVERRIDES[key] = val
+        updated.append(key)
+    return JSONResponse({
+        "status": "ok" if not errors else "partial",
+        "updated": updated,
+        "errors": errors,
+        "message": f"{len(updated)} settings updated" + (f", {len(errors)} errors" if errors else ""),
+    })
 
 
 @dashboard_router.get("/api/dashboard/system/info")
