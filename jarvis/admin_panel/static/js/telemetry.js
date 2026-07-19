@@ -256,10 +256,12 @@ function updateSessionTelemetry(sessions) {
 
 // ── Stats Poll (3s) ──
 
+// isModalOpen is a global flag set by graph.js when graph modal is open, to pause polling
+
 window.fetchStats = async function() {
-    if (isModalOpen) return;
+    if (typeof isModalOpen !== 'undefined' && isModalOpen) return;
     try {
-        const res = await fetch('/api/dashboard/stats');
+        const res = await fetchWithTimeout('/api/dashboard/stats', {}, 10000);
         const data = await res.json();
 
         updateGPU(data.gpu);
@@ -300,6 +302,7 @@ window.fetchStats = async function() {
         }
 
     } catch (err) {
+        if (err.name === 'AbortError') return;
         console.error('Failed to fetch telemetry', err);
     }
 };
@@ -448,13 +451,11 @@ document.addEventListener('keydown', function(e) {
 async function openSessionDetail(convId) {
     if (!convId) return;
     try {
-        const res = await fetch('/api/dashboard/telemetry');
+        const res = await fetchWithTimeout('/api/dashboard/telemetry', {}, 10000);
         const data = await res.json();
-        // We don't have a direct /api/dashboard/session/{id} endpoint, use the MCP tool via main
-        // Fallback: search sessions and find the matching one
-        // For now, show toast notification
         showToast('Session ' + convId.substring(0, 12) + ' — use MCP tool get_session for full detail', 'info');
     } catch(e) {
+        if (e.name === 'AbortError') return;
         console.error('Session detail error', e);
     }
 }
@@ -463,7 +464,7 @@ async function openSessionDetail(convId) {
 
 async function fetchTelemetry() {
     try {
-        const res = await fetch('/api/dashboard/telemetry');
+        const res = await fetchWithTimeout('/api/dashboard/telemetry', {}, 10000);
         const data = await res.json();
 
         // Gatekeeper stats
@@ -534,6 +535,7 @@ async function fetchTelemetry() {
             tbody.innerHTML = '<tr><td colspan="10" style="padding:12px;text-align:center;color:var(--text-muted);">No traces yet</td></tr>';
         }
     } catch (err) {
+        if (err.name === 'AbortError') return;
         console.error('Failed to fetch telemetry', err);
     }
 }

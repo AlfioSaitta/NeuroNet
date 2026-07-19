@@ -475,7 +475,7 @@ async function renderSigmaGraph(config) {
 
 async function openGraphModal(collectionName) {
     try {
-        const res = await fetch(`/api/dashboard/qdrant/${collectionName}/vectors`);
+        const res = await fetchWithTimeout(`/api/dashboard/qdrant/${collectionName}/vectors`, {}, 30000);
         const data = await res.json();
 
         const points = data.points || [];
@@ -594,7 +594,7 @@ async function openGraphModal(collectionName) {
 
 async function openMemoryGraphModal() {
     try {
-        const res = await fetch('/api/dashboard/graph/memory');
+        const res = await fetchWithTimeout('/api/dashboard/graph/memory', {}, 30000);
         const data = await res.json();
 
         const points = data.points || [];

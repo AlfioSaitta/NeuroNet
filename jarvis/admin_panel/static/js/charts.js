@@ -37,6 +37,34 @@ function initCharts() {
     cpuChart = createLineChart('chart-cpu', '#ff8833', 'rgba(255,136,51,0.08)', 0, 100);
     cpuTempChart = createLineChart('chart-cpu-temp', '#ff3366', 'rgba(255,51,102,0.08)', 20, 110);
     tokPerSecChart = createLineChart('chart-tok-per-sec', '#00ffcc', 'rgba(0,255,204,0.08)', 0, 20);
+
+    // Add ResizeObserver for chart containers to handle mobile resize
+    const chartCards = document.querySelectorAll('.h-80, .h-60');
+    if (window.ResizeObserver) {
+        chartCards.forEach(card => {
+            const canvas = card.querySelector('canvas');
+            if (!canvas) return;
+            const observer = new ResizeObserver(() => {
+                requestAnimationFrame(() => {
+                    if (tempChart) tempChart.resize();
+                    if (vramChart) vramChart.resize();
+                    if (utilChart) utilChart.resize();
+                    if (ramChart) ramChart.resize();
+                    if (cpuChart) cpuChart.resize();
+                    if (cpuTempChart) cpuTempChart.resize();
+                    if (tokPerSecChart) tokPerSecChart.resize();
+                });
+            });
+            observer.observe(card);
+        });
+    }
+}
+
+// Resize all charts (called when monitor view becomes active)
+function resizeAllCharts() {
+    [tempChart, vramChart, utilChart, ramChart, cpuChart, cpuTempChart, tokPerSecChart].forEach(ch => {
+        if (ch) ch.resize();
+    });
 }
 
 function updateCharts(history) {

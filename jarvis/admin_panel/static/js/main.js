@@ -17,11 +17,11 @@ function switchView(viewName) {
     if (viewName === 'rag') loadRAGData();
     if (viewName === 'models') loadModelsData();
     if (viewName === 'tasks') { loadTasksData(); loadCronData(); }
-    if (viewName === 'logs') { loadContainers(); fetchLogs(); if (document.getElementById('log-auto-refresh')?.checked) { if (logInterval) clearInterval(logInterval); logInterval = setInterval(fetchLogs, 5000); } }
+    if (viewName === 'logs') { document.getElementById('log-container-select').value = 'all'; loadContainers(); fetchLogs(); if (document.getElementById('log-auto-refresh')?.checked) { if (logInterval) clearInterval(logInterval); logInterval = setInterval(fetchLogs, 5000); } }
     if (viewName === 'analytics') loadAnalyticsData();
     if (viewName === 'settings') loadSettingsData();
     if (viewName === 'graph') loadGraphCollections();
-    if (viewName === 'monitor') { /* already polls via setInterval */ }
+    if (viewName === 'monitor') { resizeAllCharts(); /* already polls via setInterval */ }
 }
 
 function toggleTheme() {

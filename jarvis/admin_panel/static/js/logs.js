@@ -23,7 +23,7 @@ function toggleAutoRefresh() {
 
 async function loadContainers() {
     try {
-        const res = await fetch('/api/dashboard/containers');
+        const res = await fetchWithTimeout('/api/dashboard/containers');
         const data = await res.json();
         const select = document.getElementById('log-container-select');
         const currentVal = select.value;
@@ -38,15 +38,18 @@ async function loadContainers() {
             select.value = currentVal;
         }
     } catch(e) {
+        if (e.name === 'AbortError') return;
         console.error('Failed to load containers', e);
+        showToast('Failed to load containers', 'error');
     }
 }
 
 async function fetchLogs() {
     const container = document.getElementById('log-container-select').value;
     const display = document.getElementById('log-display');
+    setLoading(display, true, 'Loading logs...');
     try {
-        const res = await fetch(`/api/dashboard/containers/${encodeURIComponent(container)}/logs?tail=500`);
+        const res = await fetchWithTimeout(`/api/dashboard/containers/${encodeURIComponent(container)}/logs?tail=500`);
         const data = await res.json();
         if (data.logs) {
             display.textContent = data.logs.map(l => `[${l.container}] ${l.message}`).join('\n');
@@ -55,28 +58,42 @@ async function fetchLogs() {
             display.textContent = 'Error: ' + data.error;
         }
     } catch(e) {
+        if (e.name === 'AbortError') {
+            display.textContent = 'Request timed out';
+            return;
+        }
         display.textContent = 'Failed to fetch logs: ' + (e.message || e);
+    } finally {
+        setLoading(display, false);
     }
 }
 
 async function restartContainer(name) {
     if (!confirm('Restart container "' + name + '"?')) return;
     try {
-        const res = await fetch(`/api/dashboard/containers/${encodeURIComponent(name)}/restart`, { method: 'POST' });
+        const res = await fetchWithTimeout(`/api/dashboard/containers/${encodeURIComponent(name)}/restart`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'restarting') {
+            showToast('Container restarting...', 'success');
             setTimeout(fetchStats, 3000);
+        } else {
+            showToast('Failed to restart container', 'error');
         }
     } catch(e) {
+        if (e.name === 'AbortError') return;
         console.error('Failed to restart', name, e);
+        showToast('Failed to restart container', 'error');
     }
 }
 
 async function restartIngestion() {
     if (!confirm('Restart document ingestion?')) return;
     try {
-        await fetch('/api/dashboard/ingestion/restart', { method: 'POST' });
+        await fetchWithTimeout('/api/dashboard/ingestion/restart', { method: 'POST' });
+        showToast('Ingestion restarting...', 'success');
     } catch(e) {
+        if (e.name === 'AbortError') return;
         console.error('Failed to restart ingestion', e);
+        showToast('Failed to restart ingestion', 'error');
     }
 }

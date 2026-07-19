@@ -18,7 +18,7 @@ function showChatView(show) {
 
 async function loadSessionList() {
     try {
-        const resp = await fetch('/api/dashboard/sessions?limit=50');
+        const resp = await fetchWithTimeout('/api/dashboard/sessions?limit=50', {}, 10000);
         const data = await resp.json();
         const list = document.getElementById('chat-session-list');
         list.innerHTML = '';
@@ -57,7 +57,7 @@ async function loadSessionList() {
 
 async function createNewSession() {
     try {
-        const resp = await fetch('/api/dashboard/sessions', { method: 'POST' });
+        const resp = await fetchWithTimeout('/api/dashboard/sessions', { method: 'POST' }, 10000);
         const data = await resp.json();
         if (data.conversation_id) {
             await switchSession(data.conversation_id);
@@ -85,7 +85,7 @@ async function switchSession(convId) {
 async function loadChatHistory() {
     try {
         // Try ChatSessionStore first
-        const resp = await fetch('/api/dashboard/sessions/' + encodeURIComponent(currentSessionId) + '/messages');
+        const resp = await fetchWithTimeout('/api/dashboard/sessions/' + encodeURIComponent(currentSessionId) + '/messages', {}, 15000);
         const data = await resp.json();
         const container = document.getElementById('chat-messages');
         const emptyState = document.getElementById('chat-empty-state');
@@ -94,7 +94,7 @@ async function loadChatHistory() {
 
         if (!data.messages || data.messages.length === 0) {
             // Fallback to legacy chat-history
-            const resp2 = await fetch('/api/dashboard/chat-history?conversation_id=' + encodeURIComponent(chatConvId));
+            const resp2 = await fetchWithTimeout('/api/dashboard/chat-history?conversation_id=' + encodeURIComponent(chatConvId), {}, 15000);
             const data2 = await resp2.json();
             if (data2.messages && data2.messages.length > 0) {
                 emptyState.style.display = 'none';
@@ -136,7 +136,7 @@ async function loadChatHistory() {
 async function deleteSession(convId) {
     if (!confirm('Delete this session and all its messages?')) return;
     try {
-        const resp = await fetch('/api/dashboard/sessions/' + encodeURIComponent(convId), { method: 'DELETE' });
+        const resp = await fetchWithTimeout('/api/dashboard/sessions/' + encodeURIComponent(convId), { method: 'DELETE' }, 10000);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         // If deleting the currently active session, create a new one
         if (convId === currentSessionId) {

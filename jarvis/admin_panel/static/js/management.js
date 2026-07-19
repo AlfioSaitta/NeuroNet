@@ -5,10 +5,11 @@
 // ── RAG ──
 
 async function loadRAGData() {
+    const tbody = document.getElementById('rag-collections-body');
+    showLoading('rag-collections-body', 'Loading collections...');
     try {
-        const res = await fetch('/api/dashboard/rag/collections');
+        const res = await fetchWithTimeout('/api/dashboard/rag/collections');
         const data = await res.json();
-        const tbody = document.getElementById('rag-collections-body');
         if (!data.collections || data.collections.length === 0) {
             tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);">No collections</td></tr>';
             return;
@@ -22,16 +23,22 @@ async function loadRAGData() {
             </tr>
         `).join('');
     } catch(e) {
-        document.getElementById('rag-collections-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--danger);">Error loading collections</td></tr>';
+        if (e.name === 'AbortError') return;
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--danger);">Error loading collections</td></tr>';
     }
 }
 
 async function triggerReindex() {
     try {
-        const res = await fetch('/api/dashboard/rag/reindex', { method: 'POST' });
+        const res = await fetchWithTimeout('/api/dashboard/rag/reindex', { method: 'POST' });
         const data = await res.json();
         showToast(data.status === 'ok' ? 'Re-index started' : 'Error: ' + (data.error || 'unknown'), data.status === 'ok' ? 'success' : 'error');
-    } catch(e) { showToast('Error: ' + e.message, 'error'); }
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        showToast('Error: ' + e.message, 'error');
+    } finally {
+        setLoading(btn, false);
+    }
 }
 
 async function deleteCollection() {
@@ -39,18 +46,23 @@ async function deleteCollection() {
     if (!name) return showToast('Enter a collection name', 'error');
     if (!confirm('Delete collection "' + name + '"?')) return;
     try {
-        const res = await fetch('/api/dashboard/rag/collection/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name: name}) });
+        const res = await fetchWithTimeout('/api/dashboard/rag/collection/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name: name}) });
         const data = await res.json();
         if (data.status === 'ok') { showToast('Collection deleted', 'success'); loadRAGData(); }
         else showToast('Error: ' + (data.error || 'unknown'), 'error');
-    } catch(e) { showToast('Error: ' + e.message, 'error'); }
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        showToast('Error: ' + e.message, 'error');
+    }
 }
 
 // ── Models ──
 
 async function loadModelsData() {
+    const tbody = document.getElementById('models-list-body');
+    showLoading('models-list-body', 'Loading models...');
     try {
-        const res = await fetch('/api/dashboard/models');
+        const res = await fetchWithTimeout('/api/dashboard/models');
         const data = await res.json();
         // Current model
         const cm = data.current;
@@ -62,7 +74,6 @@ async function loadModelsData() {
             document.getElementById('cm-name').textContent = 'No model loaded';
         }
         // Available models
-        const tbody = document.getElementById('models-list-body');
         if (!data.available || data.available.length === 0) {
             tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text-muted);">No models found in models/ directory</td></tr>';
             return;
@@ -74,26 +85,33 @@ async function loadModelsData() {
                 <td class="actions"><button class="btn" onclick="switchModel('${m.path}')" style="font-size:0.6rem;padding:2px 6px;">Switch</button></td>
             </tr>
         `).join('');
-    } catch(e) { document.getElementById('models-list-body').innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--danger);">Error loading models</td></tr>'; }
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--danger);">Error loading models</td></tr>';
+    }
 }
 
 async function switchModel(path) {
     if (!confirm('Switch to this model?')) return;
     try {
-        const res = await fetch('/api/dashboard/models/switch', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path: path}) });
+        const res = await fetchWithTimeout('/api/dashboard/models/switch', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path: path}) });
         const data = await res.json();
         showToast(data.status === 'ok' ? data.message : 'Error: ' + (data.error || 'unknown'), data.status === 'ok' ? 'success' : 'error');
         if (data.status === 'ok') loadModelsData();
-    } catch(e) { showToast('Error: ' + e.message, 'error'); }
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        showToast('Error: ' + e.message, 'error');
+    }
 }
 
 // ── Tasks ──
 
 async function loadTasksData() {
+    const tbody = document.getElementById('tasks-list-body');
+    showLoading('tasks-list-body', 'Loading tasks...');
     try {
-        const res = await fetch('/api/dashboard/tasks');
+        const res = await fetchWithTimeout('/api/dashboard/tasks');
         const data = await res.json();
-        const tbody = document.getElementById('tasks-list-body');
         if (!data.tasks || data.tasks.length === 0) {
             tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);">No tasks</td></tr>';
             return;
@@ -107,7 +125,10 @@ async function loadTasksData() {
                 <td class="actions"><button class="btn" onclick="deleteTask('${t.id}')" style="font-size:0.6rem;padding:2px 6px;background:rgba(255,51,102,0.1);color:var(--danger);border-color:rgba(255,51,102,0.3);">✕</button></td>
             </tr>
         `).join('');
-    } catch(e) { document.getElementById('tasks-list-body').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--danger);">Error</td></tr>'; }
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        document.getElementById('tasks-list-body').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--danger);">Error</td></tr>';
+    }
 }
 
 async function addTask() {
@@ -115,33 +136,40 @@ async function addTask() {
     if (!desc) return;
     const priority = document.getElementById('task-priority-input').value;
     try {
-        const res = await fetch('/api/dashboard/tasks', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({description: desc, priority: priority}) });
+        const res = await fetchWithTimeout('/api/dashboard/tasks', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({description: desc, priority: priority}) });
         const data = await res.json();
         if (data.status === 'ok') {
             document.getElementById('task-desc-input').value = '';
             loadTasksData();
             showToast('Task created', 'success');
         } else showToast('Error: ' + (data.error || 'unknown'), 'error');
-    } catch(e) { showToast('Error: ' + e.message, 'error'); }
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        showToast('Error: ' + e.message, 'error');
+    }
 }
 
 async function deleteTask(taskId) {
     if (!confirm('Delete task ' + taskId + '?')) return;
     try {
-        const res = await fetch('/api/dashboard/tasks/' + taskId, { method: 'DELETE' });
+        const res = await fetchWithTimeout('/api/dashboard/tasks/' + taskId, { method: 'DELETE' });
         const data = await res.json();
         if (data.status === 'ok') { loadTasksData(); showToast('Task deleted', 'success'); }
         else showToast('Error: ' + (data.error || 'unknown'), 'error');
-    } catch(e) { showToast('Error: ' + e.message, 'error'); }
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        showToast('Error: ' + e.message, 'error');
+    }
 }
 
 // ── CRON ──
 
 async function loadCronData() {
+    const tbody = document.getElementById('cron-list-body');
+    showLoading('cron-list-body', 'Loading cron jobs...');
     try {
-        const res = await fetch('/api/dashboard/cron');
+        const res = await fetchWithTimeout('/api/dashboard/cron');
         const data = await res.json();
-        const tbody = document.getElementById('cron-list-body');
         if (!data.jobs || data.jobs.length === 0) {
             tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);">No cron jobs</td></tr>';
             return;
@@ -154,7 +182,10 @@ async function loadCronData() {
                 <td><span class="badge ${j.enabled ? 'badge-primary' : 'badge-warning'}">${j.enabled ? 'Active' : 'Paused'}</span></td>
             </tr>
         `).join('');
-    } catch(e) { document.getElementById('cron-list-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--danger);">Error</td></tr>'; }
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        document.getElementById('cron-list-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--danger);">Error</td></tr>';
+    }
 }
 
 // ── Analytics ──
@@ -162,8 +193,8 @@ async function loadCronData() {
 async function loadAnalyticsData() {
     try {
         const [infRes, teleRes] = await Promise.all([
-            fetch('/api/dashboard/analytics/inference'),
-            fetch('/api/dashboard/telemetry')
+            fetchWithTimeout('/api/dashboard/analytics/inference'),
+            fetchWithTimeout('/api/dashboard/telemetry')
         ]);
         const inf = await infRes.json();
         const tele = await teleRes.json();
@@ -204,8 +235,8 @@ async function loadAnalyticsData() {
 async function loadSettingsData() {
     try {
         const [setRes, sysRes] = await Promise.all([
-            fetch('/api/dashboard/settings'),
-            fetch('/api/dashboard/system/info')
+            fetchWithTimeout('/api/dashboard/settings'),
+            fetchWithTimeout('/api/dashboard/system/info')
         ]);
         const setData = await setRes.json();
         const sysData = await sysRes.json();
@@ -229,10 +260,11 @@ async function loadSettingsData() {
 // ── Graph Collections list ──
 
 async function loadGraphCollections() {
+    const list = document.getElementById('qdrant-graph-list');
+    showLoading('qdrant-graph-list', 'Loading collections...');
     try {
-        const res = await fetch('/api/dashboard/stats');
+        const res = await fetchWithTimeout('/api/dashboard/stats');
         const data = await res.json();
-        const list = document.getElementById('qdrant-graph-list');
         if (data.qdrant_collections && data.qdrant_collections.length > 0) {
             list.innerHTML = data.qdrant_collections.map(c => {
                 const name = typeof c === 'string' ? c : c.name;
@@ -242,5 +274,8 @@ async function loadGraphCollections() {
         } else {
             list.innerHTML = '<li style="color:var(--text-muted);">No collections found</li>';
         }
-    } catch(e) { document.getElementById('qdrant-graph-list').innerHTML = '<li style="color:var(--danger);">Error loading collections</li>'; }
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        list.innerHTML = '<li style="color:var(--danger);">Error loading collections</li>';
+    }
 }

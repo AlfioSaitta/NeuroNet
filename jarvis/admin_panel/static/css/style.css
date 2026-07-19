@@ -12,7 +12,7 @@
     --danger: #ff3366;
     --warning: #ffcc00;
     --text-main: #f8fafc;
-    --text-muted: #94a3b8;
+    --text-muted: #cbd5e1;
     --sidebar-bg: rgba(8, 12, 18, 0.95);
     --sidebar-hover: rgba(0, 255, 204, 0.06);
     --sidebar-active: rgba(0, 255, 204, 0.12);
@@ -224,7 +224,7 @@ body {
     border-color: rgba(0, 255, 204, 0.3);
 }
 .card-header {
-    font-size: 0.95rem; font-weight: 600; color: #fff;
+    font-size: 0.95rem; font-weight: 600; color: var(--text-main);
     text-transform: uppercase; letter-spacing: 1px;
     display: flex; align-items: center; margin-bottom: 18px;
 }
@@ -279,9 +279,17 @@ body {
 
 /* ── Modals ── */
 .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(5, 7, 10, 0.97); backdrop-filter: blur(10px); }
-.modal-header { position: absolute; top: 0; left: 0; width: 100%; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(to bottom, rgba(0,0,0,0.85), transparent); z-index: 1010; }
+.modal-content {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 90%; max-width: 900px; max-height: 85vh;
+    background: var(--glass-bg); border: 1px solid var(--glass-border);
+    border-radius: var(--card-radius); overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.modal-header { padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.3); border-bottom: 1px solid var(--glass-border); }
 .modal-header h2 { margin: 0; font-size: 1rem; font-weight: 600; display: flex; align-items: center; gap: 10px; }
-.close-modal { color: #fff; font-size: 28px; cursor: pointer; transition: 0.2s; line-height: 1; }
+.modal-body { padding: 20px 24px; max-height: calc(100vh - 120px); overflow-y: auto; }
+.close-modal { color: var(--text-main); font-size: 28px; cursor: pointer; transition: 0.2s; line-height: 1; }
 .close-modal:hover { color: var(--danger); transform: scale(1.1); }
 
 #graph-container { width: 100%; height: 100%; background-image: radial-gradient(circle at 1px 1px, rgba(0, 255, 204, 0.06) 1px, transparent 0); background-size: 20px 20px; }
@@ -306,6 +314,10 @@ body {
 .graph-legend { position: absolute; bottom: 20px; right: 20px; z-index: 1010; background: rgba(10, 15, 25, 0.85); border: 1px solid rgba(255,255,255,0.08); padding: 10px 14px; border-radius: 8px; font-size: 0.65rem; display: none; flex-direction: column; gap: 3px; }
 .graph-legend .legend-row { display: flex; align-items: center; gap: 6px; }
 .graph-legend .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+/* ── Graph z-index fix: keep below sidebar overlay ── */
+#graph-modal { z-index: 900; }
+#graph-modal .modal-content { width: 100%; height: 100%; max-width: 100%; max-height: 100%; border-radius: 0; position: relative; top: auto; left: auto; transform: none; }
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; }
@@ -446,6 +458,14 @@ body {
 .toast.success { border-color: var(--primary); }
 .toast.error { border-color: var(--danger); }
 
+/* ── Loading Skeleton ── */
+.loading-placeholder {
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px; color: var(--text-muted); font-size: 0.75rem;
+    font-family: 'JetBrains Mono', monospace;
+    animation: pulse 1.5s infinite ease-in-out;
+}
+
 /* ── Utility Classes ── */
 .mono { font-family: 'JetBrains Mono', monospace !important; }
 .text-muted { color: var(--text-muted) !important; }
@@ -565,6 +585,12 @@ body {
     .metric .val { font-size: 1.3rem; }
 }
 
+/* Modal mobile: expand to full width */
+@media (max-width: 768px) {
+    .modal-content { width: 95%; max-height: 90vh; }
+    .modal-body { padding: 16px; }
+}
+
 /* < 600px: mobile */
 @media (max-width: 600px) {
     .view { padding: 12px; gap: 12px; }
@@ -583,6 +609,8 @@ body {
     .node-info { width: calc(100% - 40px); max-height: 60vh; left: 20px; bottom: 20px; }
     .graph-legend { bottom: 10px; right: 10px; }
     .trace-modal-content { margin: 0; border-radius: 0; }
+    .trace-detail-grid { grid-template-columns: 1fr; }
+    .trace-modal-body { padding: 12px 16px; }
 }
 
 /* < 400px: extra-small */

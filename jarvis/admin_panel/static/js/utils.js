@@ -36,3 +36,57 @@ function calcVramColor(pct) {
     if (pct < 85) return 'yellow';
     return 'red';
 }
+
+// ── Fetch with timeout & abort ──
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, { ...options, signal: controller.signal });
+        return res;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+// ── Debounce utility ──
+
+function debounce(fn, delayMs = 300) {
+    let timer;
+    return function(...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), delayMs);
+    };
+}
+
+// ── Loading state helpers ──
+
+function setLoading(el, loading, msg) {
+    if (!el) return;
+    if (loading) {
+        el.dataset.originalText = el.innerText || el.textContent;
+        el.innerHTML = '<span style="opacity:0.5;">' + (msg || 'Loading...') + '</span>';
+        el.style.pointerEvents = 'none';
+    } else {
+        if (el.dataset.originalText) {
+            el.innerText = el.dataset.originalText;
+            delete el.dataset.originalText;
+        }
+        el.style.pointerEvents = '';
+    }
+}
+
+function showLoading(containerId, msg) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    el.dataset.originalHtml = el.innerHTML;
+    el.innerHTML = '<div class="text-center text-muted" style="padding:20px;"><span style="opacity:0.5;">' + (msg || 'Loading...') + '</span></div>';
+}
+
+function clearLoading(containerId) {
+    const el = document.getElementById(containerId);
+    if (!el || !el.dataset.originalHtml) return;
+    el.innerHTML = el.dataset.originalHtml;
+    delete el.dataset.originalHtml;
+}
