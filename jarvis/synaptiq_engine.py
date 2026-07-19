@@ -549,13 +549,28 @@ class SynaptiqEngine:
     async def run_initial_analysis(self, project_paths: list[str]) -> None:
         """Analisi iniziale su tutti i progetti (eseguita al boot).
 
-        Lancia tutte le analisi in parallelo via gather così che coesistano
+        Se il grafo è già popolato (nodes_count > 0), salta tutta l'analisi:
+        a startup nessun file è cambiato, quindi non serve re-analizzare.
+
+        Lancia le analisi in parallelo via gather così che coesistano
         con l'avvio del server (non bloccante).
         """
         if not project_paths:
             return
         if not self._initialized:
             await self.initialize()
+
+        # Salta se il grafo ha già dati — a startup nessun file è cambiato
+        st = await self.status()
+        if st.get("nodes_count", 0) > 0:
+            logger.info(
+                "Synaptiq grafo già popolato (%d nodi, %d relazioni) — "
+                "scan iniziale saltato. Per forzare re-analisi, "
+                "eliminare %s e riavviare.",
+                st["nodes_count"], st.get("relationships_count", 0),
+                self.storage_path,
+            )
+            return
 
         valid = [p for p in project_paths if p and Path(p).is_dir()]
         if not valid:
