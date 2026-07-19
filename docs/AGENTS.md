@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-07-18 (Synaptiq v2.0.5 + Watchdog Automation + Dashboard Admin Panel)
+> **Data ultimo aggiornamento:** 2026-07-19 (Settings Dashboard + Monitor Qdrant cleanup + Doc sync)
 
 ---
 
@@ -166,7 +166,7 @@ Master jarvis:8000
 | `telegram_userbot_manager.py` | Multi-userbot Telethon (MTProto), autenticazione OTP. | `config`, `state` |
 | `web_search.py` | SearXNG metasearch + Crawl4AI scraping parallelo. | `config`, `state` |
 | `cron_agent.py` | APScheduler: promemoria, task ricorrenti, timer relativi. | `config`, `state` |
-| `dashboard.py` | Pannello web di controllo Jarvis. | `state` |
+| `dashboard.py` | Pannello web di controllo Jarvis. **SETTINGS_META** (73 env var categorizzate con metadati: type, editable, category, restart_required, sensitive, basic). `_persist_env()` persistenza atomica su `.env`. `update_settings()` con type coercion e restart detection. Endpoint: `/api/dashboard/settings` | `state`, `.env` |
 | `skills_manager.py` | Carica skill dinamiche da `jarvis/skills/` a runtime. | — |
 | `reflection_agent.py` | Job notturno di consolidamento memoria. | `memory`, `llm_engine` |
 | `openai_router.py` | Router legacy endpoint OpenAI (`/v1/*`) in main.py. | `config`, `llm_engine`, `prompt_builder` |
@@ -182,6 +182,9 @@ Master jarvis:8000
 | `synaptiq_engine.py` | **Synaptiq Engine.** Wrapper asincrono thread-safe per Synaptiq v2.0.5 (LadybugBackend + run_pipeline). Analisi strutturale del codice, hybrid search, symbol context, traversal, dead code, community detection. Watchdog integration: `notify_file_event()` con debounce per-project 30s. | `synaptiq.core.*`, `asyncio` |
 | `synaptiq_bridge.py` | Bridge che fonde RAG (Qdrant) + Synaptiq (grafo) per hybrid code search. Replaces `code_intelligence.py`. | `synaptiq_engine`, `rag` (lazy) |
 | `code_intelligence.py` | **Legacy re-export.** `from synaptiq_bridge import hybrid_code_search` per retrocompatibilità. | `synaptiq_bridge` |
+| `session_store.py` | Chat session store persistente su SQLite. `ChatSessionStore` con `save_session()`/`load_session()`/`list_sessions()`/`delete_session()`. Usato da dashboard e main.py. | `sqlite3`, `state` |
+| `classificatore.py` | Classificatore intenti centralizzato: `classify()`, `is_project_query()`, `is_greeting()`, `is_web_query()`, `is_internal_query()`. Costanti `Intent.*` e `PROJECT_KEYWORDS`. | `re` |
+| `confirmation_manager.py` | Gestione conferme utente per tool-calling. `ConfirmationManager` con timeout 5 min, token univoci, callback. | `state`, `asyncio` |
 
 ### Sotto-pacchetto `jarvis/admin_panel/`
 
@@ -197,8 +200,9 @@ Pacchetto dashboard web modulare estratto da `dashboard_template.py`. Template H
 | `static/js/graph.js` | Sigma.js graph viewer (689 righe). `renderSigmaGraph()` funzione condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. FA2, 7 event handler, stats panel, resize observer |
 | `static/js/chat.js` | Chat view: streaming SSE, paste event, drag-drop file, keydown '/' shortcut. Event listener consolidati in DOMContentLoaded (390 righe) |
 | `static/js/telemetry.js` | Polling telemetry (351 righe): 10 funzioni dominio-specifiche (`updateGPU()`, `updateModels()`, `updateHealth()`...), Page Visibility API per stop/resume polling su tab hidden |
-| `static/js/management.js` | Container/ingestion management: restart, log viewer con combo box, auto-refresh |
+| `static/js/management.js` | Admin management views: Code Graph (collections, reindex, delete), Models (list, switch), Tasks (CRUD), Cron (list), Analytics (inference, telemetry, gatekeeper), **Settings (loadSettingsData, saveSettings, toggleAdvancedMode)** con 73 env var categorizzate, Simple/Advanced Mode toggle, persistenza locale |
 | `static/js/logs.js` | Docker logs viewer con filtering e auto-scroll |
+| `static/js/utils.js` | Utility condivise: `fetchWithTimeout()`, `showLoading()`, `showToast()`, `escapeHtml()` |
 
 ### Sotto-pacchetto `jarvis/openai/`
 
@@ -371,6 +375,9 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 
 | Data | Modifica | Impatto |
 |---|---|---|
+| 19/07 | **Settings Dashboard — 73 env var categorizzate** | `dashboard.py` SETTINGS_META espansa da 11 a 73 setting (63 visibili in 12 categorie, 10 hidden). `_persist_env()` atomic write su `.env`. `update_settings()` con type coercion (int/float/bool/str). Frontend: float/select/secret tipi, badge ⚡ restart_required, toggle Simple/Advanced Mode. UI settings: Gatekeeper, Embedding & Reranker, Watchdog, Rate Limit cards separate |
+| 19/07 | **Monitor — Rimossa sezione Qdrant Collections** | Sezione inutile (duplicata da Code Graph) rimossa da index.html e telemetry.js. Funzione `updateQdrantCollections()` eliminata |
+| 19/07 | **Documentazione — Aggiornamento completo** | AGENTS.md, README.md, COMPONENTS.md aggiornati con nuovi moduli e feature. Aggiunti: `session_store.py`, `classificatore.py`, `confirmation_manager.py`, `utils.js` |
 | 18/07 | **Dashboard — Admin Panel modulare** | `dashboard_template.py` rifattorizzato in `admin_panel/` sub-package: __init__.py router, 6 JS moduli, style.css, index.html. Backend `dashboard.py` immutato. Route `/dashboard/` e `/admin/` attive |
 | 18/07 | **graph.js — Deduplicato rendering Sigma.js** | Creata `renderSigmaGraph(config)` funzione condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. FA2, 7 event handler, stats, resize observer unificati. 856→689 righe (-19.5%) |
 | 18/07 | **index.html — Inline style ridotti -71%** | ~200 → 57 inline style. Rimpiazzati con 30+ classi utility CSS (.mono, .text-muted, .flex, .gap-*, .grid-*, .fw-*, .card-compact). Rimasti solo stili dinamici/display/font non standard |
@@ -486,7 +493,7 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/main.py` | ✅ Corretto | reset-all pulisce last_project_context, conversation_id passato alla pipeline, PollingObserver watchdog, cleanup nested symlink |
 | `jarvis/telegram_bot.py` | ✅ Corretto | user_id normalizzato a string, session TTL resetta progetto |
 | `jarvis/model_profiles.py` | ✅ Nuovo | Auto-rilevamento famiglia modello da nome GGUF (Qwen, Gemma, DeepSeek, Llama, Mistral, Phi, Command-R) |
-| `jarvis/dashboard.py` | ✅ Riscritto | GPU monitor real-time con time-series charts (Chart.js), inference counters, modelli, Qdrant collections |
+| `jarvis/dashboard.py` | ✅ **ESTESO** | SETTINGS_META (73 env var categorizzate), `_persist_env()`, `update_settings()`. Endpoint `/api/dashboard/settings` con type coercion, restart detection |
 | `jarvis/openai/` (pacchetto) | ✅ Nuovo | 17 moduli: chat/completions/embeddings/audio/images + Assistants/Threads/Runs API. Lazy import, init ritardato nell'lifespan |
 | `jarvis/openai/state.py` | ✅ Fixato | `asyncio.Lock` + double-check locking in `get_db()` — risolve race condition su richieste concorrenti al DB Assistants |
 | `jarvis/rag_reranker.py` | ✅ Nuovo | Reranker modulare: Qwen3-Reranker (transformers fp16 CPU) + fallback FlashRank ONNX |
@@ -494,6 +501,10 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/telegram_format.py` | ✅ Nuovo | Utility formattazione Telegram MarkdownV2/Markdown |
 | `jarvis/admin_panel/` (pacchetto) | ✅ **OTTIMIZZATO** | Dashboard web modulare: `__init__.py` router, 6 JS moduli (main, charts, graph, chat, telemetry, management, logs), style.css, index.html. graph.js deduplicato (-19.5%), inline style -71%, telemetry.js splittato in 10 funzioni + Page Visibility API, chat.js listener consolidati |
 | `jarvis/dashboard_template.py` | ➖ **RIFATTORIZZATO** | HTML/CSS/JS estratto in `admin_panel/` sub-package con moduli separati. Mantenuto come fallback legacy |
+| `jarvis/dashboard.py` (settings) | ✅ **ESTESO** | SETTINGS_META 73 env var, _persist_env(), update_settings(). Endpoint POST /api/dashboard/settings |
+| `jarvis/session_store.py` | ✅ Nuovo | ChatSessionStore SQLite persistente: save/load/list/delete sessioni |
+| `jarvis/classificatore.py` | ✅ Nuovo | Classificatore intenti centralizzato (Intent enum, classify(), is_project_query()) |
+| `jarvis/confirmation_manager.py` | ✅ Nuovo | Gestione conferme utente per tool-calling con timeout e token |
 | `jarvis/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls, ring buffer 500 trace. Prompt fields: system_prompt, rag_context, user_content, compressed_text, llm_response |
 | `jarvis/mcp_server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna |
 | `jarvis/_mcp_handlers.py` | ✅ Deprecato | Sostituito da `mcp_server_v2.py` |

@@ -121,7 +121,9 @@ L'inferenza avviene **interamente in-process** tramite `llama-cpp-python` su mod
 |---|---|---|---|
 | CUDA 13.0 Overlay | `Dockerfile` | ✅ | Base 12.2 + overlay 13.0 per driver 580.x |
 | SSH remoto via tag `<SSH>` | `infrastructure.py` | ✅ | Esecuzione asyncssh su server remoti |
-| Dashboard web Chart.js | `dashboard.py` | ✅ | GPU/System/RAG metrics in tempo reale |
+| Dashboard web Chart.js | `dashboard.py` | ✅ | GPU/System/RAG metrics in tempo reale, **Settings panel con 73 env var categorizzate** |
+| Session Store SQLite | `session_store.py` | ✅ | Chat session persistente per dashboard |
+| Intent Classifier | `classificatore.py` | ✅ | Classificazione intenti centralizzata (Intent enum) |
 | OpenAI API | `openai/` | ✅ | 25 endpoint: Chat, Audio, Assistants/Threads/Runs |
 | MCP Server v2 | `mcp_server_v2.py` | ✅ | Streamable HTTP, 8 tool + 7 resources |
 | MCP Server stdio | `mcp_server.py` | ✅ | Legacy per agenti AI esterni |

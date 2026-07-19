@@ -465,6 +465,10 @@ Pannello di controllo web con grafici Chart.js in tempo reale:
 - **RAG Stats:** documents indexed, collection sizes
 - **Agent Logs:** real-time log streaming
 - **ToDo List:** visualizzazione task
+- **Settings Panel:** 73 env var categorizzate in 12 gruppi, Simple/Advanced Mode, persistenza su `.env` con `_persist_env()`
+- **Code Graph:** Visualizzazione interattiva collezioni Qdrant (Sigma.js)
+- **Chat:** Streaming SSE in-browser
+- **Telemetry:** Tempo reale GPU, modelli, health checks
 
 ---
 
