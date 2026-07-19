@@ -46,7 +46,7 @@
     <span class="navbar-spacer"></span>
     <div class="navbar-status">
         <div class="status-chip" title="GPU Temperature">
-            <span class="dot" id="navbar-gpu-dot" style="background:var(--primary);color:var(--primary);width:6px;height:6px;"></span>
+            <span class="dot dot-primary navbar-dot" id="navbar-gpu-dot"></span>
             <span class="label">GPU</span>
             <span class="value" id="navbar-gpu-temp">--</span>
         </div>
@@ -56,10 +56,10 @@
         </div>
         <div class="status-chip" title="Active Model">
             <span class="label">Model</span>
-            <span class="value" id="navbar-model" style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">--</span>
+            <span class="value navbar-model" id="navbar-model">--</span>
         </div>
         <div class="status-chip" title="Services Health">
-            <span class="dot" id="navbar-health-dot" style="background:var(--primary);color:var(--primary);width:6px;height:6px;"></span>
+            <span class="dot dot-primary navbar-dot" id="navbar-health-dot"></span>
             <span class="value text-xxs" id="navbar-services">All OK</span>
         </div>
     </div>
@@ -80,9 +80,6 @@
         </button>
 
         <div class="sidebar-section-label">Management</div>
-        <button class="sidebar-item" data-view="rag" onclick="switchView('rag')">
-            <span class="si-icon">📚</span><span class="si-label">RAG</span>
-        </button>
         <button class="sidebar-item" data-view="models" onclick="switchView('models')">
             <span class="si-icon">🤖</span><span class="si-label">Models</span>
         </button>
@@ -123,8 +120,8 @@
                         <div class="temp-val" id="gpu-temp">--</div>
                         <div class="flex-1">
                             <div class="temp-label text-muted">°C</div>
-                            <div class="progress-bar" style="height: 6px;">
-                                <div class="progress-fill" id="gpu-temp-bar" style="width: 0%;"></div>
+                            <div class="progress-bar h-6">
+                                <div class="progress-fill" id="gpu-temp-bar"></div>
                             </div>
                         </div>
                     </div>
@@ -133,19 +130,19 @@
                             <div class="flex gap-24">
                                 <div>
                                     <div class="text-xs text-muted uppercase">VRAM Used</div>
-                                    <div class="mono fw-700 text-primary" style="font-size:1.1rem;" id="gpu-vram-used">--</div>
+                                    <div class="mono fw-700 text-primary val-sm" id="gpu-vram-used">--</div>
                                 </div>
                                 <div>
                                     <div class="text-xs text-muted uppercase">Total</div>
-                                    <div class="mono fw-700 text-muted" style="font-size:1.1rem;" id="gpu-vram-total">--</div>
+                                    <div class="mono fw-700 text-muted val-sm" id="gpu-vram-total">--</div>
                                 </div>
                                 <div>
                                     <div class="text-xs text-muted uppercase">Util %</div>
-                                    <div class="mono fw-700" style="font-size:1.1rem;" id="gpu-util">--</div>
+                                    <div class="mono fw-700 val-sm" id="gpu-util">--</div>
                                 </div>
                             </div>
-                            <div class="progress-bar mt-8" style="height:6px;">
-                                <div class="progress-fill" id="gpu-vram-bar" style="width:0%;"></div>
+                            <div class="progress-bar h-6 mt-8">
+                                <div class="progress-fill" id="gpu-vram-bar"></div>
                             </div>
                         </div>
                     </div>
@@ -161,19 +158,19 @@
                     </div>
                     <div class="metric-row gap-8 mb-10">
                         <div class="metric">
-                            <div class="val text-secondary" style="font-size:1rem;" id="sys-uptime">--</div>
+                            <div class="val val-sm text-secondary" id="sys-uptime">--</div>
                             <div class="label text-xxs">Uptime</div>
                         </div>
                         <div class="metric">
-                            <div class="val text-secondary" style="font-size:1rem;" id="sys-load">--</div>
+                            <div class="val val-sm text-secondary" id="sys-load">--</div>
                             <div class="label text-xxs">Load Avg</div>
                         </div>
                         <div class="metric">
-                            <div class="val" style="font-size:1rem;" id="sys-disk">--</div>
+                            <div class="val val-sm" id="sys-disk">--</div>
                             <div class="label text-xxs">Disk</div>
                         </div>
                         <div class="metric">
-                            <div class="val" style="font-size:1rem;" id="sys-ram">--</div>
+                            <div class="val val-sm" id="sys-ram">--</div>
                             <div class="label text-xxs">Agent RAM</div>
                         </div>
                     </div>
@@ -186,19 +183,19 @@
             <div class="grid-container grid-3">
                 <div class="card card-compact">
                     <div class="card-header">
-                        <span class="dot dot-secondary"></span> Temp <span class="flex-1"></span><span id="chart-current-temp" class="mono fw-700" style="font-size:0.9rem;"></span>
+                        <span class="dot dot-secondary"></span> Temp <span class="flex-1"></span><span id="chart-current-temp" class="mono fw-700 chart-val"></span>
                     </div>
                     <div class="h-80"><canvas id="chart-temp"></canvas></div>
                 </div>
                 <div class="card card-compact">
                     <div class="card-header">
-                        <span class="dot dot-primary"></span> VRAM<span class="flex-1"></span><span id="chart-current-vram" class="mono fw-700" style="font-size:0.9rem;"></span>
+                        <span class="dot dot-primary"></span> VRAM<span class="flex-1"></span><span id="chart-current-vram" class="mono fw-700 chart-val"></span>
                     </div>
                     <div class="h-80"><canvas id="chart-vram"></canvas></div>
                 </div>
                 <div class="card card-compact">
                     <div class="card-header" >
-                        <span class="dot dot-accent"></span> Util <span class="flex-1"></span><span id="chart-current-util" class="mono fw-700" style="font-size:0.9rem;"></span>
+                        <span class="dot dot-accent"></span> Util <span class="flex-1"></span><span id="chart-current-util" class="mono fw-700 chart-val"></span>
                     </div>
                     <div class="h-80"><canvas id="chart-util"></canvas></div>
                 </div>
@@ -208,25 +205,25 @@
             <div class="grid-container grid-4">
                 <div class="card card-compact">
                     <div class="card-header" >
-                        <span class="dot dot-warning"></span> RAM<span class="flex-1"></span><span id="chart-current-ram" class="mono fw-700" style="font-size:0.9rem;"></span>
+                        <span class="dot dot-warning"></span> RAM<span class="flex-1"></span><span id="chart-current-ram" class="mono fw-700 chart-val"></span>
                     </div>
                     <div class="h-60"><canvas id="chart-ram"></canvas></div>
                 </div>
                 <div class="card card-compact">
                     <div class="card-header" >
-                        <span class="dot dot-danger"></span> CPU<span class="flex-1"></span><span id="chart-current-cpu" class="mono fw-700" style="font-size:0.9rem;"></span>
+                        <span class="dot dot-danger"></span> CPU<span class="flex-1"></span><span id="chart-current-cpu" class="mono fw-700 chart-val"></span>
                     </div>
                     <div class="h-60"><canvas id="chart-cpu"></canvas></div>
                 </div>
                 <div class="card card-compact">
                     <div class="card-header" >
-                        <span class="dot dot-danger"></span> CPU Temp<span class="flex-1"></span><span id="chart-current-cpu-temp" class="mono fw-700" style="font-size:0.9rem;"></span>
+                        <span class="dot dot-danger"></span> CPU Temp<span class="flex-1"></span><span id="chart-current-cpu-temp" class="mono fw-700 chart-val"></span>
                     </div>
                     <div class="h-60"><canvas id="chart-cpu-temp"></canvas></div>
                 </div>
                 <div class="card card-compact">
                     <div class="card-header" >
-                        <span class="dot dot-primary"></span> tok/s<span class="flex-1"></span><span id="chart-current-tok-per-sec" class="mono fw-700" style="font-size:0.9rem;"></span>
+                        <span class="dot dot-primary"></span> tok/s<span class="flex-1"></span><span id="chart-current-tok-per-sec" class="mono fw-700 chart-val"></span>
                     </div>
                     <div class="h-60"><canvas id="chart-tok-per-sec"></canvas></div>
                 </div>
@@ -283,9 +280,9 @@
                         <li><span>Pending Queue</span> <span id="pending-queue">--</span></li>
                         <li><span>Total Chunks</span> <span id="total-chunks">--</span></li>
                     </ul>
-                    <div class="metric-row gap-6 mt-8" style="padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.05);">
-                        <button class="btn" onclick="triggerReindex()" style="font-size:0.65rem;padding:3px 8px;">⟳ Restart Ingestion</button>
-                        <button class="btn" onclick="openMemoryGraphModal()" style="font-size:0.65rem;padding:3px 8px;background:rgba(179,136,255,0.15);border-color:rgba(179,136,255,0.3);color:#b388ff;">✧ Memory Graph</button>
+                    <div class="metric-row gap-6 mt-8 bt">
+                        <button class="btn btn-xs" onclick="triggerReindex()">⟳ Restart Ingestion</button>
+                        <button class="btn btn-accent btn-xs" onclick="openMemoryGraphModal()">✧ Memory Graph</button>
                     </div>
                 </div>
 
@@ -303,7 +300,7 @@
             </div>
 
             <!-- Qdrant Collections -->
-            <div class="grid-container" style="grid-template-columns: 1fr;">
+            <div class="grid-container grid-single">
                 <div class="card p-16">
                     <div class="card-header card-header-sm">
                         <span class="dot dot-accent pulsing"></span> Qdrant Collections
@@ -315,32 +312,32 @@
             </div>
 
             <!-- Telemetry Pipeline -->
-            <div class="grid-container" style="grid-template-columns: 1fr;">
+            <div class="grid-container grid-single">
                 <div class="card p-16">
                     <div class="card-header card-header-sm">
                         <span class="dot dot-accent pulsing"></span> Telemetry Pipeline
                         <span class="flex-1"></span>
-                        <button class="btn" onclick="toggleTraces()" style="font-size:0.6rem;padding:2px 6px;">Traces <span id="toggle-traces-icon">▶</span></button>
+                        <button class="btn" onclick="toggleTraces()">Traces <span id="toggle-traces-icon">▶</span></button>
                     </div>
                     <div class="metric-row gap-8 mb-6">
                         <div class="metric">
-                            <div class="val text-secondary" style="font-size: 1.2rem;" id="tele-trace-count">0</div>
+                            <div class="val val-md text-secondary" id="tele-trace-count">0</div>
                             <div class="label text-xxs">Traces</div>
                         </div>
                         <div class="metric">
-                            <div class="val text-primary" style="font-size: 1.2rem;" id="tele-active-traces">0</div>
+                            <div class="val val-md text-primary" id="tele-active-traces">0</div>
                             <div class="label text-xxs">Active</div>
                         </div>
                         <div class="metric">
-                            <div class="val text-danger" style="font-size: 1.2rem;" id="tele-error-count">0</div>
+                            <div class="val val-md text-danger" id="tele-error-count">0</div>
                             <div class="label text-xxs">Errors</div>
                         </div>
                         <div class="metric">
-                            <div class="val text-secondary" style="font-size: 1.2rem;" id="tele-sessions-count">0</div>
+                            <div class="val val-md text-secondary" id="tele-sessions-count">0</div>
                             <div class="label text-xxs">Sessions</div>
                         </div>
                         <div class="metric">
-                            <div class="val text-primary" style="font-size: 1.2rem;" id="tele-sessions-turns">0</div>
+                            <div class="val val-md text-primary" id="tele-sessions-turns">0</div>
                             <div class="label text-xxs">Turns</div>
                         </div>
                     </div>
@@ -360,7 +357,7 @@
                             </div>
                         </div>
                     </div>
-                    <div id="traces-content" style="display:none;margin-top:12px;">
+                    <div id="traces-content" class="hidden mt-12">
                         <div class="table-wrap">
                             <table class="mgmt-table text-sm">
                                 <thead><tr>
@@ -383,14 +380,14 @@
             </div>
 
             <!-- Sessions Panel -->
-            <div class="grid-container" style="grid-template-columns: 1fr;">
+            <div class="grid-container grid-single">
                 <div class="card p-16">
                     <div class="card-header card-header-sm">
                         <span class="dot dot-secondary pulsing"></span> Chat Sessions
                         <span class="flex-1"></span>
-                        <button class="btn" onclick="toggleSessions()" style="font-size:0.6rem;padding:2px 6px;">Sessions <span id="toggle-sessions-icon">▶</span></button>
+                        <button class="btn" onclick="toggleSessions()">Sessions <span id="toggle-sessions-icon">▶</span></button>
                     </div>
-                    <div id="sessions-content" style="display:none;margin-top:12px;">
+                    <div id="sessions-content" class="hidden mt-12">
                         <div class="table-wrap">
                             <table class="mgmt-table text-sm">
                                 <thead><tr><th>ID</th><th class="text-right">Turns</th><th class="text-right">Tokens</th><th class="text-right">Duration</th><th class="text-center">Model</th><th class="text-right">Last Activity</th></tr></thead>
@@ -402,7 +399,7 @@
             </div>
 
             <!-- Synaptiq Engine -->
-            <div class="grid-container" style="grid-template-columns: 1fr;">
+            <div class="grid-container grid-single">
                 <div class="card p-16">
                     <div class="card-header card-header-sm">
                         <span class="dot dot-accent pulsing"></span> Synaptiq Engine
@@ -411,11 +408,11 @@
                     </div>
                     <div class="metric-row gap-8 mb-6">
                         <div class="metric">
-                            <div class="val mono text-secondary" style="font-size: 1.0rem;" id="sy-nodes">--</div>
+                            <div class="val val-sm mono text-secondary" id="sy-nodes">--</div>
                             <div class="label text-xxs">Nodes</div>
                         </div>
                         <div class="metric">
-                            <div class="val mono text-secondary" style="font-size: 1.0rem;" id="sy-relations">--</div>
+                            <div class="val val-sm mono text-secondary" id="sy-relations">--</div>
                             <div class="label text-xxs">Relations</div>
                         </div>
                     </div>
@@ -428,7 +425,7 @@
             <!-- ── Session Sidebar ── -->
             <div id="chat-session-sidebar">
                 <div class="css-header">
-                    <span class="fw-600 text-sm" style="letter-spacing:1px;text-transform:uppercase;">Sessions</span>
+                    <span class="fw-600 text-sm uppercase" style="letter-spacing:1px;">Sessions</span>
                     <button id="chat-new-btn" onclick="createNewSession()" title="New chat">✚</button>
                 </div>
                 <div id="chat-session-list"></div>
@@ -450,10 +447,10 @@
                 </div>
                 <div id="chat-input-container">
                     <div id="chat-image-previews" class="flex gap-8 flex-wrap mb-8"></div>
-                    <div id="chat-input-row" class="flex gap-10" style="align-items:flex-end;">
-                        <label class="chat-btn" title="Attach image" style="cursor:pointer;font-size:1rem;">
+                    <div id="chat-input-row" class="flex gap-10 items-end">
+                        <label class="chat-btn" title="Attach image">
                             📎
-                            <input type="file" accept="image/*" multiple style="display:none;" onchange="handleFileSelect(event)">
+                            <input type="file" accept="image/*" multiple class="hidden" onchange="handleFileSelect(event)">
                         </label>
                         <textarea id="chat-input" placeholder="Ask anything..." rows="1"></textarea>
                         <button id="chat-send-btn" onclick="sendChatMessage()" title="Send">↑</button>
@@ -466,34 +463,22 @@
         <div class="view" id="view-graph">
             <div class="card">
                 <div class="card-header mb-8">
-                    <span class="dot dot-accent pulsing"></span> Qdrant Collection Graph
+                    <span class="dot dot-accent pulsing"></span> Code Graph — Collections
                     <span class="flex-1"></span>
-                    <span class="mono text-sm text-muted" id="graph-collection-count"></span>
+                    <span id="graph-collection-count" class="mono text-sm text-muted"></span>
                 </div>
-                <p class="text-sm text-muted" style="margin:0 0 12px 0;">Select a Qdrant collection to visualize its vector embedding space as an interactive graph.</p>
-                <ul class="data-list" id="qdrant-graph-list">
-                    <li class="text-muted">Loading collections...</li>
-                </ul>
-            </div>
-        </div>
-
-        <!-- ── VIEW: RAG ── -->
-        <div class="view" id="view-rag">
-            <div class="card">
-                <div class="card-header mb-8">
-                    <span class="dot dot-accent pulsing"></span> RAG Management
-                </div>
+                <p class="text-sm text-muted graph-desc">Select a Qdrant collection to visualize its vector embedding space as an interactive graph.</p>
                 <div class="table-wrap">
                     <table class="mgmt-table">
                         <thead><tr><th>Collection</th><th>Points</th><th>Dimension</th><th>Actions</th></tr></thead>
-                        <tbody id="rag-collections-body"><tr><td colspan="4" class="text-center text-muted">Loading collections...</td></tr></tbody>
+                        <tbody id="graph-collections-body"><tr><td colspan="4" class="text-center text-muted">Loading collections...</td></tr></tbody>
                     </table>
                 </div>
                 <div class="flex gap-10 items-center flex-wrap mt-16">
-                    <button class="btn" onclick="triggerReindex()">⟳ Re-index All</button>
+                    <button class="btn" onclick="triggerGraphReindex()">⟳ Re-index Graph</button>
                     <div class="flex gap-6 items-center">
-                        <input class="form-input text-sm" id="rag-delete-name" placeholder="Collection name" style="width:180px;">
-                        <button class="btn btn-danger" onclick="deleteCollection()">🗑 Delete</button>
+                        <input class="form-input text-sm" id="graph-delete-name" placeholder="Collection name">
+                        <button class="btn btn-danger" onclick="deleteGraphCollection()">🗑 Delete</button>
                     </div>
                 </div>
             </div>
@@ -561,21 +546,21 @@
 
         <!-- ── VIEW: Logs ── -->
         <div class="view" id="view-logs">
-            <div class="card flex-col" style="height:100%;">
-                <div class="card-header mb-8" style="flex-shrink:0;">
+            <div class="card flex-col h-full">
+                <div class="card-header mb-8 flex-shrink-0">
                     <span class="dot dot-warning"></span> Logs
                     <span class="flex-1"></span>
                     <div class="flex gap-10 items-center">
-                        <select class="form-input w-auto text-sm" id="log-container-select" style="padding:4px 8px;" onchange="fetchLogs()">
+                        <select class="form-input w-auto text-sm" id="log-container-select" onchange="fetchLogs()">
                             <option value="all">All Containers</option>
                         </select>
-                        <label class="text-sm flex items-center gap-4" style="cursor:pointer;">
+                        <label class="text-sm flex items-center gap-4">
                             <input type="checkbox" id="log-auto-refresh" checked onchange="toggleAutoRefresh()"> Auto
                         </label>
-                        <button class="btn text-xxs" onclick="fetchLogs()">⟳ Refresh</button>
+                        <button class="btn" onclick="fetchLogs()">⟳ Refresh</button>
                     </div>
                 </div>
-                <pre id="log-display" class="flex-1 mono text-sm" style="background:rgba(0,0,0,0.5);border-radius:8px;padding:12px;overflow:auto;margin:0;border:1px solid rgba(255,255,255,0.05);white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;color:var(--text-muted);">Loading logs...</pre>
+                <pre id="log-display" class="flex-1 mono text-sm log-display">Loading logs...</pre>
             </div>
         </div>
 
@@ -584,19 +569,19 @@
             <div class="grid-container grid-4">
                 <div class="card card-compact">
                     <div class="card-header" >Total Req</div>
-                    <div class="mono fw-700 text-primary" style="font-size:1.2rem;" id="ana-total-req">--</div>
+                    <div class="mono fw-700 text-primary val-md" id="ana-total-req">--</div>
                 </div>
                 <div class="card card-compact">
                     <div class="card-header" >Prompt Tokens</div>
-                    <div class="mono fw-700 text-secondary" style="font-size:1.2rem;" id="ana-prompt-tok">--</div>
+                    <div class="mono fw-700 text-secondary val-md" id="ana-prompt-tok">--</div>
                 </div>
                 <div class="card card-compact">
                     <div class="card-header" >Completion Tok</div>
-                    <div class="mono fw-700" style="font-size:1.2rem;" id="ana-compl-tok">--</div>
+                    <div class="mono fw-700 val-md" id="ana-compl-tok">--</div>
                 </div>
                 <div class="card card-compact">
                     <div class="card-header" >Errors</div>
-                    <div class="mono fw-700 text-danger" style="font-size:1.2rem;" id="ana-error-count">--</div>
+                    <div class="mono fw-700 text-danger val-md" id="ana-error-count">--</div>
                 </div>
             </div>
             <div class="grid-container">
@@ -618,25 +603,19 @@
         </div>
 
         <!-- ── VIEW: Settings ── -->
-        <div class="view" id="view-settings">
-            <div class="grid-container">
-                <div class="card">
-                    <div class="card-header mb-8">
-                        <span class="dot dot-secondary"></span> Configuration
-                    </div>
-                    <div id="settings-list" class="mono text-sm">
-                        <span class="text-muted">Loading...</span>
-                    </div>
+        <div class="view settings-view" id="view-settings">
+            <div class="settings-header">
+                <div class="settings-header-left">
+                    <span class="dot dot-secondary pulsing"></span>
+                    <span class="settings-header-title">Jarvis Configuration</span>
                 </div>
-                <div class="card">
-                    <div class="card-header mb-8">
-                        <span class="dot dot-warning"></span> System Info
-                    </div>
-                    <div id="system-info" class="mono text-sm">
-                        <span class="text-muted">Loading...</span>
-                    </div>
-                </div>
+                <span class="text-xs text-muted">Changes are applied in-memory · Use .env for permanent changes</span>
             </div>
+            <div class="settings-scroll" id="settings-scroll">
+                <div id="settings-categories"></div>
+                <div id="system-info-card" class="hidden"></div>
+            </div>
+            <div class="settings-save-bar-container" id="settings-save-bar-container"></div>
         </div>
     </div>
 </div>
@@ -647,20 +626,20 @@
         <h2><span id="modal-title">Graph</span></h2>
         <span class="close-modal" onclick="closeModal()">&times;</span>
     </div>
-    <div id="graph-container" style="width:100%;height:100%;background-image:radial-gradient(circle at 1px 1px, rgba(0, 255, 204, 0.06) 1px, transparent 0);background-size:20px 20px;"></div>
+    <div id="graph-container"></div>
     <div id="graph-tooltip"></div>
     <div id="graph-stats"></div>
     <div id="graph-legend" class="graph-legend"></div>
-    <div id="filter-container" style="display:none;position:absolute;top:56px;left:12px;z-index:1010;">
-        <select id="file-type-filter" onchange="applyGraphFilter()" class="mono text-sm" style="background:rgba(0,0,0,0.8);color:#fff;padding:3px 8px;border:1px solid var(--glass-border);border-radius:4px;"><option value="ALL">All Files</option></select>
-        <input id="node-search" placeholder="Search node..." oninput="applyGraphFilter()" class="mono text-sm" style="background:rgba(0,0,0,0.8);color:#fff;padding:3px 8px;border:1px solid var(--glass-border);border-radius:4px;width:120px;">
+    <div id="filter-container">
+        <select id="file-type-filter" onchange="applyGraphFilter()" class="mono text-sm filter-input"><option value="ALL">All Files</option></select>
+        <input id="node-search" placeholder="Search node..." oninput="applyGraphFilter()" class="mono text-sm filter-input" style="width:120px;">
         <label class="text-xs text-muted flex items-center gap-4">
             Min deg:
-            <input id="min-degree-input" type="number" min="0" value="0" onchange="applyGraphFilter()" class="mono text-xs" style="background:rgba(0,0,0,0.8);color:#fff;padding:2px 6px;width:40px;border:1px solid var(--glass-border);border-radius:4px;">
+            <input id="min-degree-input" type="number" min="0" value="0" onchange="applyGraphFilter()" class="mono text-xs filter-input" style="width:40px;">
         </label>
         <span id="filter-count"></span>
     </div>
-    <div id="graph-controls" style="display:none;position:absolute;bottom:12px;left:12px;z-index:1010;">
+    <div id="graph-controls">
         <button id="btn-pause-fa2" onclick="toggleFA2()">⏸</button>
         <button onclick="zoomToFitGraph()">⊞</button>
         <span id="graph-status" class="mono text-xs text-muted"></span>
@@ -718,7 +697,7 @@
 </div>
 
 <!-- ── Toast ── -->
-<div id="toast" style="display:none;"></div>
+<div id="toast" class="hidden"></div>
 
 <!-- ── Scripts ── -->
 <script src="/admin/static/js/utils.js"></script>

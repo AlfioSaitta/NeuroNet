@@ -14,7 +14,6 @@ function switchView(viewName) {
     if (sb && window.innerWidth <= 600) sb.classList.remove('open');
     // Dispatch view load events
     if (viewName === 'chat') { document.getElementById('chat-input')?.focus(); loadSessionList(); loadChatHistory(); }
-    if (viewName === 'rag') loadRAGData();
     if (viewName === 'models') loadModelsData();
     if (viewName === 'tasks') { loadTasksData(); loadCronData(); }
     if (viewName === 'logs') { document.getElementById('log-container-select').value = 'all'; loadContainers(); fetchLogs(); if (document.getElementById('log-auto-refresh')?.checked) { if (logInterval) clearInterval(logInterval); logInterval = setInterval(fetchLogs, 5000); } }

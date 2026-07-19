@@ -1,17 +1,19 @@
 // ═══════════════════════════════════════════════════
-// NeuroNet Admin Panel — Management views (RAG, Models, Tasks, Cron, Settings, Analytics)
+// NeuroNet Admin Panel — Management views (Code Graph, Models, Tasks, Cron, Settings, Analytics)
 // ═══════════════════════════════════════════════════
 
-// ── RAG ──
+// ── Code Graph ──
 
-async function loadRAGData() {
-    const tbody = document.getElementById('rag-collections-body');
-    showLoading('rag-collections-body', 'Loading collections...');
+async function loadGraphCollections() {
+    const tbody = document.getElementById('graph-collections-body');
+    const countEl = document.getElementById('graph-collection-count');
+    showLoading('graph-collections-body', 'Loading collections...');
     try {
         const res = await fetchWithTimeout('/api/dashboard/rag/collections');
         const data = await res.json();
         if (!data.collections || data.collections.length === 0) {
             tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);">No collections</td></tr>';
+            if (countEl) countEl.textContent = '';
             return;
         }
         tbody.innerHTML = data.collections.map(c => `
@@ -19,16 +21,17 @@ async function loadRAGData() {
                 <td style="font-family:'JetBrains Mono',monospace;">${c.name}</td>
                 <td>${c.points ?? '?'}</td>
                 <td>${c.dimension ?? '?'}</td>
-                <td class="actions"><button class="btn" onclick="openGraphModal('${c.name}')" style="font-size:0.6rem;padding:2px 6px;">Graph</button></td>
+                <td class="actions"><button class="btn" onclick="openGraphModal('${c.name}')" style="font-size:0.6rem;padding:2px 6px;">⟐ Graph</button></td>
             </tr>
         `).join('');
+        if (countEl) countEl.textContent = data.collections.length + ' collection' + (data.collections.length !== 1 ? 's' : '');
     } catch(e) {
         if (e.name === 'AbortError') return;
         tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--danger);">Error loading collections</td></tr>';
     }
 }
 
-async function triggerReindex() {
+async function triggerGraphReindex() {
     try {
         const res = await fetchWithTimeout('/api/dashboard/rag/reindex', { method: 'POST' });
         const data = await res.json();
@@ -36,19 +39,17 @@ async function triggerReindex() {
     } catch(e) {
         if (e.name === 'AbortError') return;
         showToast('Error: ' + e.message, 'error');
-    } finally {
-        setLoading(btn, false);
     }
 }
 
-async function deleteCollection() {
-    const name = document.getElementById('rag-delete-name').value.trim();
+async function deleteGraphCollection() {
+    const name = document.getElementById('graph-delete-name').value.trim();
     if (!name) return showToast('Enter a collection name', 'error');
     if (!confirm('Delete collection "' + name + '"?')) return;
     try {
         const res = await fetchWithTimeout('/api/dashboard/rag/collection/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name: name}) });
         const data = await res.json();
-        if (data.status === 'ok') { showToast('Collection deleted', 'success'); loadRAGData(); }
+        if (data.status === 'ok') { showToast('Collection deleted', 'success'); loadGraphCollections(); }
         else showToast('Error: ' + (data.error || 'unknown'), 'error');
     } catch(e) {
         if (e.name === 'AbortError') return;
@@ -232,7 +233,11 @@ async function loadAnalyticsData() {
 
 // ── Settings ──
 
+let _settingsOriginal = {};
+let _settingsDirty = false;
+
 async function loadSettingsData() {
+    const container = document.getElementById('settings-categories');
     try {
         const [setRes, sysRes] = await Promise.all([
             fetchWithTimeout('/api/dashboard/settings'),
@@ -241,41 +246,151 @@ async function loadSettingsData() {
         const setData = await setRes.json();
         const sysData = await sysRes.json();
 
-        const setDiv = document.getElementById('settings-list');
-        if (setData.settings) {
-            setDiv.innerHTML = Object.entries(setData.settings).map(([k, v]) =>
-                `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04);"><span style="color:var(--secondary);">${k}</span><span>${v == null ? '--' : escapeHtml(String(v))}</span></div>`
-            ).join('');
+        // Build settings categories
+        const categories = {};
+        if (setData.settings && setData.order) {
+            for (const key of setData.order) {
+                const s = setData.settings[key];
+                if (!s || !s.category) continue;
+                if (!categories[s.category]) categories[s.category] = [];
+                categories[s.category].push({ key, ...s });
+            }
         }
 
-        const sysDiv = document.getElementById('system-info');
-        sysDiv.innerHTML = Object.entries(sysData).map(([k, v]) =>
-            `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04);"><span style="color:var(--secondary);">${k.replace(/_/g, ' ')}</span><span>${v == null ? '--' : escapeHtml(String(v))}</span></div>`
-        ).join('');
+        _settingsOriginal = {};
+        let html = '';
+        for (const [cat, items] of Object.entries(categories)) {
+            html += '<div class="card settings-card p-16">';
+            html += `<div class="card-header card-header-sm">${cat}</div>`;
+            for (const item of items) {
+                _settingsOriginal[item.key] = item.value;
+                html += '<div class="setting-row">';
+                html += `<div class="setting-info"><div class="setting-label">${escapeHtml(item.label)}</div>`;
+                if (item.description) html += `<div class="setting-desc">${escapeHtml(item.description)}</div>`;
+                html += '</div><div class="setting-control">';
+                if (!item.editable) {
+                    // Read-only display
+                    if (item.type === 'bool') {
+                        html += `<span class="badge ${item.value ? 'badge-primary' : 'badge-warning'}">${item.value ? 'Enabled' : 'Disabled'}</span>`;
+                    } else {
+                        html += `<span class="mono text-sm" style="color:var(--text-muted);">${item.value == null ? '--' : escapeHtml(String(item.value))}</span>`;
+                    }
+                } else if (item.type === 'bool') {
+                    html += `<label class="toggle-switch"><input type="checkbox" id="set-${item.key}" ${item.value ? 'checked' : ''} onchange="markSettingsDirty()"><span class="slider"></span></label>`;
+                } else if (item.type === 'number') {
+                    html += `<input type="number" id="set-${item.key}" value="${escapeHtml(String(item.value ?? ''))}" oninput="markSettingsDirty()" class="mono text-sm">`;
+                } else {
+                    html += `<input type="text" id="set-${item.key}" value="${escapeHtml(String(item.value ?? ''))}" oninput="markSettingsDirty()" class="mono text-sm">`;
+                }
+                html += '</div></div>';
+            }
+            html += '</div>';
+        }
+
+        container.innerHTML = html;
+
+        // Save bar (separate container for sticky positioning)
+        const saveBarContainer = document.getElementById('settings-save-bar-container');
+        saveBarContainer.innerHTML = `<div class="settings-save-bar">
+            <span class="save-status" id="settings-save-status"></span>
+            <button class="btn-reset hidden" onclick="resetSettings()" id="settings-reset-btn">↺ Reset</button>
+            <button class="btn-primary" onclick="saveSettings()" id="settings-save-btn" disabled>💾 Save Changes</button>
+        </div>`;
+
+        // System info
+        const sysCard = document.getElementById('system-info-card');
+        sysCard.classList.remove('hidden');
+        sysCard.innerHTML = `<div class="card p-16">
+            <div class="card-header card-header-sm"><span class="dot dot-warning"></span> System Info</div>
+            <div class="sys-grid">${Object.entries(sysData).map(([k, v]) =>
+                `<div class="sys-row"><span class="sys-label">${k.replace(/_/g, ' ')}</span><span class="sys-value">${v == null ? '--' : escapeHtml(String(v))}</span></div>`
+            ).join('')}</div>
+        </div>`;
+        _settingsDirty = false;
     } catch(e) {
+        if (e.name === 'AbortError') return;
         console.error('Settings load error', e);
+        container.innerHTML = '<div class="card p-16"><div class="text-center text-muted p-16">Failed to load settings</div></div>';
     }
 }
 
-// ── Graph Collections list ──
+window.markSettingsDirty = function() {
+    _settingsDirty = true;
+    const btn = document.getElementById('settings-save-btn');
+    if (btn) btn.disabled = false;
+    const resetBtn = document.getElementById('settings-reset-btn');
+    if (resetBtn) resetBtn.classList.remove('hidden');
+    const status = document.getElementById('settings-save-status');
+    if (status) { status.textContent = '⚠️ Unsaved changes'; status.className = 'save-status'; }
+};
 
-async function loadGraphCollections() {
-    const list = document.getElementById('qdrant-graph-list');
-    showLoading('qdrant-graph-list', 'Loading collections...');
-    try {
-        const res = await fetchWithTimeout('/api/dashboard/stats');
-        const data = await res.json();
-        if (data.qdrant_collections && data.qdrant_collections.length > 0) {
-            list.innerHTML = data.qdrant_collections.map(c => {
-                const name = typeof c === 'string' ? c : c.name;
-                const pts = typeof c === 'string' ? '' : (c.points ?? '');
-                return `<li style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);"><span style="font-family:'JetBrains Mono',monospace;">${name} ${pts ? '<span style="color:var(--text-muted);font-size:0.7rem;">('+pts+' pts)</span>' : ''}</span><button class="btn" onclick="openGraphModal('${name}')">Visualize</button></li>`;
-            }).join('');
+window.saveSettings = async function() {
+    const btn = document.getElementById('settings-save-btn');
+    const status = document.getElementById('settings-save-status');
+    btn.disabled = true;
+    btn.textContent = '⏳ Saving...';
+    status.textContent = 'Saving...';
+    status.className = 'save-status';
+
+    const payload = {};
+    for (const key of Object.keys(_settingsOriginal)) {
+        const el = document.getElementById('set-' + key);
+        if (!el) continue;
+        if (el.type === 'checkbox') {
+            payload[key] = el.checked;
+        } else if (el.type === 'number') {
+            payload[key] = el.value !== '' ? Number(el.value) : null;
         } else {
-            list.innerHTML = '<li style="color:var(--text-muted);">No collections found</li>';
+            payload[key] = el.value;
+        }
+    }
+
+    try {
+        const res = await fetchWithTimeout('/api/dashboard/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        }, 15000);
+        const data = await res.json();
+        if (data.status === 'ok') {
+            status.textContent = '✅ ' + data.message;
+            status.className = 'save-status success';
+            _settingsDirty = false;
+    document.getElementById('settings-reset-btn').classList.add('hidden');
+        } else {
+            const errList = data.errors ? data.errors.join('; ') : '';
+            status.textContent = '⚠️ ' + (data.message || 'Partial error') + (errList ? ': ' + errList : '');
+            status.className = 'save-status error';
+            btn.disabled = false;
+            btn.textContent = '💾 Save Changes';
+            return;
         }
     } catch(e) {
         if (e.name === 'AbortError') return;
-        list.innerHTML = '<li style="color:var(--danger);">Error loading collections</li>';
+        status.textContent = '❌ Network error: ' + e.message;
+        status.className = 'save-status error';
+        btn.disabled = false;
+        btn.textContent = '💾 Save Changes';
+        return;
     }
-}
+
+    btn.textContent = '✓ Saved';
+    setTimeout(() => { btn.textContent = '💾 Save Changes'; btn.disabled = !_settingsDirty; }, 2000);
+};
+
+window.resetSettings = function() {
+    for (const [key, val] of Object.entries(_settingsOriginal)) {
+        const el = document.getElementById('set-' + key);
+        if (!el) continue;
+        if (el.type === 'checkbox') el.checked = !!val;
+        else el.value = val == null ? '' : String(val);
+    }
+    _settingsDirty = false;
+    const btn = document.getElementById('settings-save-btn');
+    if (btn) btn.disabled = true;
+    document.getElementById('settings-reset-btn').style.display = 'none';
+    const status = document.getElementById('settings-save-status');
+    if (status) { status.textContent = '↺ Reset to original values'; status.className = 'save-status'; }
+};
+
+
