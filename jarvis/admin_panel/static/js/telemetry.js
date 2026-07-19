@@ -95,25 +95,6 @@ function updateInference(inf) {
     document.getElementById('inf-prompt-tokens').innerText = inf.total_prompt_tokens ?? 0;
 }
 
-function updateQdrantCollections(collections) {
-    const qList = document.getElementById('qdrant-list');
-    qList.innerHTML = '';
-    if (collections && collections.length > 0) {
-        collections.forEach(col => {
-            const li = document.createElement('li');
-            const name = typeof col === 'string' ? col : col.name;
-            const points = typeof col === 'string' ? '' : (col.points ?? '');
-            li.innerHTML = `
-                <span>${name}${points ? ' <span class="text-muted text-xs">('+points+' pts)</span>' : ''}</span>
-                <button class="btn" onclick="openGraphModal('${name}')">Graph</button>
-            `;
-            qList.appendChild(li);
-        });
-    } else {
-        qList.innerHTML = '<li class="text-muted">No collections</li>';
-    }
-}
-
 function updateAgentStats(agentStats) {
     if (!agentStats) return;
     document.getElementById('active-cron').innerText = agentStats.active_crons ?? 0;
@@ -283,8 +264,6 @@ window.fetchStats = async function() {
 
         if (data.sys_history) updateSysCharts(data.sys_history);
         if (data.inference_history) updateInfCharts(data.inference_history);
-
-        updateQdrantCollections(data.qdrant_collections);
 
         updateAgentStats(data.agent_stats);
 

@@ -258,14 +258,48 @@ async function loadSettingsData() {
         }
 
         _settingsOriginal = {};
+
+        // Advanced mode toggle
+        const advancedMode = localStorage.getItem('settings_advanced_mode') === 'true';
+        let advancedCount = 0;
+        let visibleCount = 0;
+        for (const [, items] of Object.entries(categories)) {
+            for (const item of items) {
+                if (!item.basic) advancedCount++;
+                if (advancedMode || item.basic) visibleCount++;
+            }
+        }
+
         let html = '';
+        html += '<div class="settings-mode-bar">';
+        html += '<div class="settings-mode-info">';
+        html += `<span class="settings-mode-label">Simple Mode</span>`;
+        html += `<label class="toggle-switch toggle-switch-sm"><input type="checkbox" id="advanced-mode-toggle" ${advancedMode ? 'checked' : ''} onchange="toggleAdvancedMode()"><span class="slider"></span></label>`;
+        html += `<span class="settings-mode-label">Advanced Mode</span>`;
+        if (!advancedMode && advancedCount > 0) {
+            html += `<span class="settings-mode-extra">+${advancedCount} advanced settings hidden</span>`;
+        }
+        html += '</div></div>';
+
         for (const [cat, items] of Object.entries(categories)) {
+            // Filter items and check if any are visible
+            const visibleItems = items.filter(item => advancedMode || item.basic);
+            if (visibleItems.length === 0) continue;
+
             html += '<div class="card settings-card p-16">';
             html += `<div class="card-header card-header-sm">${cat}</div>`;
-            for (const item of items) {
+            for (const item of visibleItems) {
                 _settingsOriginal[item.key] = item.value;
                 html += '<div class="setting-row">';
-                html += `<div class="setting-info"><div class="setting-label">${escapeHtml(item.label)}</div>`;
+                html += '<div class="setting-info"><div class="setting-label">';
+                html += escapeHtml(item.label);
+                if (item.restart_required) {
+                    html += ' <span class="restart-badge" title="Requires restart to take effect">⚡</span>';
+                }
+                if (item.unit) {
+                    html += ` <span class="unit-label">${escapeHtml(item.unit)}</span>`;
+                }
+                html += '</div>';
                 if (item.description) html += `<div class="setting-desc">${escapeHtml(item.description)}</div>`;
                 html += '</div><div class="setting-control">';
                 if (!item.editable) {
@@ -278,7 +312,19 @@ async function loadSettingsData() {
                 } else if (item.type === 'bool') {
                     html += `<label class="toggle-switch"><input type="checkbox" id="set-${item.key}" ${item.value ? 'checked' : ''} onchange="markSettingsDirty()"><span class="slider"></span></label>`;
                 } else if (item.type === 'number') {
-                    html += `<input type="number" id="set-${item.key}" value="${escapeHtml(String(item.value ?? ''))}" oninput="markSettingsDirty()" class="mono text-sm">`;
+                    html += `<input type="number" id="set-${item.key}" value="${escapeHtml(String(item.value ?? ''))}" oninput="markSettingsDirty()" class="mono text-sm" ${item.min != null ? `min="${item.min}"` : ''} ${item.max != null ? `max="${item.max}"` : ''} ${item.step != null ? `step="${item.step}"` : ''}>`;
+                } else if (item.type === 'float') {
+                    html += `<input type="number" id="set-${item.key}" value="${escapeHtml(String(item.value ?? ''))}" oninput="markSettingsDirty()" class="mono text-sm" ${item.step != null ? `step="${item.step}"` : 'step="any"'} ${item.min != null ? `min="${item.min}"` : ''} ${item.max != null ? `max="${item.max}"` : ''}>`;
+                } else if (item.type === 'select') {
+                    const opts = item.options || [];
+                    html += `<select id="set-${item.key}" onchange="markSettingsDirty()" class="mono text-sm">`;
+                    for (const o of opts) {
+                        const sel = String(item.value) === o ? ' selected' : '';
+                        html += `<option value="${escapeHtml(o)}"${sel}>${escapeHtml(o)}</option>`;
+                    }
+                    html += `</select>`;
+                } else if (item.type === 'secret') {
+                    html += `<div style="display:flex;gap:4px;align-items:center;"><input type="password" id="set-${item.key}" value="${escapeHtml(String(item.value ?? ''))}" oninput="markSettingsDirty()" class="mono text-sm" style="flex:1;min-width:100px;"><button type="button" onclick="toggleSecret('set-${item.key}')" style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:0.8rem;padding:4px;" title="Show/Hide">👁️</button></div>`;
                 } else {
                     html += `<input type="text" id="set-${item.key}" value="${escapeHtml(String(item.value ?? ''))}" oninput="markSettingsDirty()" class="mono text-sm">`;
                 }
@@ -338,8 +384,10 @@ window.saveSettings = async function() {
         if (!el) continue;
         if (el.type === 'checkbox') {
             payload[key] = el.checked;
+        } else if (el.tagName === 'SELECT') {
+            payload[key] = el.value;
         } else if (el.type === 'number') {
-            payload[key] = el.value !== '' ? Number(el.value) : null;
+            payload[key] = el.value !== '' ? parseFloat(el.value) : null;
         } else {
             payload[key] = el.value;
         }
@@ -383,6 +431,7 @@ window.resetSettings = function() {
         const el = document.getElementById('set-' + key);
         if (!el) continue;
         if (el.type === 'checkbox') el.checked = !!val;
+        else if (el.tagName === 'SELECT') el.value = val == null ? '' : String(val);
         else el.value = val == null ? '' : String(val);
     }
     _settingsDirty = false;
@@ -391,6 +440,18 @@ window.resetSettings = function() {
     document.getElementById('settings-reset-btn').style.display = 'none';
     const status = document.getElementById('settings-save-status');
     if (status) { status.textContent = '↺ Reset to original values'; status.className = 'save-status'; }
+};
+
+window.toggleSecret = function(inputId) {
+    const el = document.getElementById(inputId);
+    if (el) el.type = el.type === 'password' ? 'text' : 'password';
+};
+
+window.toggleAdvancedMode = function() {
+    const enabled = document.getElementById('advanced-mode-toggle').checked;
+    localStorage.setItem('settings_advanced_mode', enabled);
+    // Reload settings to re-render with new filter
+    loadSettingsData();
 };
 
 

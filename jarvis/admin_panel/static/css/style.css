@@ -549,6 +549,70 @@ select.form-input { cursor: pointer; }
 .setting-control input[type="number"]:disabled { opacity: 0.4; cursor: not-allowed; }
 .setting-control input.modified { border-color: var(--warning); box-shadow: 0 0 0 3px rgba(234, 179, 8, 0.1); }
 
+/* Settings: select dropdown */
+.setting-control select {
+    width: 160px; padding: 8px 12px;
+    background: rgba(0,0,0,0.4); border: 1px solid var(--glass-border);
+    border-radius: 6px; color: var(--text-main);
+    font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+    outline: none; cursor: pointer; transition: border-color 0.2s;
+    appearance: auto;
+}
+.setting-control select:focus {
+    border-color: var(--primary); box-shadow: 0 0 0 3px rgba(0, 230, 184, 0.12);
+}
+
+/* Settings: password input */
+.setting-control input[type="password"] {
+    width: 160px; padding: 8px 12px;
+    background: rgba(0,0,0,0.4); border: 1px solid var(--glass-border);
+    border-radius: 6px; color: var(--text-main);
+    font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+    outline: none; transition: border-color 0.2s;
+}
+
+/* Restart badge (⚡ near setting label) */
+.restart-badge {
+    display: inline-block; font-size: 0.65rem;
+    color: var(--warning); margin-left: 4px;
+    cursor: help; vertical-align: middle;
+}
+
+/* Unit label (e.g. "token", "s") */
+.unit-label {
+    font-size: 0.6rem; color: var(--text-muted);
+    font-weight: 400; margin-left: 4px;
+}
+
+/* Settings: Advanced Mode toggle bar */
+.settings-mode-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; margin-bottom: 16px;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--glass-border);
+    border-radius: 8px;
+}
+.settings-mode-info {
+    display: flex; align-items: center; gap: 12px;
+}
+.settings-mode-label {
+    font-size: 0.8rem; font-weight: 600; color: var(--text-secondary);
+    white-space: nowrap;
+}
+.settings-mode-extra {
+    font-size: 0.7rem; color: var(--text-muted);
+    background: rgba(234, 179, 8, 0.1); padding: 2px 8px;
+    border-radius: 4px; white-space: nowrap;
+}
+.toggle-switch-sm {
+    width: 36px; height: 20px;
+}
+.toggle-switch-sm .slider::before {
+    height: 14px; width: 14px; left: 3px; bottom: 3px;
+}
+.toggle-switch-sm input:checked + .slider::before {
+    transform: translateX(16px);
+}
+
 /* ── System Info Grid ── */
 .sys-grid {
     display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
