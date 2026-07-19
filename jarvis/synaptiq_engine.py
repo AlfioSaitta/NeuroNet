@@ -50,12 +50,14 @@ class SynaptiqEngine:
         self.embedding_tier: str = embedding_tier
         self._storage: LadybugBackend | None = None
         self._rwlock = AsyncRWLock()
+        self._analysis_lock = asyncio.Lock()
         self._initialized = False
         self._last_analyze_duration: float = 0.0
         self._last_analyze_result: dict[str, Any] = {}
         # Watchdog integration — debounce per-project
         self._last_analysis_time: dict[str, float] = {}
         self._pending_tasks: dict[str, asyncio.Task] = {}
+        self._pending_requests: set[str] = set()
 
     @property
     def is_initialized(self) -> bool:
@@ -147,6 +149,9 @@ class SynaptiqEngine:
                 result.duration_seconds,
             )
             return data
+        except asyncio.CancelledError:
+            logger.debug("Synaptiq analyze cancellato per %s", path)
+            raise
         except Exception as e:
             logger.exception("Synaptiq analyze fallito [%s]: %s", type(e).__name__, e)
             raise
@@ -509,13 +514,21 @@ class SynaptiqEngine:
         Chiamato dal watchdog RAG dopo ogni batch di eventi.
         La prima analisi parte immediatamente; le successive rispettano
         ``_ANALYSIS_COOLDOWN`` secondi dall'ultima completata.
+
+        Se un'analisi per lo stesso progetto è già in coda o in esecuzione,
+        la nuova richiesta viene scartata (evita accumulo di task cancellati).
         """
+        # Se già in coda, skip
+        if project_path in self._pending_requests:
+            logger.debug("Synaptiq notify: %s già in coda, skip", project_path)
+            return
+
         loop = asyncio.get_running_loop()
         now = loop.time()
         last = self._last_analysis_time.get(project_path, 0.0)
         elapsed = now - last
 
-        # Cancella task pendente precedente (se ancora in attesa del cooldown)
+        # Cancella task pendente precedente solo se non è ancora partito
         prev = self._pending_tasks.pop(project_path, None)
         if prev is not None and not prev.done():
             prev.cancel()
@@ -557,14 +570,29 @@ class SynaptiqEngine:
     # ── Internal ─────────────────────────────────────────────────────────────────
 
     async def _analyze_one(self, project_path: str) -> dict[str, Any]:
-        """Analisi incrementale di un singolo progetto (wrap analyze)."""
+        """Analisi incrementale di un singolo progetto (wrap analyze).
+
+        Serializzata da ``_analysis_lock`` per evitare contenzione sul writer
+        lock sottostante. Richieste concorrenti per lo stesso progetto vengono
+        saltate (deduplica via ``_pending_requests``).
+        """
+        if project_path in self._pending_requests:
+            logger.debug("Synaptiq analyze già in coda per %s — skip", project_path)
+            return {}
+        self._pending_requests.add(project_path)
         try:
-            return await self.analyze(project_path, full_rebuild=False)
+            async with self._analysis_lock:
+                return await self.analyze(project_path, full_rebuild=False)
+        except asyncio.CancelledError:
+            logger.debug("Synaptiq analyze cancellato per %s", project_path)
+            return {}
         except Exception as e:
             logger.warning(
                 "Synaptiq analyze skipped per %s: [%s] %s", project_path, type(e).__name__, e,
             )
             return {}
+        finally:
+            self._pending_requests.discard(project_path)
 
     async def _debounced_analyze(self, project_path: str, wait: float) -> None:
         """Attende il cooldown rimanente poi analizza."""
