@@ -22,6 +22,7 @@ L'inferenza avviene **interamente in-process** tramite `llama-cpp-python` su mod
 - [9. CUDA Overlay](#9-⚠️-cuda-130-overlay--nota-critica)
 - [10. Provider Esterni](#10-🌐-strategia-integrazione-provider-esterni)
 - [11. Changelog](#11-📝-changelog)
+- [12. Pannello di Amministrazione](#12-🖥️-pannello-di-amministrazione)
 
 ---
 
@@ -286,6 +287,54 @@ Jarvis è **100% locale** — nessuna dipendenza cloud. Pianificata integrazione
 ## 11. 📝 Changelog
 
 > 📜 **Storico completo (v9.0.0 → v9.7.0):** [`CHANGELOG.md`](CHANGELOG.md)
+
+---
+
+## 12. 🖥️ Pannello di Amministrazione
+
+Jarvis include una dashboard web completa accessibile su `/dashboard/` o `/admin/`. Il pannello è suddiviso in **viste** (tab laterali) e fornisce metriche in tempo reale, diagnostica e controllo del sistema.
+
+![Admin Dashboard](docs/images/admin-dashboard.png)
+
+### ✅ Monitor
+Vista principale con telemetria in tempo reale: GPU (VRAM, temperatura, utilizzo), modelli LLM caricati, health dei servizi (Qdrant, SearXNG, Crawl4AI), statistiche inferenza (richieste totali, token), storico RAG, metriche di sistema (CPU, RAM, disco, rete), cronologia errori.
+
+### ✅ Code Graph
+Visualizzazione interattiva delle collezioni Qdrant tramite Sigma.js (FA2 layout). Ogni collezione è esplorabile come grafo vettoriale. Include funzioni di re-index e delete collection.
+
+### ✅ Chat
+Interfaccia chat in-browser con streaming SSE, markdown rendering, supporto drag-and-drop file e shortcut `/` per comandi rapidi.
+
+### ✅ Management
+Viste di amministrazione:
+- **Settings** — Pannello configurazione con **73 variabili d'ambiente** categorizzate in 12 gruppi. Supporta tipi text, number, float, boolean, select (dropdown), secret (password + toggle visibilità). **Simple Mode** (25 setting basic) / **Advanced Mode** (tutti i 63 visibili). Badge ⚡ per parametri che richiedono restart. Persistenza immediata su `.env`.
+- **Code Graph** — Lista collezioni Qdrant, re-index, delete.
+- **Models** — Lista modelli GGUF disponibili, switch runtime.
+- **Tasks** — CRUD task con priorità e scadenze.
+- **Cron** — Job schedulati (APScheduler), attivazione/pausa.
+- **Analytics** — Statistiche inferenza, telemetry, gatekeeper, distribuzione errori.
+
+### ✅ Logs
+Viewer log Docker con filtro per servizio e auto-scroll.
+
+### Architettura Frontend
+Il pannello è implementato come modulo separato `jarvis/admin_panel/`:
+| Componente | Descrizione |
+|---|---|
+| `__init__.py` | Router FastAPI, mount static files, route `/dashboard/` e `/admin/` |
+| `templates/index.html` | Template HTML unico con tutte le viste (CSS-in-JS residuo solo per stili dinamici) |
+| `static/css/style.css` | Tema scuro custom, ~500 righe, classi utility (flex, grid, gap, card, badge) |
+| `static/js/main.js` | Init dashboard, cambio view, polling `/api/dashboard/*` |
+| `static/js/charts.js` | Chart.js: GPU usage, inference counters, RAG chunks history |
+| `static/js/graph.js` | Sigma.js graph viewer con FA2 layout |
+| `static/js/chat.js` | Chat streaming SSE, drag-drop file, shortcut `/` |
+| `static/js/telemetry.js` | Polling telemetry (10 funzioni dominio-specifiche, Page Visibility API) |
+| `static/js/management.js` | Admin views: Settings, Code Graph, Models, Tasks, Cron, Analytics |
+| `static/js/logs.js` | Docker logs viewer |
+| `static/js/utils.js` | Utility condivise (`fetchWithTimeout`, `showToast`, `escapeHtml`) |
+
+### Backend
+I dati sono serviti da `jarvis/dashboard.py` (API Router FastAPI) che espone endpoint `/api/dashboard/*` per ogni vista. La configurazione settings è gestita tramite `SETTINGS_META` (dict di 73 voci con metadati estesi) e `_persist_env()` per scrittura atomica su `.env`.
 
 ---
 
