@@ -765,7 +765,7 @@ ENTITY_COLLECTION = f"{MEMORY_COLLECTION}_entities"
 
 
 @dashboard_router.get("/api/dashboard/graph/memory")
-async def get_memory_graph(user_id: str = "alfio_dev"):
+async def get_memory_graph(request: Request, user_id: str = "alfio_dev"):
     """Grafo bipartito: nodi entità ↔ nodi memoria dall'entity store.
 
     Scansiona la entity store (``collateral_memories_v3_entities``) e la
@@ -775,6 +775,10 @@ async def get_memory_graph(user_id: str = "alfio_dev"):
       - I nodi memoria (colore ciano) sono i ricordi episodici
       - I link connettono ogni entità alle memorie che la contengono
     """
+    # User from dashboard auth middleware takes precedence over query param
+    user_from_middleware = getattr(request.state, 'user', None)
+    if user_from_middleware:
+        user_id = user_from_middleware["id"]
     from qdrant_client import models as qdrant_models
 
     nodes = []
@@ -1264,7 +1268,9 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
         raw_messages = [{"role": "user", "content": payload.message}]
 
     from prompt_builder import build_omniscient_prompt
-    current_user_id = "dashboard_user"
+    # User from dashboard auth middleware takes precedence
+    user_from_middleware = getattr(request.state, 'user', None)
+    current_user_id = user_from_middleware["id"] if user_from_middleware else "dashboard_user"
     request_id = str(uuid.uuid4())[:12]
 
     try:

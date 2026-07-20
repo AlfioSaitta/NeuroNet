@@ -1262,7 +1262,7 @@ async def search_file_profiles(query_vector: list[float], top_k: int = 5) -> lis
         return []
 
 
-async def search_documents(query, is_project_query=False, project_name=None):
+async def search_documents(query, is_project_query=False, project_name=None, user=None):
     """Cerca documenti rilevanti nei Workspace Qdrant isolati."""
     try:
         # Alta priorità (0) per bypassare l'ingestione in background
@@ -1337,6 +1337,44 @@ async def search_documents(query, is_project_query=False, project_name=None):
             per_col_limit = max(1, top_k // max(len(col_names), 1))
         else:
             per_col_limit = top_k
+
+        # ── ACL filter: non-admin users see only authorized projects ──
+        if user and user.get("role") != "admin":
+            allowed = user.get("allowed_projects", [])
+            if isinstance(allowed, str):
+                import json
+                try:
+                    allowed = json.loads(allowed)
+                except (json.JSONDecodeError, TypeError):
+                    allowed = []
+            if allowed == ["*"]:
+                pass  # All projects accessible
+            elif allowed:
+                allowed_lower = [p.lower() for p in allowed]
+                # If a specific project was requested, check it's allowed
+                if project_name and project_name.lower() not in allowed_lower:
+                    logger.info(
+                        "🔒 User %s not authorized for project %s",
+                        user.get("username"), project_name,
+                    )
+                    return ""
+                target_cols = [
+                    c for c in target_cols
+                    if _ws_name(c).lower() in allowed_lower
+                ]
+                if not target_cols:
+                    logger.info(
+                        "🔒 User %s has no accessible projects for this query",
+                        user.get("username"),
+                    )
+                    return ""
+            else:
+                # allowed_projects = [] → no RAG access
+                logger.info(
+                    "🔒 User %s has no RAG projects configured",
+                    user.get("username"),
+                )
+                return ""
 
         async def _query_col(col_name):
             try:
@@ -1576,8 +1614,11 @@ async def search_documents(query, is_project_query=False, project_name=None):
         return ""
 
 
-async def list_rag_projects() -> list[str]:
-    """Restituisce la lista dei nomi di progetto indicizzati nel RAG (collezioni Qdrant)."""
+async def list_rag_projects(user=None) -> list[str]:
+    """Restituisce la lista dei nomi di progetto indicizzati nel RAG (collezioni Qdrant).
+
+    If user is provided, filters by user's allowed_projects (admins see all).
+    """
     try:
         collections_info = await state.qdrant.get_collections()
         projects = []
@@ -1587,7 +1628,26 @@ async def list_rag_projects() -> list[str]:
                 name = re.sub(r'_v\d+$', '', name)
                 if name and name != "default":
                     projects.append(name)
-        return sorted(set(projects))
+        all_projects = sorted(set(projects))
+
+        # ACL filter
+        if user and user.get("role") != "admin":
+            allowed = user.get("allowed_projects", [])
+            if isinstance(allowed, str):
+                import json
+                try:
+                    allowed = json.loads(allowed)
+                except (json.JSONDecodeError, TypeError):
+                    allowed = []
+            if allowed == ["*"]:
+                return all_projects
+            elif allowed:
+                allowed_lower = [p.lower() for p in allowed]
+                return [p for p in all_projects if p.lower() in allowed_lower]
+            else:
+                return []
+
+        return all_projects
     except Exception as e:
         logger.warning(f"Errore list_rag_projects: {e}")
         return []

@@ -189,7 +189,7 @@ def _record_gatekeeper_stats(intent: str, confidence: float, bypassed: bool, pro
         logger.warning(f"Errore aggiornamento gatekeeper_stats: {exc}")
 
 
-async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False, request_id=None, finalize_trace: bool = True):
+async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False, request_id=None, finalize_trace: bool = True, user=None):
     """
     Pipeline di arricchimento a 4 step con Caveman Compression.
 
@@ -346,7 +346,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
 
     # ── BUILD GATEKEEPER CONTEXT ──
     _active_before = state.get_last_project(current_user_id, conversation_id)
-    _all_projects = await list_rag_projects()
+    _all_projects = await list_rag_projects(user=user)
     _recent_user_msgs = [m["content"] for m in messages if m["role"] == "user"][-3:]
     
     # ════════════════════════════════════════════════════════════════
@@ -514,7 +514,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
 
         if not _is_meta_query:
             _rag_project = _user_override_focus if _user_override_focus else active_project
-            rag_ctx_local = await search_documents(clean_msg, is_project_query=_is_project_query, project_name=_rag_project)
+            rag_ctx_local = await search_documents(clean_msg, is_project_query=_is_project_query, project_name=_rag_project, user=user)
         else:
             rag_ctx_local = ""
         if full_files_content:

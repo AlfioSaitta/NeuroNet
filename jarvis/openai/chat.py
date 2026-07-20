@@ -72,7 +72,9 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
     ollama_messages = [{"role": m["role"], "content": m["content"]} for m in raw_messages]
 
-    current_user_id = body.get("user_id") or "alfio_dev"
+    # User from API key middleware (request.state.user) takes precedence
+    user_from_middleware = getattr(request.state, 'user', None)
+    current_user_id = user_from_middleware["id"] if user_from_middleware else body.get("user_id") or "alfio_dev"
     conversation_id = body.get("conversation_id") or request.headers.get("X-Conversation-Id", "default")
     concise = body.get("concise", False)
 
