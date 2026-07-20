@@ -4,6 +4,17 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 
 ---
 
+### v9.8.0 (2026-07-20) — User Management & ACL: JWT Auth, Admin Panel, API Keys
+- **UserManager SQLite:** Nuovo `jarvis/user_manager.py` — singleton SQLite (`aiosqlite`) per utenti e API key. CRUD utenti con bcrypt password hashing, generate/revoke/resolve API key (SHA256 hash, formato `sk-jarvis-<base64>`). Auto-seed safety net `ensure_admin_exists()` per bootstrap admin default
+- **JWT Auth module:** Nuovo `jarvis/auth.py` — token creation/verification (PyJWT), FastAPI dependencies (`get_current_user`, `require_auth`, `require_admin`), auth endpoints (`POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`). Token letto da cookie httpOnly `access_token` o header `Authorization: Bearer`
+- **Profile self-service API:** Nuovo `jarvis/routes/profile.py` — cambio password, list/create/revoke API key (con `rotate` flag), link/unlink Telegram ID
+- **Admin user management API:** Nuovo `jarvis/routes/users.py` — CRUD utenti per admin: create/list/update/delete, activate/deactivate
+- **Admin panel URL:** URL primario cambiato a `/admin/`. `/dashboard` redirect 301. Login page su `/admin/login` (standalone `login.html`). Nuove viste: Users (admin CRUD) e Profile (self-service password, API key, Telegram)
+- **JWT_SECRET auto-persist:** `config.py` genera e scrive automaticamente `JWT_SECRET` nel `.env` se mancante
+- **Bug fix: API key 500:** `key_obj["prefix"]` → `key_obj["key_prefix"]` in `routes/profile.py` (colonna DB `key_prefix`, non `prefix`)
+- **Bug fix: Users/Profile view layout:** Div spostati dentro `<div class="main-content">` — erano fuori da `app-layout`, causando rendering in fondo alla pagina
+- **Documentazione:** AGENTS.md, README.md aggiornati con nuovi moduli, auth flow, URL struttura
+
 ### v9.7.0 (2026-07-18) — Synaptiq Watchdog Automation + Documentazione Completa
 - **Synaptiq Watchdog Automation:** `notify_file_event()` hook in RAG queue worker → debounce 30s per-project → `initial_analysis()` background task con grafo strutturale
 - **Synaptiq Engine completo:** `synaptiq_engine.py` con hybrid search (vettori + PageRank grafo), dead code analysis, impact analysis, community detection. Grafo strutturale con nodi File/Function/Class e archi imports/calls/inherits

@@ -169,7 +169,7 @@ Input → Routing → PipelineTracer → Gatekeeper (intento?)
 
 ## 🖥️ Admin Dashboard
 
-Accessibile su `/dashboard/` o `/admin/`. Pannello suddiviso in **viste** con metriche in tempo reale.
+Accessibile su `/admin/` (primario; `/dashboard` redirect 301). Login su `/admin/login`. Pannello suddiviso in **viste** con metriche in tempo reale.
 
 | Vista | Cosa fa |
 |---|---|
@@ -182,6 +182,8 @@ Accessibile su `/dashboard/` o `/admin/`. Pannello suddiviso in **viste** con me
 | **Management → Cron** | Job APScheduler, attivazione/pausa |
 | **Management → Analytics** | Inferenza, telemetry, gatekeeper, error distribution |
 | **Logs** | Docker logs viewer con filtro servizio e auto-scroll |
+| **Management → Users** | User management CRUD (solo admin): crea, modifica, disabilita utenti, assegna ruoli/progetti |
+| **Profile** | Self-service: cambio password, gestione API key (genera/revoca/rigenera), link Telegram ID |
 
 ### Architettura
 
@@ -202,7 +204,7 @@ jarvis/admin_panel/
         └── utils.js      # fetchWithTimeout, showToast, escapeHtml
 ```
 
-Backend: `jarvis/dashboard.py` — API Router FastAPI con `SETTINGS_META` (73 voci, metadati estesi) e `_persist_env()` (scrittura atomica `.env`).
+Backend API auth: `jarvis/routes/profile.py` (self-service: API key, password, Telegram), `jarvis/routes/users.py` (admin CRUD utenti), `jarvis/auth.py` (JWT login/logout/me). Backend settings: `jarvis/dashboard.py` — API Router FastAPI con `SETTINGS_META` (73 voci, metadati estesi) e `_persist_env()` (scrittura atomica `.env`).
 
 ---
 

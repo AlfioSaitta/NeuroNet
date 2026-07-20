@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-07-19 (Settings Dashboard + Monitor Qdrant cleanup + Doc sync)
+> **Data ultimo aggiornamento:** 2026-07-20 (User Management & ACL — JWT auth, admin panel, API keys)
 
 ---
 
@@ -184,7 +184,18 @@ Master jarvis:8000
 | `code_intelligence.py` | **Legacy re-export.** `from synaptiq_bridge import hybrid_code_search` per retrocompatibilità. | `synaptiq_bridge` |
 | `session_store.py` | Chat session store persistente su SQLite. `ChatSessionStore` con `save_session()`/`load_session()`/`list_sessions()`/`delete_session()`. Usato da dashboard e main.py. | `sqlite3`, `state` |
 | `classificatore.py` | Classificatore intenti centralizzato: `classify()`, `is_project_query()`, `is_greeting()`, `is_web_query()`, `is_internal_query()`. Costanti `Intent.*` e `PROJECT_KEYWORDS`. | `re` |
+| `user_manager.py` | **UserManager** SQLite singleton per utenti e API key. CRUD utenti (bcrypt password), generate/revoke/resolve API key (SHA256 hash). `ensure_admin_exists()` safety net: crea admin default se nessun admin presente. | `aiosqlite`, `bcrypt`, `hashlib` |
+| `auth.py` | **JWT auth module.** Token creation/verification (PyJWT), FastAPI dependencies (`require_auth`, `require_admin`, `get_current_user`), auth endpoints (`/api/auth/login`, `/api/auth/logout`, `/api/auth/me`). Estrae JWT da cookie `access_token` o header `Authorization: Bearer`. | `pyjwt`, `user_manager` |
 | `confirmation_manager.py` | Gestione conferme utente per tool-calling. `ConfirmationManager` con timeout 5 min, token univoci, callback. | `state`, `asyncio` |
+
+### Nuovo: `jarvis/routes/`
+
+Pacchetto route FastAPI per user management e self-service:
+
+| File | Responsabilità |
+|---|---|
+| `profile.py` | **Profile self-service API** (prefix `/api/auth`, richiede `require_auth`). Endpoint: `GET/POST /api-key` (list/generate with rotate), `POST /api-key/{id}/revoke`, `POST /change-password`, `POST /telegram` (link/unlink Telegram ID) |
+| `users.py` | **Admin user management API** (prefix `/api/users`, richiede `require_admin`). Endpoint: `GET /` (list users), `POST /` (create user), `PUT /{id}` (update), `DELETE /{id}`, `PUT /{id}/activate`, `PUT /{id}/deactivate` |
 
 ### Sotto-pacchetto `jarvis/admin_panel/`
 
@@ -192,10 +203,11 @@ Pacchetto dashboard web modulare estratto da `dashboard_template.py`. Template H
 
 | File | Responsabilità |
 |---|---|
-| `__init__.py` | Router FastAPI `setup_admin_panel(app)`, mount static files, serve `index.html` su `/dashboard/` e `/admin/` |
-| `templates/index.html` | Template HTML dashboard (Chart.js, Sigma.js, stile cyberpunk). 644 righe, 57 inline style rimasti (solo dinamici/dimensioni font non standard) |
+| `__init__.py` | Router FastAPI `setup_admin_panel(app)`, mount static files, serve `index.html`. URL primario: `/admin/`. Redirect 301: `/dashboard` → `/admin/`. Login page: `/admin/login` |
+| `templates/index.html` | Template HTML dashboard (Chart.js, Sigma.js, stile cyberpunk). Include viste: Management → Users (admin-only, CRUD utenti), Profile (self-service password/API key/Telegram) |
+| `templates/login.html` | Pagina di login standalone |
 | `static/css/style.css` | Foglio di stile unico (456 righe). 30+ classi utility aggiunte: `.mono`, `.text-muted`, `.flex`, `.gap-*`, `.grid-*`, `.mb-*`, `.mt-*`, `.p-*`, `.fw-*`, `.card-compact`, `.card-header-sm` |
-| `static/js/main.js` | Inizializzazione dashboard: cambio view, polling `/api/dashboard/*`, refresh metrics, modali, notifiche toast |
+| `static/js/main.js` | Inizializzazione dashboard: cambio view, polling `/api/dashboard/*`, refresh metrics, modali, notifiche toast. **Auth**: `checkAuth()`, `login()`, `logout()`, `loadProfile()`, `loadApiKeys()`, `regenerateApiKey()`. **Users view**: `loadUsers()`, `createUser()`, `updateUser()`, `deleteUser()`, `toggleUser()` |
 | `static/js/charts.js` | Chart.js grafici: GPU usage (line 60s), inference counters, RAG chunks history. Responsive resize |
 | `static/js/graph.js` | Sigma.js graph viewer (689 righe). `renderSigmaGraph()` funzione condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. FA2, 7 event handler, stats panel, resize observer |
 | `static/js/chat.js` | Chat view: streaming SSE, paste event, drag-drop file, keydown '/' shortcut. Event listener consolidati in DOMContentLoaded (390 righe) |
@@ -315,6 +327,19 @@ RERANKER_DEVICE=cpu
 FLASHRANK_MODEL=ms-marco-MiniLM-L-6-v2
 ```
 
+### JWT Authentication
+
+Jarvis usa **JWT** per l'autenticazione della dashboard admin:
+
+- `JWT_SECRET`: generato automaticamente da `config.py` e persistito in `.env` (SHA256 di hostname + urandom). Se mancante nel `.env`, viene creato al primo avvio.
+- `ACCESS_TOKEN_EXPIRE_MINUTES`: default 480 minuti (8 ore). Controllabile via `.env`.
+- `JWT_ALGORITHM`: `HS256` (hardcoded).
+- Il token è salvato in un **cookie httpOnly** chiamato `access_token` dopo il login su `/admin/login`.
+- Le API OpenAI-compatibili (`/v1/*`) e Jarvis API usano **API key** (header `Authorization: Bearer sk-jarvis-...`) gestite da `UserManager.resolve_api_key()`.
+- **Auto-seed safety net**: `ensure_admin_exists()` in `user_manager.py` crea admin default (`admin`/`neuronet`) se nessun admin esiste al login. Chiamata da `auth.py` in `login()` e `get_current_user()`.
+- **Nessuna self-registration**: solo admin crea utenti dalla dashboard Users view.
+- **API key plaintext mostrata UNA VOLTA**: dopo la creazione/rigenerazione, la chiave è visibile una sola volta. Non esiste recovery.
+
 ---
 
 ## 5. Modelli LLM in Uso
@@ -377,6 +402,7 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 |---|---|---|
 | 19/07 | **Settings Dashboard — 73 env var categorizzate** | `dashboard.py` SETTINGS_META espansa da 11 a 73 setting (63 visibili in 12 categorie, 10 hidden). `_persist_env()` atomic write su `.env`. `update_settings()` con type coercion (int/float/bool/str). Frontend: float/select/secret tipi, badge ⚡ restart_required, toggle Simple/Advanced Mode. UI settings: Gatekeeper, Embedding & Reranker, Watchdog, Rate Limit cards separate |
 | 19/07 | **Monitor — Rimossa sezione Qdrant Collections** | Sezione inutile (duplicata da Code Graph) rimossa da index.html e telemetry.js. Funzione `updateQdrantCollections()` eliminata |
+| 20/07 | **User Management & ACL — JWT auth, admin panel, API keys** | Nuovo `user_manager.py` (UserManager SQLite, bcrypt, API key SHA256), `auth.py` (JWT, login/logout/me, require_auth/admin), `routes/profile.py` (self-service password/API key/Telegram), `routes/users.py` (admin CRUD). Admin panel: URL primario `/admin/` (redirect `/dashboard` → `/admin/`), login page `/admin/login`, nuove viste Users (CRUD) e Profile (API key/password/Telegram). `config.py`: JWT_SECRET auto-write su `.env`. `ensure_admin_exists()` safety net. Bug fix: `prefix`→`key_prefix` in profile.py (500 API key), Users/Profile views spostati dentro main-content (layout) |
 | 19/07 | **Documentazione — Aggiornamento completo** | AGENTS.md, README.md, COMPONENTS.md aggiornati con nuovi moduli e feature. Aggiunti: `session_store.py`, `classificatore.py`, `confirmation_manager.py`, `utils.js` |
 | 18/07 | **Dashboard — Admin Panel modulare** | `dashboard_template.py` rifattorizzato in `admin_panel/` sub-package: __init__.py router, 6 JS moduli, style.css, index.html. Backend `dashboard.py` immutato. Route `/dashboard/` e `/admin/` attive |
 | 18/07 | **graph.js — Deduplicato rendering Sigma.js** | Creata `renderSigmaGraph(config)` funzione condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. FA2, 7 event handler, stats, resize observer unificati. 856→689 righe (-19.5%) |
@@ -493,13 +519,17 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/main.py` | ✅ Corretto | reset-all pulisce last_project_context, conversation_id passato alla pipeline, PollingObserver watchdog, cleanup nested symlink |
 | `jarvis/telegram_bot.py` | ✅ Corretto | user_id normalizzato a string, session TTL resetta progetto |
 | `jarvis/model_profiles.py` | ✅ Nuovo | Auto-rilevamento famiglia modello da nome GGUF (Qwen, Gemma, DeepSeek, Llama, Mistral, Phi, Command-R) |
+| `jarvis/user_manager.py` | ✅ **NUOVO** | UserManager SQLite singleton: bcrypt password, user CRUD, API key gestione (generate/revoke/resolve SHA256). `ensure_admin_exists()` safety net per bootstrap admin |
+| `jarvis/auth.py` | ✅ **NUOVO** | JWT auth (PyJWT): creazione/verifica token, FastAPI dependencies (`get_current_user`, `require_auth`, `require_admin`), endpoint `/api/auth/login`/`/logout`/`/me`. Estrazione token da cookie `access_token` o header Bearer |
+| `jarvis/routes/profile.py` | ✅ **NUOVO** | Profile self-service API: cambio password, list/create/revoke API key con rotate, link/unlink Telegram ID |
+| `jarvis/routes/users.py` | ✅ **NUOVO** | Admin user management API CRUD: create/list/update/delete user, activate/deactivate |
 | `jarvis/dashboard.py` | ✅ **ESTESO** | SETTINGS_META (73 env var categorizzate), `_persist_env()`, `update_settings()`. Endpoint `/api/dashboard/settings` con type coercion, restart detection |
 | `jarvis/openai/` (pacchetto) | ✅ Nuovo | 17 moduli: chat/completions/embeddings/audio/images + Assistants/Threads/Runs API. Lazy import, init ritardato nell'lifespan |
 | `jarvis/openai/state.py` | ✅ Fixato | `asyncio.Lock` + double-check locking in `get_db()` — risolve race condition su richieste concorrenti al DB Assistants |
 | `jarvis/rag_reranker.py` | ✅ Nuovo | Reranker modulare: Qwen3-Reranker (transformers fp16 CPU) + fallback FlashRank ONNX |
 | `jarvis/rag_cache.py` | ✅ Nuovo | Cache semantica Qdrant + Web Knowledge persistence |
 | `jarvis/telegram_format.py` | ✅ Nuovo | Utility formattazione Telegram MarkdownV2/Markdown |
-| `jarvis/admin_panel/` (pacchetto) | ✅ **OTTIMIZZATO** | Dashboard web modulare: `__init__.py` router, 6 JS moduli (main, charts, graph, chat, telemetry, management, logs), style.css, index.html. graph.js deduplicato (-19.5%), inline style -71%, telemetry.js splittato in 10 funzioni + Page Visibility API, chat.js listener consolidati |
+| `jarvis/admin_panel/` (pacchetto) | ✅ **OTTIMIZZATO** | Dashboard web modulare: `__init__.py` router (URL primario `/admin/`, redirect `/dashboard` → `/admin/`), login page `/admin/login`. 6 JS moduli (main, charts, graph, chat, telemetry, management, logs), style.css, index.html. Nuove viste: Users (CRUD admin), Profile (API key, password, Telegram). graph.js deduplicato (-19.5%), inline style -71%, telemetry.js splittato in 10 funzioni + Page Visibility API, chat.js listener consolidati |
 | `jarvis/dashboard_template.py` | ➖ **RIFATTORIZZATO** | HTML/CSS/JS estratto in `admin_panel/` sub-package con moduli separati. Mantenuto come fallback legacy |
 | `jarvis/dashboard.py` (settings) | ✅ **ESTESO** | SETTINGS_META 73 env var, _persist_env(), update_settings(). Endpoint POST /api/dashboard/settings |
 | `jarvis/session_store.py` | ✅ Nuovo | ChatSessionStore SQLite persistente: save/load/list/delete sessioni |
@@ -550,6 +580,9 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 7. **Non modificare `data/`** senza backup — contiene i dati persistenti (Qdrant, Mem0, sessioni Telegram).
 8. **Non cambiare `VECTOR_DB_VERSION`** senza una buona ragione — causa migrazione automatica delle collezioni Qdrant e ri-ingestion completa del RAG.
 9. **Non riavviare Jarvis autonomamente** — dopo modifiche a `.env`, `config.py` o `llm_engine.py`, chiedere SEMPRE ad Alfio di riavviare manualmente il processo Granian (`kill <PID> && granian --interface asgi --host 0.0.0.0 --port 8000 main:app`). Il server gira direttamente sull'host, non in container Docker, e un riavvio improvviso può interrompere conversazioni attive.
+10. **Non esiste self-registration** — solo l'admin crea utenti dalla dashboard (Users view). Non implementare endpoint di registrazione pubblici.
+11. **JWT_SECRET non va modificato manualmente** — viene generato automaticamente e salvato in `.env` da `config.py`. Se cancellato, viene rigenerato — ma tutte le sessioni JWT attive diventano invalide.
+12. **API key format**: `sk-jarvis-<base64random>` — SHA256 hash salvato nel DB, chiave plaintext mostrata UNA SOLA volta al momento della creazione. Non esiste recovery.
 
 ### 🟡 ATTENZIONE
 
