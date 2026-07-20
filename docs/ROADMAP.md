@@ -444,4 +444,4 @@ Ogni area ha un criterio oggettivo per considerarsi *done*:
 
 ---
 
-> 📖 **Vedi anche:** [`docs/AGENTS.md`](docs/AGENTS.md) per contesto operativo completo · [`README.md`](README.md) per stato sistema
+> 📖 **Vedi anche:** [`../AGENTS.md`](../AGENTS.md) per contesto operativo completo · [`../README.md`](../README.md) per stato sistema

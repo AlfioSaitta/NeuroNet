@@ -59,7 +59,7 @@ WATCHDOG_TIMEOUT=5
 WATCHDOG_WATCH_MODE=per_project
 ```
 
-> ⚙️ **73 variabili d'ambiente** configurabili dalla dashboard → [`docs/AGENTS.md#4-configurazione-e-variabili-dambiente`](docs/AGENTS.md#4-configurazione-e-variabili-dambiente)
+> ⚙️ **73 variabili d'ambiente** configurabili dalla dashboard → [`AGENTS.md#4-configurazione-e-variabili-dambiente`](AGENTS.md#4-configurazione-e-variabili-dambiente)
 
 ---
 
@@ -239,7 +239,7 @@ Jarvis usa **solo `llama-cpp-python`** con file GGUF. Nessun Ollama.
 
 | File | Contenuto |
 |---|---|
-| [`docs/AGENTS.md`](docs/AGENTS.md) | **Guida per agenti AI** (leggi PRIMA di lavorare sul codice) |
+| [`AGENTS.md`](AGENTS.md) | **Guida per agenti AI** (leggi PRIMA di lavorare sul codice) |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Topologia Master/Worker, flusso inferenza |
 | [`docs/COMPONENTS.md`](docs/COMPONENTS.md) | Analisi completa 14 componenti con diagrammi |
 | [`docs/PIPELINE.md`](docs/PIPELINE.md) | Flusso end-to-end Input → Response |
@@ -247,7 +247,7 @@ Jarvis usa **solo `llama-cpp-python`** con file GGUF. Nessun Ollama.
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Tutti gli endpoint API |
 | [`docs/TAGS_REFERENCE.md`](docs/TAGS_REFERENCE.md) | Riferimento 21 tag XML d'azione |
 | [`docs/STRATEGY.md`](docs/STRATEGY.md) | Strategia integrazione provider esterni |
-| [`CHANGELOG.md`](CHANGELOG.md) | Storico versioni |
+| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Storico versioni |
 
 ---
 
