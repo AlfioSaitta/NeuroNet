@@ -192,7 +192,7 @@ jarvis/admin_panel/
 ├── __init__.py           # Router FastAPI, mount static files
 ├── templates/index.html  # Template HTML unico
 └── static/
-    ├── css/style.css     # Tema scuro custom (~500 righe)
+    ├── css/style.css     # Tema chiaro/scuro con CSS custom properties (~500 righe)
     └── js/
         ├── main.js       # Init, cambio view, polling
         ├── charts.js     # Chart.js (GPU, inference, RAG)

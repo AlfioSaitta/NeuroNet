@@ -194,7 +194,7 @@ Pacchetto route FastAPI per user management e self-service:
 
 | File | Responsabilità |
 |---|---|
-| `profile.py` | **Profile self-service API** (prefix `/api/auth`, richiede `require_auth`). Endpoint: `GET/POST /api-key` (list/generate with rotate), `POST /api-key/{id}/revoke`, `POST /change-password`, `POST /telegram` (link/unlink Telegram ID) |
+| `profile.py` | **Profile self-service API** (prefix `/api/auth`, richiede `require_auth`). Endpoint: `GET/POST /api-key` (list/generate with rotate), `GET /api-auth/api-key/{key_id}/reveal` (revela chiave cache), `POST /api-key/{id}/revoke`, `POST /change-password`, `POST /telegram` (link/unlink Telegram ID). Caching: `_RECENT_KEYS` dict in-memory con TTL 5 min per chiavi appena generate |
 | `users.py` | **Admin user management API** (prefix `/api/users`, richiede `require_admin`). Endpoint: `GET /` (list users), `POST /` (create user), `PUT /{id}` (update), `DELETE /{id}`, `PUT /{id}/activate`, `PUT /{id}/deactivate` |
 
 ### Sotto-pacchetto `jarvis/admin_panel/`
@@ -206,7 +206,7 @@ Pacchetto dashboard web modulare estratto da `dashboard_template.py`. Template H
 | `__init__.py` | Router FastAPI `setup_admin_panel(app)`, mount static files, serve `index.html`. URL primario: `/admin/`. Redirect 301: `/dashboard` → `/admin/`. Login page: `/admin/login` |
 | `templates/index.html` | Template HTML dashboard (Chart.js, Sigma.js, stile cyberpunk). Include viste: Management → Users (admin-only, CRUD utenti), Profile (self-service password/API key/Telegram) |
 | `templates/login.html` | Pagina di login standalone |
-| `static/css/style.css` | Foglio di stile unico (456 righe). 30+ classi utility aggiunte: `.mono`, `.text-muted`, `.flex`, `.gap-*`, `.grid-*`, `.mb-*`, `.mt-*`, `.p-*`, `.fw-*`, `.card-compact`, `.card-header-sm` |
+| `static/css/style.css` | Foglio di stile unico (~500 righe). Tema chiaro/scuro con CSS custom properties: 60+ variabili `--*-rgb` per rgba() (primary, secondary, danger, warning, accent, text-main, text-muted, card-bg, input-bg, surface-subtle, border-subtle, bg-elevated). 30+ classi utility: `.mono`, `.text-muted`, `.flex`, `.gap-*`, `.grid-*`, `.mb-*`, `.mt-*`, `.p-*`, `.fw-*`, `.card-compact`, `.card-header-sm` |
 | `static/js/main.js` | Inizializzazione dashboard: cambio view, polling `/api/dashboard/*`, refresh metrics, modali, notifiche toast. **Auth**: `checkAuth()`, `login()`, `logout()`, `loadProfile()`, `loadApiKeys()`, `regenerateApiKey()`. **Users view**: `loadUsers()`, `createUser()`, `updateUser()`, `deleteUser()`, `toggleUser()` |
 | `static/js/charts.js` | Chart.js grafici: GPU usage (line 60s), inference counters, RAG chunks history. Responsive resize |
 | `static/js/graph.js` | Sigma.js graph viewer (689 righe). `renderSigmaGraph()` funzione condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. FA2, 7 event handler, stats panel, resize observer |
@@ -338,7 +338,8 @@ Jarvis usa **JWT** per l'autenticazione della dashboard admin:
 - Le API OpenAI-compatibili (`/v1/*`) e Jarvis API usano **API key** (header `Authorization: Bearer sk-jarvis-...`) gestite da `UserManager.resolve_api_key()`.
 - **Auto-seed safety net**: `ensure_admin_exists()` in `user_manager.py` crea admin default (`admin`/`neuronet`) se nessun admin esiste al login. Chiamata da `auth.py` in `login()` e `get_current_user()`.
 - **Nessuna self-registration**: solo admin crea utenti dalla dashboard Users view.
-- **API key plaintext mostrata UNA VOLTA**: dopo la creazione/rigenerazione, la chiave è visibile una sola volta. Non esiste recovery.
+- **API key plaintext mostrata UNA VOLTA**: dopo la creazione/rigenerazione, la chiave è visibile una sola volta. Tuttavia, le chiavi appena generate sono temporaneamente cache in memoria (`_RECENT_KEYS` dict, TTL 5 min) e recuperabili via `GET /api/auth/api-key/{key_id}/reveal`. Dopo il TTL, non esiste recovery.
+- **API key auth sempre rigorosa**: anche richieste da `localhost` con prefisso `Bearer` ma chiave non valida (`sk-jarvis-*`) vengono respinte con 401. Il pass-through backward-compat è stato rimosso per sicurezza.
 
 ---
 
@@ -403,6 +404,14 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 | 19/07 | **Settings Dashboard — 73 env var categorizzate** | `dashboard.py` SETTINGS_META espansa da 11 a 73 setting (63 visibili in 12 categorie, 10 hidden). `_persist_env()` atomic write su `.env`. `update_settings()` con type coercion (int/float/bool/str). Frontend: float/select/secret tipi, badge ⚡ restart_required, toggle Simple/Advanced Mode. UI settings: Gatekeeper, Embedding & Reranker, Watchdog, Rate Limit cards separate |
 | 19/07 | **Monitor — Rimossa sezione Qdrant Collections** | Sezione inutile (duplicata da Code Graph) rimossa da index.html e telemetry.js. Funzione `updateQdrantCollections()` eliminata |
 | 20/07 | **User Management & ACL — JWT auth, admin panel, API keys** | Nuovo `user_manager.py` (UserManager SQLite, bcrypt, API key SHA256), `auth.py` (JWT, login/logout/me, require_auth/admin), `routes/profile.py` (self-service password/API key/Telegram), `routes/users.py` (admin CRUD). Admin panel: URL primario `/admin/` (redirect `/dashboard` → `/admin/`), login page `/admin/login`, nuove viste Users (CRUD) e Profile (API key/password/Telegram). `config.py`: JWT_SECRET auto-write su `.env`. `ensure_admin_exists()` safety net. Bug fix: `prefix`→`key_prefix` in profile.py (500 API key), Users/Profile views spostati dentro main-content (layout) |
+| 20/07 | **Theme-aware CSS — light-mode color variables** | 60+ hardcoded rgba values replaced with CSS custom properties (`--primary-rgb`, `--secondary-rgb`, `--danger-rgb`, `--warning-rgb`, `--accent-rgb`, `--text-main-rgb`, `--text-muted-rgb`) per supporto tema chiaro/scuro. Aggiunte variabili mancanti: `--card-bg`, `--input-bg`, `--surface-subtle`, `--border-subtle`, `--bg-elevated`. Chat, Settings, Graph, Management tables, Badges, Forms, Session sidebar, Buttons convertiti a `rgba(var(--xxx-rgb), ...)`. style.css cresciuto a ~500+ righe |
+| 20/07 | **feat(profile): copy full API key via temporary cache** | Nuovo `_RECENT_KEYS` in-memory cache (TTL 5 min) per chiavi appena generate. Nuovo endpoint `GET /api/auth/api-key/{key_id}/reveal` per recupero chiave cachata. Bottone `📋` su ogni riga API key attiva. Clipboard fallback (`execCommand('copy')`) per ambienti non-HTTPS |
+| 20/07 | **feat(profile): click-to-copy API key text** | Testo chiave nella warning card cliccabile per copia, con feedback visivo flash |
+| 20/07 | **feat(profile): generate new key without revoking** | `➕ Generate New Key` crea chiave con `rotate: false`, mantenendo chiavi esistenti attive |
+| 20/07 | **fix(profile): hide revoked API keys** | `get_user_api_keys()` filtra con `AND is_active = 1` — chiavi revocate non appaiono più in lista |
+| 20/07 | **fix(profile): remove misleading prefix copy** | Rimosso bottone copia prefix fuorviante (solo prefisso) dalla lista chiavi. Testo esplicativo aggiunto su prefix vs full key |
+| 20/07 | **fix(auth): reject invalid API keys even from localhost** | Pass-through backward-compat per localhost permetteva qualsiasi header Authorization es. `Bearer dev`. Ora richieste con prefisso `Bearer` ma chiave non `sk-jarvis-*` sono sempre respinte con 401 |
+| 20/07 | **fix(auth): missing import in reveal endpoint** | `reveal_api_key()` mancava import `user_manager as um`, causando NameError a runtime |
 | 19/07 | **Documentazione — Aggiornamento completo** | AGENTS.md, README.md, COMPONENTS.md aggiornati con nuovi moduli e feature. Aggiunti: `session_store.py`, `classificatore.py`, `confirmation_manager.py`, `utils.js` |
 | 18/07 | **Dashboard — Admin Panel modulare** | `dashboard_template.py` rifattorizzato in `admin_panel/` sub-package: __init__.py router, 6 JS moduli, style.css, index.html. Backend `dashboard.py` immutato. Route `/dashboard/` e `/admin/` attive |
 | 18/07 | **graph.js — Deduplicato rendering Sigma.js** | Creata `renderSigmaGraph(config)` funzione condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. FA2, 7 event handler, stats, resize observer unificati. 856→689 righe (-19.5%) |

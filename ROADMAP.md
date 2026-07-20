@@ -2,8 +2,8 @@
 
 > **Progetto:** Jarvis — Cognitive Proxy AI Locale  
 > **Base:** FastAPI + Granian · llama-cpp-python · Qdrant · Mem0 · Telegram  
-> **Versione piano:** 2026-07-16  
-> **Totale codebase:** ~18K LOC · 46 moduli · 5 test
+> **Versione piano:** 2026-07-20  
+> **Totale codebase:** ~18.5K LOC · 48 moduli · 5 test
 
 ---
 
@@ -22,11 +22,11 @@ pie title Copertura per area funzionale
 
 | Metrica | Valore | Giudizio |
 |---|---|---|
-| **LOC totali** | ~18.000 | 🟡 Medio — cresciuto organicamente |
-| **Moduli Python** | 46 | 🟡 Tanti per singolo developer |
+| **LOC totali** | ~18.500 | 🟡 Medio — cresciuto organicamente |
+| **Moduli Python** | 48 | 🟡 Tanti per singolo developer |
 | **Test** | 5 file · ~0% coverage | 🔴 **Critico** |
 | **RAG chunk size** | 512 tok · 0 overlap | 🟡 Da rivalutare |
-| **Modello principale** | Qwen2.5-Coder 3B GGUF | 🟢 Valido per coding |
+| **Modello principale** | Gemma 4 E2B QAT (2.1B) | 🟢 Valido per coding |
 | **Embedding** | Qwen3-Embedding-0.6B 768d Q8_0 | 🟢 Adeguato |
 | **Reranker** | Qwen3-Reranker-0.6B (CPU) | 🟢 Attivo |
 | **Mem0 persistenza** | Qdrant vettoriale | 🟢 Funzionante |
