@@ -232,6 +232,29 @@ async function regenerateApiKey() {
 
 let _newApiKeyText = '';
 
+function _copyText(text) {
+    // Try modern clipboard API first, fallback to legacy execCommand
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+    }
+    return new Promise((resolve, reject) => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            resolve();
+        } catch (e) {
+            document.body.removeChild(ta);
+            reject(e);
+        }
+    });
+}
+
 async function copyFullApiKey(keyId) {
     try {
         const res = await fetch(`/api/auth/api-key/${keyId}/reveal`);
@@ -241,7 +264,7 @@ async function copyFullApiKey(keyId) {
             return;
         }
         const data = await res.json();
-        await navigator.clipboard.writeText(data.key);
+        await _copyText(data.key);
         showToast('📋 Full API key copied to clipboard!');
     } catch (e) {
         showToast('Failed to copy key. Try again.', 3000);
@@ -251,7 +274,7 @@ async function copyFullApiKey(keyId) {
 function copyNewApiKey() {
     const el = document.getElementById('api-key-value');
     if (!el || !el.textContent) return;
-    navigator.clipboard.writeText(el.textContent).then(() => {
+    _copyText(el.textContent).then(() => {
         showToast('API key copied to clipboard!');
         el.style.transition = 'background 0.2s';
         el.style.background = 'rgba(var(--primary-rgb), 0.15)';

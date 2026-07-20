@@ -99,7 +99,7 @@ async def reveal_api_key(key_id: str, user: dict = Depends(require_auth)):
     The full key is only stored temporarily in memory after generation.
     Once expired, it cannot be recovered — generate a new key instead.
     """
-    from user_manager import _get_recent_key
+    from user_manager import user_manager as um, _get_recent_key
 
     keys = await um.get_user_api_keys(user["id"])
     if not any(k["id"] == key_id for k in keys):
