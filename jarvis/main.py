@@ -737,6 +737,9 @@ app.include_router(users_router)
 from routes.profile import router as profile_router
 app.include_router(profile_router)
 
+from routes.projects import router as projects_router
+app.include_router(projects_router)
+
 from admin_panel import setup_admin_panel
 setup_admin_panel(app)
 

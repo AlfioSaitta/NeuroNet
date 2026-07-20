@@ -83,6 +83,7 @@ function switchView(viewName) {
     if (viewName === 'chat') { document.getElementById('chat-input')?.focus(); loadSessionList(); loadChatHistory(); }
     if (viewName === 'models') loadModelsData();
     if (viewName === 'users') loadUsers();
+    if (viewName === 'projects') loadProjects();
     if (viewName === 'profile') { loadProfile(); loadApiKeys(); }
     if (viewName === 'tasks') { loadTasksData(); loadCronData(); }
     if (viewName === 'logs') { document.getElementById('log-container-select').value = 'all'; loadContainers(); fetchLogs(); if (document.getElementById('log-auto-refresh')?.checked) { if (logInterval) clearInterval(logInterval); logInterval = setInterval(fetchLogs, 5000); } }

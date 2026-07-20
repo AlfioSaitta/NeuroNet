@@ -1350,3 +1350,19 @@ select.form-input { cursor: pointer; }
 
 /* ── Toast ── */
 
+/* ── Project Cards ── */
+.project-card-header { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid rgba(var(--border-subtle-rgb), 0.3); }
+.project-card-body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px 16px; }
+.project-card-actions { display: flex; gap: 8px; padding: 8px 16px; border-top: 1px solid rgba(var(--border-subtle-rgb), 0.3); }
+.project-stat { display: flex; flex-direction: column; gap: 2px; }
+.stat-label { font-size: 0.65rem; color: rgba(var(--text-muted-rgb), 0.7); text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-value { font-size: 0.82rem; }
+.projects-scroll { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.status-dot.status-green { background: #22c55e; }
+.status-dot.status-yellow { background: #eab308; }
+.status-dot.status-red { background: #ef4444; }
+.badge-workspace { background: rgba(59, 130, 246, 0.15); color: #3b82f6; padding: 1px 6px; border-radius: 4px; font-size: 0.65rem; }
+.badge-external { background: rgba(139, 92, 246, 0.15); color: #8b5cf6; padding: 1px 6px; border-radius: 4px; font-size: 0.65rem; }
+.badge-orphan { background: rgba(234, 179, 8, 0.15); color: #eab308; padding: 1px 6px; border-radius: 4px; font-size: 0.65rem; }
+
