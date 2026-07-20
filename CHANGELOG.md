@@ -4,11 +4,24 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 
 ---
 
+### v9.8.1 (2026-07-20) — Light-Mode CSS, API Key UX, Auth Fixes
+
+- **refactor(admin): theme-aware CSS with light-mode color variables:** 60+ hardcoded rgba values replaced with CSS custom properties for full light/dark theme support. Added `--primary-rgb`, `--secondary-rgb`, `--danger-rgb`, `--warning-rgb`, `--accent-rgb`, `--text-main-rgb`, `--text-muted-rgb` for rgba() usage. Added missing variables: `--card-bg`, `--input-bg`, `--surface-subtle`, `--border-subtle`, `--bg-elevated`. Chat, Settings, Graph, Management tables, Badges, Forms, Session sidebar, Buttons all converted to `rgba(var(--xxx-rgb), ...)` pattern
+- **feat(profile): copy full API key from list via temporary cache:** New `_RECENT_KEYS` in-memory cache (5-min TTL) stores freshly generated keys. New `GET /api/auth/api-key/{key_id}/reveal` endpoint to retrieve cached key. `📋` button on each active key row calls the endpoint. Clipboard fallback (`execCommand('copy')`) for non-HTTPS environments
+- **feat(profile): click-to-copy API key text:** Displayed key text in the warning card is now clickable to copy, with visual flash feedback
+- **feat(profile): generate new key without revoking:** `➕ Generate New Key` button creates a key with `rotate: false`, keeping existing keys active. Users can always get a fresh copyable full key
+- **fix(profile): hide revoked API keys:** `get_user_api_keys()` now filters with `AND is_active = 1` — revoked keys no longer clutter the profile page
+- **fix(profile): remove misleading prefix copy:** Removed copy button from key list rows that copied only the prefix (confusing users into thinking it was the full key). Added clarifying text explaining prefix vs full key
+- **fix(auth): reject invalid API keys even from localhost:** backward-compat pass-through for localhost previously allowed any Authorization header value (e.g. `Bearer dev`). Now requests with `Bearer` prefix but non-`sk-jarvis-*` key are always rejected with 401
+- **fix(auth): missing import in reveal endpoint:** `reveal_api_key()` was missing `user_manager as um` import, causing `NameError` at runtime
+
 ### v9.8.0 (2026-07-20) — User Management & ACL: JWT Auth, Admin Panel, API Keys
 - **UserManager SQLite:** Nuovo `jarvis/user_manager.py` — singleton SQLite (`aiosqlite`) per utenti e API key. CRUD utenti con bcrypt password hashing, generate/revoke/resolve API key (SHA256 hash, formato `sk-jarvis-<base64>`). Auto-seed safety net `ensure_admin_exists()` per bootstrap admin default
 - **JWT Auth module:** Nuovo `jarvis/auth.py` — token creation/verification (PyJWT), FastAPI dependencies (`get_current_user`, `require_auth`, `require_admin`), auth endpoints (`POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`). Token letto da cookie httpOnly `access_token` o header `Authorization: Bearer`
 - **Profile self-service API:** Nuovo `jarvis/routes/profile.py` — cambio password, list/create/revoke API key (con `rotate` flag), link/unlink Telegram ID
 - **Admin user management API:** Nuovo `jarvis/routes/users.py` — CRUD utenti per admin: create/list/update/delete, activate/deactivate
+- **RAG ACL filtering:** `search_documents()` e `list_rag_projects()` filtrano per `allowed_projects` dell'utente. Non-admin vedono solo i progetti autorizzati
+- **Telegram DB-backed auth:** Sostituito static `ALLOWED_USERS` con DB-backed user authentication per bot Telegram, con cache 5 min
 - **Admin panel URL:** URL primario cambiato a `/admin/`. `/dashboard` redirect 301. Login page su `/admin/login` (standalone `login.html`). Nuove viste: Users (admin CRUD) e Profile (self-service password, API key, Telegram)
 - **JWT_SECRET auto-persist:** `config.py` genera e scrive automaticamente `JWT_SECRET` nel `.env` se mancante
 - **Bug fix: API key 500:** `key_obj["prefix"]` → `key_obj["key_prefix"]` in `routes/profile.py` (colonna DB `key_prefix`, non `prefix`)
@@ -22,6 +35,11 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 - **Full Message Pipeline:** Diagramma ASCII completo end-to-end dal messaggio utente alla risposta LLM, con tutti i 9 step: Routing → Pipeline Tracer → Gatekeeper → Context Gathering (parallelo) → Super-prompt Assembly → Generazione → Streaming + Tag Processing → Tool-calling Loop → Output
 - **Synaptiq Engine documentato:** Sezione dedicata `🧬 Synaptiq Engine` come componente #13, con diagramma flusso, tabella 4 modalità di ricerca, struttura grafo nodi/archi/metriche
 - **Status table aggiornata:** Data 2026-07-18, Synaptiq Engine v2.0.5 row aggiunta
+- **Dashboard modularizzato:** `dashboard_template.py` rifattorizzato in `admin_panel/` sub-package. 6 JS moduli, style.css, index.html separati. URL `/admin/` (primario), `/dashboard` (redirect)
+- **graph.js deduplicato:** `renderSigmaGraph()` condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. 856→689 righe (-19.5%)
+- **index.html inline style -71%:** ~200 → 57 inline style, 30+ utility classi CSS
+- **telemetry.js refactor:** `fetchStats()` splittata in 10 funzioni dominio-specifiche + Page Visibility API
+- **Synaptiq Migration bug fixes:** 6 bug risolti: import crash (CRITICAL), KeyError su meta (MEDIUM), brace extra dashboard (MEDIUM), badge OFFLINE→IDLE (LOW), pathspec deprecation (LOW), label CodeGraph→Code Context (LOW)
 
 ### v9.6.0 (2026-07-16) — MCP Server v2 + compressione ottimizzata + prompt format rules
 - **MCP Server v2 Streamable HTTP**: nuovo endpoint `/api/mcp/v2` conforme MCP Streamable HTTP (RFC 2025-11-25). 8 tool + 7 resources. Rimossi vecchi endpoint SSE (`/api/mcp/sse`, `/api/mcp/message`).
@@ -77,3 +95,5 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 - **Telegram:** Centralizzato sul Master — TELEGRAM_ENABLED=false sul Worker
 - **llm_engine.py:** chat_format=None, n_gpu_layers e n_ctx da .env
 - **Dockerfile:** Build llama-cpp-python da master GitHub per Gemma 4
+
+(End of file - total 97 lines)
