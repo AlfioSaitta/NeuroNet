@@ -700,6 +700,14 @@ async def openai_api_key_middleware(request: Request, call_next):
                 status_code=500,
                 content={"error": "Internal authentication error"},
             )
+    elif auth.startswith("Bearer "):
+        # Key provided but doesn't start with sk-jarvis- → always reject
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": "Invalid API key format. API keys start with 'sk-jarvis-'. Set 'Authorization: Bearer sk-jarvis-...'."
+            },
+        )
     elif not _is_local_request(request):
         return JSONResponse(
             status_code=401,
@@ -708,7 +716,7 @@ async def openai_api_key_middleware(request: Request, call_next):
             },
         )
     else:
-        # Local request without key — backward compat
+        # No auth header + localhost → backward compat pass through
         logger.info(
             "⚠️ OpenAI endpoint %s called without API key from localhost",
             request.url.path,
