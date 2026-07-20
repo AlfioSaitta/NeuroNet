@@ -173,15 +173,11 @@ async function loadApiKeys() {
             const revokeBtn = k.is_active
                 ? `<button class="btn btn-xs btn-outline" onclick="revokeApiKey('${k.id}')">Revoke</button>`
                 : '';
-            const copyBtn = k.is_active
-                ? `<button class="btn btn-xs" onclick="copyKeyPrefix('${k.key_prefix}')" title="Copy key prefix">📋</button>`
-                : '';
             return `<div class="api-key-row">
-                <code class="api-key-prefix" onclick="copyKeyPrefix('${k.key_prefix}')" title="Click to copy prefix">${k.key_prefix}...</code>
+                <code class="api-key-prefix">${k.key_prefix}...</code>
                 <span class="text-xs text-muted">${k.name || ''}</span>
                 <span class="text-xs ${k.is_active ? 'text-primary' : 'text-muted'}">${status}</span>
                 <span class="text-xs text-muted">Last: ${lastUsed}</span>
-                ${copyBtn}
                 ${revokeBtn}
             </div>`;
         }).join('');
@@ -231,12 +227,6 @@ async function regenerateApiKey() {
 }
 
 let _newApiKeyText = '';
-
-function copyKeyPrefix(prefix) {
-    navigator.clipboard.writeText(prefix).then(() => {
-        showToast('📋 Key prefix copied!');
-    }).catch(() => { /* fallback */ });
-}
 
 function copyNewApiKey() {
     const el = document.getElementById('api-key-value');
