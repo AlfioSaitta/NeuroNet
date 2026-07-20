@@ -213,6 +213,9 @@ function copyNewApiKey() {
     if (!el || !el.textContent) return;
     navigator.clipboard.writeText(el.textContent).then(() => {
         showToast('API key copied to clipboard!');
+        el.style.transition = 'background 0.2s';
+        el.style.background = 'rgba(var(--primary-rgb), 0.15)';
+        setTimeout(() => { el.style.background = ''; }, 400);
     }).catch(() => { /* fallback */ });
 }
 
