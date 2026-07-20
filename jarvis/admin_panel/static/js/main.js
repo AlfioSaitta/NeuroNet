@@ -173,14 +173,38 @@ async function loadApiKeys() {
             const revokeBtn = k.is_active
                 ? `<button class="btn btn-xs btn-outline" onclick="revokeApiKey('${k.id}')">Revoke</button>`
                 : '';
+            const copyBtn = k.is_active
+                ? `<button class="btn btn-xs" onclick="copyKeyPrefix('${k.key_prefix}')" title="Copy key prefix">📋</button>`
+                : '';
             return `<div class="api-key-row">
-                <code class="api-key-prefix">${k.key_prefix}...</code>
+                <code class="api-key-prefix" onclick="copyKeyPrefix('${k.key_prefix}')" title="Click to copy prefix">${k.key_prefix}...</code>
                 <span class="text-xs text-muted">${k.name || ''}</span>
                 <span class="text-xs ${k.is_active ? 'text-primary' : 'text-muted'}">${status}</span>
                 <span class="text-xs text-muted">Last: ${lastUsed}</span>
+                ${copyBtn}
                 ${revokeBtn}
             </div>`;
         }).join('');
+    } catch (e) { /* ignore */ }
+}
+
+async function generateNewKey() {
+    try {
+        const res = await fetch('/api/auth/api-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rotate: false, name: 'default' }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const display = document.getElementById('api-key-new-display');
+        const valueEl = document.getElementById('api-key-value');
+        if (display && valueEl) {
+            valueEl.textContent = data.key;
+            display.style.display = 'block';
+            display.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        loadApiKeys();
     } catch (e) { /* ignore */ }
 }
 
@@ -207,6 +231,12 @@ async function regenerateApiKey() {
 }
 
 let _newApiKeyText = '';
+
+function copyKeyPrefix(prefix) {
+    navigator.clipboard.writeText(prefix).then(() => {
+        showToast('📋 Key prefix copied!');
+    }).catch(() => { /* fallback */ });
+}
 
 function copyNewApiKey() {
     const el = document.getElementById('api-key-value');

@@ -692,7 +692,8 @@
                 <p class="text-muted text-sm">Use this key for OpenAI-compatible clients (Cursor, Claude Desktop, scripts).</p>
                 <div id="api-key-list" class="mt-12"></div>
                 <div class="flex items-center gap-10 mt-12">
-                  <button class="btn btn-xs" onclick="regenerateApiKey()">🔄 Regenerate & Replace</button>
+                  <button class="btn btn-xs" onclick="generateNewKey()">➕ Generate New Key</button>
+                  <button class="btn btn-outline btn-xs" onclick="regenerateApiKey()">🔄 Regenerate & Replace</button>
                   <span class="text-muted text-xs" id="api-key-last-used"></span>
                 </div>
                 <div id="api-key-new-display" class="mt-12 api-key-new" style="display:none;">
