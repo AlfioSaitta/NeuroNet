@@ -173,11 +173,15 @@ async function loadApiKeys() {
             const revokeBtn = k.is_active
                 ? `<button class="btn btn-xs btn-outline" onclick="revokeApiKey('${k.id}')">Revoke</button>`
                 : '';
+            const copyBtn = k.is_active
+                ? `<button class="btn btn-xs" onclick="copyFullApiKey('${k.id}')" title="Copy full key (available for 5 min after generation)">📋</button>`
+                : '';
             return `<div class="api-key-row">
                 <code class="api-key-prefix">${k.key_prefix}...</code>
                 <span class="text-xs text-muted">${k.name || ''}</span>
                 <span class="text-xs ${k.is_active ? 'text-primary' : 'text-muted'}">${status}</span>
                 <span class="text-xs text-muted">Last: ${lastUsed}</span>
+                ${copyBtn}
                 ${revokeBtn}
             </div>`;
         }).join('');
@@ -227,6 +231,22 @@ async function regenerateApiKey() {
 }
 
 let _newApiKeyText = '';
+
+async function copyFullApiKey(keyId) {
+    try {
+        const res = await fetch(`/api/auth/api-key/${keyId}/reveal`);
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            showToast(err.detail || 'Cannot recover this key (expired). Generate a new one.', 4000);
+            return;
+        }
+        const data = await res.json();
+        await navigator.clipboard.writeText(data.key);
+        showToast('📋 Full API key copied to clipboard!');
+    } catch (e) {
+        showToast('Failed to copy key. Try again.', 3000);
+    }
+}
 
 function copyNewApiKey() {
     const el = document.getElementById('api-key-value');

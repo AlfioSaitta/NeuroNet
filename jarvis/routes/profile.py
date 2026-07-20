@@ -92,6 +92,29 @@ async def revoke_api_key(key_id: str, user: dict = Depends(require_auth)):
     return {"ok": True}
 
 
+@router.get("/api-key/{key_id}/reveal")
+async def reveal_api_key(key_id: str, user: dict = Depends(require_auth)):
+    """Reveal a recently generated API key (within 5 minutes of creation).
+    
+    The full key is only stored temporarily in memory after generation.
+    Once expired, it cannot be recovered — generate a new key instead.
+    """
+    from user_manager import _get_recent_key
+
+    keys = await um.get_user_api_keys(user["id"])
+    if not any(k["id"] == key_id for k in keys):
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    full_key = _get_recent_key(key_id)
+    if not full_key:
+        raise HTTPException(
+            status_code=404,
+            detail="API key has expired and cannot be recovered. Generate a new key.",
+        )
+
+    return {"key": full_key, "key_id": key_id}
+
+
 @router.post("/telegram")
 async def set_telegram(body: TelegramLinkRequest, user: dict = Depends(require_auth)):
     """Link or unlink Telegram ID to own profile."""

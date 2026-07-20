@@ -19,6 +19,36 @@ from typing import Any
 # Forward reference for cache invalidation (telegram_bot is loaded lazily)
 _telegram_cache_invalidator = None
 
+# ── Recent keys cache (full key available for N minutes after generation) ──
+_RECENT_KEYS: dict[str, tuple[str, float]] = {}  # key_id → (full_key, timestamp)
+_RECENT_KEYS_TTL = 300  # 5 minutes
+
+
+def _cleanup_recent_keys():
+    """Remove expired entries from the recent keys cache."""
+    now = time.time()
+    expired = [k for k, (_, ts) in _RECENT_KEYS.items() if now - ts > _RECENT_KEYS_TTL]
+    for k in expired:
+        _RECENT_KEYS.pop(k, None)
+
+
+def _cache_recent_key(key_id: str, full_key: str) -> None:
+    """Store a freshly generated key in the temporary cache."""
+    _cleanup_recent_keys()
+    _RECENT_KEYS[key_id] = (full_key, time.time())
+
+
+def _get_recent_key(key_id: str) -> str | None:
+    """Retrieve a recently generated full key, or None if expired/missing."""
+    entry = _RECENT_KEYS.get(key_id)
+    if entry is None:
+        return None
+    full_key, ts = entry
+    if time.time() - ts > _RECENT_KEYS_TTL:
+        _RECENT_KEYS.pop(key_id, None)
+        return None
+    return full_key
+
 
 def _set_telegram_cache_invalidator(fn):
     """Set the function to invalidate telegram user cache.
@@ -378,6 +408,8 @@ class UserManager:
 
         key_row = await self._fetchone("SELECT * FROM api_keys WHERE id = ?", (key_id,))
         assert key_row is not None
+        # Cache the full key temporarily so the user can retrieve it
+        _cache_recent_key(key_id, full_key)
         # Never return hash
         safe_row = {k: v for k, v in key_row.items() if k != "key_hash"}
         return full_key, safe_row
