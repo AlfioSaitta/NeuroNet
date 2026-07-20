@@ -22,11 +22,60 @@ user_locks = {}
 SESSION_TTL = 600
 whisper_model = None
 
+# ── Telegram user cache ──────────────────────────────────
+_telegram_user_cache: dict[str, tuple[dict, float]] = {}
+_CACHE_TTL = 300  # 5 minutes
+
+
+async def _get_cached_user(telegram_id: str) -> dict | None:
+    """Cache-aware DB lookup for Telegram users. Returns user dict or None."""
+    cached = _telegram_user_cache.get(telegram_id)
+    if cached:
+        user, timestamp = cached
+        if time.time() - timestamp < _CACHE_TTL:
+            if user.get("is_active", True):
+                return user
+            else:
+                _telegram_user_cache.pop(telegram_id, None)
+                return None
+    try:
+        from user_manager import user_manager
+        if user_manager is None:
+            return None
+        db_user = await user_manager.get_user_by_telegram_id(telegram_id)
+        if db_user and db_user.get("is_active"):
+            _telegram_user_cache[telegram_id] = (db_user, time.time())
+            return db_user
+    except Exception:
+        pass
+    return None
+
+
+def _invalidate_telegram_cache(telegram_id: str) -> None:
+    """Remove a user from the telegram cache."""
+    _telegram_user_cache.pop(telegram_id, None)
+
+
+async def _get_user_role(telegram_id: str) -> str:
+    """Get user role from DB, fallback to ADMIN_USERS env."""
+    try:
+        db_user = await _get_cached_user(telegram_id)
+        if db_user:
+            return db_user["role"]
+    except Exception:
+        pass
+    return "admin" if str(telegram_id) in ADMIN_USERS else "user"
+
+
 if TELEGRAM_ENABLED:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
     from telegram.ext import ContextTypes
     from gtts import gTTS
     import uuid
+
+    # Wire up cache invalidator so UserManager can notify us
+    from user_manager import _set_telegram_cache_invalidator
+    _set_telegram_cache_invalidator(_invalidate_telegram_cache)
 
     callback_store = {}
     
@@ -36,8 +85,18 @@ if TELEGRAM_ENABLED:
             [KeyboardButton("🌐 Info Ricerca Web"), KeyboardButton("❓ Aiuto / Guida")],
             [KeyboardButton("🤖 Mio Userbot")]
         ]
-        if user_id is not None and str(user_id) in ADMIN_USERS:
-            buttons.append([KeyboardButton("⚙️ Admin"), KeyboardButton("🖥️ Infrastruttura")])
+        # Note: this is called synchronously, so we use a simple heuristic.
+        # The actual role-based menu is refreshed on each interaction.
+        if user_id is not None:
+            tg_id = str(user_id)
+            # Quick sync check: if cached, use role; else fallback to ADMIN_USERS
+            cached = _telegram_user_cache.get(tg_id)
+            if cached:
+                user, _ts = cached
+                if user.get("role") == "admin":
+                    buttons.append([KeyboardButton("⚙️ Admin"), KeyboardButton("🖥️ Infrastruttura")])
+            elif tg_id in ADMIN_USERS:
+                buttons.append([KeyboardButton("⚙️ Admin"), KeyboardButton("🖥️ Infrastruttura")])
         return ReplyKeyboardMarkup(
             buttons,
             resize_keyboard=True,
@@ -82,9 +141,29 @@ if TELEGRAM_ENABLED:
         return InlineKeyboardMarkup(keyboard)
 
     async def auth_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Middleware di sicurezza globale: blocca qualsiasi update da utenti non autorizzati."""
-        if update.effective_user and str(update.effective_user.id) not in ALLOWED_USERS:
-            logger.warning(f"Accesso negato da utente non autorizzato: {update.effective_user.id} ({update.effective_user.username})")
+        """Middleware di sicurezza globale: DB-backed auth with ALLOWED_USERS fallback.
+
+        1. Check DB user by telegram_id (with cache)
+        2. Fallback to ALLOWED_USERS env (backward compat)
+        3. Block if neither matches
+        """
+        if update.effective_user:
+            telegram_id = str(update.effective_user.id)
+
+            # 1. DB lookup (with cache)
+            db_user = await _get_cached_user(telegram_id)
+            if db_user and db_user.get("is_active"):
+                return  # Authorized via DB
+
+            # 2. Fallback to ALLOWED_USERS env (backward compat)
+            if telegram_id in ALLOWED_USERS:
+                return  # Authorized via legacy env
+
+            # 3. Block
+            logger.warning(
+                f"Accesso negato: {telegram_id} ({update.effective_user.username})"
+                " — non in DB né in ALLOWED_USERS"
+            )
             from telegram.ext import ApplicationHandlerStop
             raise ApplicationHandlerStop()
 
@@ -592,7 +671,10 @@ if TELEGRAM_ENABLED:
         """Handler per messaggi di testo e vocali: arricchimento omnisciente + risposta Ollama + Session Buffer."""
         msg = update.message or update.edited_message
         if not msg: return
-        user_id = str(update.effective_user.id)
+        telegram_id = str(update.effective_user.id)
+        # Resolve DB user if available, else keep telegram_id as user_id
+        db_user = await _get_cached_user(telegram_id)
+        user_id = db_user["id"] if db_user else telegram_id
         
         user_text = msg.text
         is_voice = False
@@ -602,19 +684,19 @@ if TELEGRAM_ENABLED:
             from rag import generate_telegram_ls_data
             data = generate_telegram_ls_data(None)
             if "error" in data:
-                await msg.reply_text(data["error"], parse_mode="Markdown", reply_markup=get_main_menu(user_id))
+                await msg.reply_text(data["error"], parse_mode="Markdown", reply_markup=get_main_menu(telegram_id))
                 return
             kb = build_ls_keyboard(data["folders"], data["files"], data["current_path"])
             await msg.reply_text(data["text"], reply_markup=kb, parse_mode="Markdown")
             return
             
         elif user_text == "🌐 Info Ricerca Web":
-            await msg.reply_text("💡 Per cercare sul web, basta che scrivi la tua richiesta in linguaggio naturale. Collateral Studios Agent capirà da solo se deve navigare online per risponderti!", reply_markup=get_main_menu(user_id))
+            await msg.reply_text("💡 Per cercare sul web, basta che scrivi la tua richiesta in linguaggio naturale. Collateral Studios Agent capirà da solo se deve navigare online per risponderti!", reply_markup=get_main_menu(telegram_id))
             return
             
         elif user_text == "⚙️ Admin":
-            if user_id not in ADMIN_USERS:
-                await msg.reply_text("❌ Accesso negato.", reply_markup=get_main_menu(user_id))
+            if telegram_id not in ADMIN_USERS:
+                await msg.reply_text("❌ Accesso negato.", reply_markup=get_main_menu(telegram_id))
                 return
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📊 Dashboard Telemetria", callback_data=get_callback_id('admin_dashboard', ''))],
@@ -641,19 +723,19 @@ if TELEGRAM_ENABLED:
             return
 
         elif user_text == "🖥️ Infrastruttura":
-            if user_id not in ADMIN_USERS:
-                await msg.reply_text("❌ Accesso negato.", reply_markup=get_main_menu(user_id))
+            if telegram_id not in ADMIN_USERS:
+                await msg.reply_text("❌ Accesso negato.", reply_markup=get_main_menu(telegram_id))
                 return
             from infrastructure import load_infra
             infra = load_infra()
             if not infra:
-                await msg.reply_text("🖥️ **Infrastruttura Vuota**\nNessun server registrato nel vault.", parse_mode="Markdown", reply_markup=get_main_menu(user_id))
+                await msg.reply_text("🖥️ **Infrastruttura Vuota**\nNessun server registrato nel vault.", parse_mode="Markdown", reply_markup=get_main_menu(telegram_id))
             else:
                 out = "🖥️ **Server Registrati (SSH):**\n\n"
                 for name, srv in infra.items():
                     out += f"🔹 **{name}** -> `{srv.get('user')}@{srv.get('ip')}`\n"
                 out += "\n💡 _Puoi chiedermi di lanciare comandi su questi server scrivendomi un messaggio!_"
-                await msg.reply_text(out, parse_mode="Markdown", reply_markup=get_main_menu(user_id))
+                await msg.reply_text(out, parse_mode="Markdown", reply_markup=get_main_menu(telegram_id))
             return
 
         elif user_text == "❓ Aiuto / Guida":
@@ -667,7 +749,7 @@ if TELEGRAM_ENABLED:
                 "📁 **RAG e Ricerca Locale:** Usa i pulsanti _Esplora_ e _Ricerca Web_ per farmi studiare intere codebase o link internet per te.\n\n"
                 "💡 _Più dettagli e contesto mi dai, migliori saranno le mie risposte!_"
             )
-            await msg.reply_text(help_msg, parse_mode="Markdown", reply_markup=get_main_menu(user_id))
+            await msg.reply_text(help_msg, parse_mode="Markdown", reply_markup=get_main_menu(telegram_id))
             return
 
         elif user_text == "🤖 Mio Userbot":
@@ -679,11 +761,11 @@ if TELEGRAM_ENABLED:
                     return
                     
             from telegram_userbot_manager import active_clients
-            if user_id in active_clients:
-                client = active_clients[user_id]
+            if telegram_id in active_clients:
+                client = active_clients[telegram_id]
                 if not await client.is_user_authorized():
                     await client.disconnect()
-                    del active_clients[user_id]
+                    del active_clients[telegram_id]
                 else:
                     kb = InlineKeyboardMarkup([
                         [InlineKeyboardButton("📋 Lista Whitelist", callback_data=get_callback_id('userbot_wl_list', ''))],
@@ -794,7 +876,7 @@ if TELEGRAM_ENABLED:
                     session.pop("agy_mode", None)
                     session.pop("agy_project", None)
                     session.pop("agy_content", None)
-                    await msg.reply_text("❌ Operazione annullata.", reply_markup=get_main_menu(user_id))
+                    await msg.reply_text("❌ Operazione annullata.", reply_markup=get_main_menu(telegram_id))
                     return
 
                 session["agy_content"] = user_text.strip()
@@ -959,7 +1041,11 @@ if TELEGRAM_ENABLED:
             from agent_tools import TOOLS_SCHEMA, execute_tool_call
             from memory import save_to_memory
             
-            enriched_messages = await build_omniscient_prompt(list(session["messages"]), user_id, conversation_id=str(update.effective_chat.id))
+            enriched_messages = await build_omniscient_prompt(
+                list(session["messages"]), user_id,
+                conversation_id=str(update.effective_chat.id),
+                user=db_user,
+            )
             current_messages = enriched_messages.copy()
             
             max_iterations = 5
