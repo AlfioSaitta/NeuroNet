@@ -50,7 +50,7 @@ from config import (
     WORKSPACE_DIR, WORKSPACE_PROJECTS,
     MCP_ENABLED, MCP_AUTO_INIT,
     SYNAPTIQ_ENABLED, SYNAPTIQ_STORAGE_PATH, SYNAPTIQ_EMBEDDING_TIER,
-    parse_external_projects,
+    DATA_DIR, parse_external_projects,
 )
 import state
 from rag import ingest_local_documents, rag_queue_worker, generate_project_tree, search_documents
@@ -291,6 +291,32 @@ async def lifespan(app: FastAPI):
         return_exceptions=True,
     )
 
+    # ── User Manager ──────────────────────────────────────────────────
+    # Inizializza DB utenti + API key e seed admin default se necessario
+    from user_manager import init_user_manager
+
+    db_path = os.path.join(DATA_DIR, "users.db")
+    logger.info("👤 Initializing User Manager at %s", db_path)
+    um = await init_user_manager(db_path)
+
+    # Auto-seed admin if no admin exists
+    try:
+        admins = await um.list_users(role="admin")
+        if not admins:
+            logger.warning("⚠️ No admin found — creating default admin...")
+            user, api_key = await um.create_user(
+                username="admin",
+                password="neuronet",
+                role="admin",
+                display_name="Default Admin",
+                allowed_projects=["*"],
+            )
+            logger.info("✅ Default admin created: username='admin', password='neuronet'")
+            logger.info("🔑 Initial API key: %s", api_key)
+            logger.warning("⚠️ CHANGE THE DEFAULT PASSWORD ON FIRST LOGIN!")
+    except Exception as exc:
+        logger.error("❌ Error seeding default admin: %s", exc)
+
     # ────────────────────────────────────────────────────────────────────
     # Passo 2: servizi che dipendono da Qdrant + fire-and-forget
     # ────────────────────────────────────────────────────────────────────
@@ -466,6 +492,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"SessionStore persist error during shutdown: {e}")
 
+    # Close User Manager
+    from user_manager import close_user_manager
+    await close_user_manager()
+
     await state.qdrant.close()
     await state.http_client.aclose()
 
@@ -536,8 +566,168 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+# ── Dashboard Auth Middleware ──────────────────────────────────────────
+# Protects /api/dashboard/* and /admin/* routes with JWT auth.
+# Public paths are excluded. Admin-only paths checked for admin role.
+
+from auth import get_current_user
+
+ADMIN_ONLY_PATHS = (
+    "/api/dashboard/settings", "/api/dashboard/models",
+    "/api/dashboard/tasks", "/api/dashboard/cron",
+    "/api/dashboard/analytics", "/api/dashboard/logs",
+    "/api/dashboard/system", "/api/dashboard/graph",
+)
+
+PUBLIC_PATHS = (
+    "/api/auth/login", "/api/auth/logout", "/api/auth/me",
+    "/admin/login", "/admin/static/",
+    "/api/chat",
+    "/api/project-tree", "/api/webhook/git",
+    "/api/version", "/api/tags", "/api/ps", "/api/show",
+    "/api/synaptiq/",
+)
+
+
+@app.middleware("http")
+async def dashboard_auth_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # Skip OPTIONS preflight
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # Check if path is covered by any public prefix
+    is_public = any(
+        path == p or path.startswith(p)
+        for p in PUBLIC_PATHS
+    )
+    if is_public:
+        return await call_next(request)
+
+    # Require auth for dashboard and admin paths
+    if path.startswith("/api/dashboard/") or path.startswith("/admin/") or path == "/":
+        user = await get_current_user(request)
+        if not user:
+            if path.startswith("/admin/"):
+                from starlette.responses import RedirectResponse
+                return RedirectResponse(url="/admin/login", status_code=303)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Authentication required"},
+            )
+
+        # Admin-only paths
+        if path.startswith(ADMIN_ONLY_PATHS) and user.get("role") != "admin":
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Admin access required"},
+            )
+
+        request.state.user = user
+
+    return await call_next(request)
+
+
+# ── API Key Auth Middleware ────────────────────────────────────────────
+# Protects /v1/* OpenAI-compatible endpoints with API key auth.
+# Backward compat: localhost requests without key are allowed.
+# Registered AFTER dashboard middleware → runs FIRST (LIFO).
+
+
+def _is_private_ip(ip: str) -> bool:
+    """True if IP is loopback or private network (incl Docker 172.x)."""
+    if ip in ("127.0.0.1", "::1", "localhost", "0.0.0.0"):
+        return True
+    if ip.startswith("10.") or ip.startswith("192.168."):
+        return True
+    if ip.startswith("172."):
+        try:
+            return 16 <= int(ip.split(".")[1]) <= 31
+        except (IndexError, ValueError):
+            return False
+    return False
+
+
+def _is_local_request(request: Request) -> bool:
+    """Determine if request comes from localhost/private network.
+    Checks X-Forwarded-For, X-Real-IP, then request.client.host."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return _is_private_ip(forwarded.split(",")[0].strip())
+    real_ip = request.headers.get("X-Real-IP", "")
+    if real_ip:
+        return _is_private_ip(real_ip.strip())
+    client_ip = request.client.host if request.client else ""
+    return _is_private_ip(client_ip)
+
+
+@app.middleware("http")
+async def openai_api_key_middleware(request: Request, call_next):
+    """Resolve API key for /v1/* endpoints.
+    - Valid key → resolve user, set request.state.user
+    - Localhost without key → backward compat (pass through)
+    - External without key → 401
+    - Invalid key → 401
+    """
+    # Skip OPTIONS preflight
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    if not request.url.path.startswith("/v1/"):
+        return await call_next(request)
+
+    auth = request.headers.get("Authorization", "")
+
+    if auth.startswith("Bearer sk-jarvis-"):
+        raw_key = auth[7:].strip()
+        from user_manager import user_manager
+
+        try:
+            result = await user_manager.resolve_api_key(raw_key)
+            if result:
+                key_row, user_row = result
+                request.state.user = user_row
+                request.state.api_key_id = key_row["id"]
+            else:
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Invalid API key. Use a valid sk-jarvis-... key."},
+                )
+        except Exception as exc:
+            logger.warning("API key resolve error: %s", exc)
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Internal authentication error"},
+            )
+    elif not _is_local_request(request):
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": "API key required. Set 'Authorization: Bearer sk-jarvis-...'."
+            },
+        )
+    else:
+        # Local request without key — backward compat
+        logger.info(
+            "⚠️ OpenAI endpoint %s called without API key from localhost",
+            request.url.path,
+        )
+
+    return await call_next(request)
+
+
 from dashboard import dashboard_router
 app.include_router(dashboard_router)
+
+from auth import router as auth_router
+app.include_router(auth_router)
+
+from routes.users import router as users_router
+app.include_router(users_router)
+
+from routes.profile import router as profile_router
+app.include_router(profile_router)
 
 from admin_panel import setup_admin_panel
 setup_admin_panel(app)
@@ -922,7 +1112,10 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                     is_internal = True
                     break
                 
-    current_user_id = body.get("user_id") or (options.get("user_id") if isinstance(options, dict) else None) or "alfio_dev"
+    # User from JWT (dashboard login) takes precedence over body.user_id
+    jwt_user = await get_current_user(request)
+    jwt_user_id = jwt_user["id"] if jwt_user else None
+    current_user_id = jwt_user_id or body.get("user_id") or (options.get("user_id") if isinstance(options, dict) else None) or "alfio_dev"
     conversation_id = body.get("conversation_id") or request.headers.get("X-Conversation-Id", "default")
     concise = isinstance(options, dict) and options.get("concise") is True
     provider = body.get("provider") or payload.provider
@@ -971,7 +1164,8 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         body["messages"] = await build_omniscient_prompt(
             raw_messages, user_id=current_user_id,
             conversation_id=str(conversation_id), concise=concise,
-            request_id=tracer.request_id
+            request_id=tracer.request_id,
+            user=jwt_user,
         )
         tracer.end_step("build_omniscient_prompt")
     
@@ -1234,7 +1428,9 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
     if state.memory and prompt and len(prompt) < 500:
         # Recuperiamo un eventuale user_id dalle options (se passato dal client)
         options = body.get("options", {})
-        current_user_id = options.get("user_id", "alfio_dev") if isinstance(options, dict) else "alfio_dev"
+        jwt_user = await get_current_user(request)
+        jwt_user_id = jwt_user["id"] if jwt_user else None
+        current_user_id = jwt_user_id or (options.get("user_id", "alfio_dev") if isinstance(options, dict) else "alfio_dev")
         
         try:
             loop = asyncio.get_running_loop()

@@ -291,6 +291,41 @@ MCP_AUTO_INIT = os.getenv("MCP_AUTO_INIT", "true").lower() in ("1", "true", "yes
 MCP_SKILL_EMBEDDED = os.getenv("MCP_SKILL_EMBEDDED", "true").lower() in ("1", "true", "yes")
 
 # ==============================================================================
+# JWT AUTH
+# ==============================================================================
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+if not JWT_SECRET:
+    import hashlib
+    import socket
+    JWT_SECRET = hashlib.sha256(
+        socket.gethostname().encode() + os.urandom(32)
+    ).hexdigest()
+    # Scrivi JWT_SECRET nel .env per persistenza (evita rigenerazione a ogni avvio)
+    _env_paths = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
+        os.path.join(os.getcwd(), ".env"),
+    ]
+    _written = False
+    for _p in _env_paths:
+        try:
+            # Se .env esiste già, append; altrimenti crea
+            with open(_p, "a") as _f:
+                _f.write(f"\n# Generato automaticamente da config.py\nJWT_SECRET={JWT_SECRET}\n")
+            logger.info("✅ JWT_SECRET generato e salvato in %s", _p)
+            _written = True
+            break
+        except OSError:
+            continue
+    if not _written:
+        logger.warning(
+            "⚠️ JWT_SECRET generato ma non è stato possibile scrivere il .env. "
+            "Aggiungi manualmente JWT_SECRET=%s nel tuo .env per sicurezza persistente.",
+            JWT_SECRET,
+        )
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))  # 24h default
+
+# ==============================================================================
 # IMPOSTAZIONI DI SISTEMA (Hardcoded Estratti)
 # ==============================================================================
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen3-embedding-0.6b")
