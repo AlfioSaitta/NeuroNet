@@ -41,6 +41,10 @@ from config import (
 )
 import state
 
+# Runtime cache per progetti registrati via API (colma gap fino al restart)
+# Popolato da routes/projects.py POST /register, usato da get_project_path()
+_registered_project_paths: dict[str, str] = {}
+
 # Estensioni valide per file sorgente/documentazione (usato ovunque)
 VALID_EXTENSIONS = (
     '.go', '.py', '.jsx', '.tsx', '.js', '.ts',
@@ -633,6 +637,57 @@ def get_project_col_name(project_name: str) -> str:
     sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', project_name)
     return f"collateral_docs_{sanitized}_{VECTOR_DB_VERSION}"
 
+
+def get_project_path(project_name: str) -> str | None:
+    """Cerca il path assoluto di un progetto per nome.
+    Cerca PRIMA nel runtime cache _registered_project_paths,
+    poi in WORKSPACE_PROJECTS, poi in EXTERNAL_PROJECTS.
+
+    NOTA: get_project_col_name() sanitizza il nome con re.sub(r'[^a-zA-Z0-9_]', '_', ...)
+    prima di creare la collezione Qdrant. list_rag_projects() estrae il nome SANITIZZATO,
+    quindi un progetto "My-Project" in Qdrant diventa "My_Project".
+    Il match diretto per basename fallisce. Gestiamo questo caso con un match sanitizzato
+    come fallback.
+    """
+    name_lower = project_name.lower()
+    # 1. Runtime cache (per progetti appena registrati via API)
+    if project_name in _registered_project_paths:
+        return _registered_project_paths[project_name]
+
+    def _basename_matches(path: str) -> bool:
+        base = os.path.basename(path)
+        # Match diretto (caso ideale: nessun carattere speciale)
+        if base.lower() == name_lower:
+            return True
+        # Match sanitizzato: stessa trasformazione di get_project_col_name()
+        sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', base)
+        return sanitized.lower() == name_lower
+
+    # 2. Cerca in WORKSPACE_PROJECTS
+    for proj_path in WORKSPACE_PROJECTS:
+        if _basename_matches(proj_path):
+            return proj_path
+    # 3. Cerca in EXTERNAL_PROJECTS
+    for ep_path in parse_external_projects():
+        if _basename_matches(ep_path):
+            return ep_path
+    # 4. Cerca per path completo (se name è un path)
+    if os.path.isdir(project_name):
+        return os.path.normpath(project_name)
+    return None
+
+
+def get_project_last_indexed(project_name: str) -> int | None:
+    """Ritorna il timestamp più recente tra i file indicizzati del progetto."""
+    prefix = project_name.replace(' ', '_').replace('-', '_') + "/"
+    max_mtime: float | None = None
+    for rel_path, data in state.rag_state.items():
+        if rel_path.startswith(prefix):
+            mtime = data.get("mtime") if isinstance(data, dict) else None
+            if mtime and (max_mtime is None or mtime > max_mtime):
+                max_mtime = mtime
+    return int(max_mtime) if max_mtime else None
+
 def _mean_vector(vectors: list[list[float]]) -> list[float] | None:
     """Media elemento-per-elemento di una lista di vettori."""
     if not vectors:
@@ -847,14 +902,14 @@ async def _walk_directory(base_dir: str, folder_prefix: str | None = None,
     return result
 
 
-async def ingest_local_documents():
+async def ingest_local_documents(single_project_path: str | None = None):
     """Scansione completa di WORKSPACE_DIR + EXTERNAL_PROJECTS: 
-    indicizza file nuovi/modificati, rimuove i cancellati."""
+    indicizza file nuovi/modificati, rimuove i cancellati.
+    
+    Se single_project_path è fornito, indicizza SOLO quel progetto
+    (usato per re-index singolo progetto dal pannello admin)."""
     if state.is_reindexing:
         logger.info("Re-indexing già in corso, salto scansione duplicata")
-        return
-    if not WORKSPACE_DIR and not EXTERNAL_PROJECTS.strip():
-        logger.warning("⚠️ Nessun WORKSPACE_DIR o EXTERNAL_PROJECTS configurato — salto ingestion.")
         return
     state.is_reindexing = True
     async with state.state_lock:
@@ -863,8 +918,31 @@ async def ingest_local_documents():
     current_files: dict[str, str] = {}
     visited_inodes: set = set()
 
-    # ── 1. Walk WORKSPACE_DIR (auto-discovered projects) ──
-    if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
+    # ── Single project mode (registrato via API) ──
+    if single_project_path:
+        if not os.path.isdir(single_project_path):
+            logger.warning(f"Single project path not found: {single_project_path}")
+            state.is_reindexing = False
+            return
+        proj_name = os.path.basename(single_project_path)
+        logger.info(f"📁 Single project re-index: {proj_name} ({single_project_path})")
+        proj_filter = GitignoreFilter(single_project_path)
+        files = await _walk_directory(
+            single_project_path, folder_prefix=proj_name,
+            ignore_filter=proj_filter, visited_inodes=visited_inodes
+        )
+        for rp, fp in files.items():
+            if rp not in current_files:
+                current_files[rp] = fp
+    else:
+        # Guard: skip full scan se nessun progetto configurato
+        if not WORKSPACE_DIR and not EXTERNAL_PROJECTS.strip():
+            logger.warning("⚠️ Nessun WORKSPACE_DIR o EXTERNAL_PROJECTS configurato — salto ingestion.")
+            state.is_reindexing = False
+            return
+
+    # ── 1. Walk WORKSPACE_DIR (auto-discovered projects) — SKIP in single-project mode ──
+    if not single_project_path and WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
         for proj_dir in WORKSPACE_PROJECTS:
             if not os.path.isdir(proj_dir):
                 continue
@@ -882,9 +960,9 @@ async def ingest_local_documents():
     else:
         logger.info("WORKSPACE_DIR non configurato — skip workspace auto-discovery.")
 
-    # ── 2. Walk EXTERNAL_PROJECTS (backward compat) ──
+    # ── 2. Walk EXTERNAL_PROJECTS (backward compat) — SKIP in single-project mode ──
     # Skip progetti che sono già dentro WORKSPACE_DIR (già indicizzati al punto 1)
-    if EXTERNAL_PROJECTS.strip():
+    if not single_project_path and EXTERNAL_PROJECTS.strip():
         for pair in EXTERNAL_PROJECTS.split(','):
             pair = pair.strip()
             if ':' not in pair:
@@ -912,8 +990,8 @@ async def ingest_local_documents():
                 if rp not in current_files:
                     current_files[rp] = fp
 
-    # ── 3. Walk DOC_DIR legacy (solo se ha contenuto) ──
-    if os.path.isdir(DOC_DIR):
+    # ── 3. Walk DOC_DIR legacy (solo se ha contenuto) — SKIP in single-project mode ──
+    if not single_project_path and os.path.isdir(DOC_DIR):
         doc_items = os.listdir(DOC_DIR)
         if doc_items:
             doc_filter = GitignoreFilter(DOC_DIR)
@@ -925,33 +1003,34 @@ async def ingest_local_documents():
                 if rp not in current_files:
                     current_files[rp] = fp
 
-    # ── 4. Pulizia file rimossi dal disco ──
-    async with state.state_lock:
-        state_keys = list(state.rag_state.keys())
+    # ── 4. Pulizia file rimossi dal disco (SALTA in single-project mode) ──
+    if not single_project_path:
+        async with state.state_lock:
+            state_keys = list(state.rag_state.keys())
 
-    for rp in state_keys:
-        if rp not in current_files:
-            col_name = get_workspace_col_name(rp)
-            try:
-                await state.qdrant.delete(
-                    collection_name=col_name,
-                    points_selector=Filter(must=[FieldCondition(key="filename", match=MatchValue(value=rp))])
-                )
-            except Exception as e: logger.warning(f"Errore silenziato: {e}")
-            try:
-                fp_col = get_file_profile_col_name()
-                fp_id = hashlib.md5(rp.encode()).hexdigest()
-                await state.qdrant.delete(
-                    collection_name=fp_col,
-                    points_selector=[fp_id]
-                )
-            except Exception:
-                pass
-            async with state.state_lock:
-                if rp in state.rag_state:
-                    del state.rag_state[rp]
-                    _save_file_state_unsafe(rp)
-            logger.info(f"🗑️ Pulizia: Rimosso {rp} dai vettori.")
+        for rp in state_keys:
+            if rp not in current_files:
+                col_name = get_workspace_col_name(rp)
+                try:
+                    await state.qdrant.delete(
+                        collection_name=col_name,
+                        points_selector=Filter(must=[FieldCondition(key="filename", match=MatchValue(value=rp))])
+                    )
+                except Exception as e: logger.warning(f"Errore silenziato: {e}")
+                try:
+                    fp_col = get_file_profile_col_name()
+                    fp_id = hashlib.md5(rp.encode()).hexdigest()
+                    await state.qdrant.delete(
+                        collection_name=fp_col,
+                        points_selector=[fp_id]
+                    )
+                except Exception:
+                    pass
+                async with state.state_lock:
+                    if rp in state.rag_state:
+                        del state.rag_state[rp]
+                        _save_file_state_unsafe(rp)
+                logger.info(f"🗑️ Pulizia: Rimosso {rp} dai vettori.")
 
     # ── 5. Processamento file nuovi/modificati ──
     files_to_process = []
@@ -1007,8 +1086,9 @@ async def ingest_local_documents():
     for proj_name, proj_files in files_by_project.items():
         await update_project_root_node(proj_name, proj_files)
     
-    # Aggiorna cache del tree in background (Fix 9.4)
-    await update_project_tree_cache()
+    # Aggiorna cache del tree (SOLO in full scan — single-project ha dati parziali)
+    if not single_project_path:
+        await update_project_tree_cache()
     
     state.is_reindexing = False
 
@@ -1802,6 +1882,9 @@ def _find_project_root(filepath: str) -> str | None:
         if norm.startswith(p_norm):
             return os.path.normpath(ep)
     return None
+
+# Public alias for _find_project_root
+find_project_root = _find_project_root
 
 
 async def rag_queue_worker():
