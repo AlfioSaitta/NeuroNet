@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from config import JWT_ALGORITHM, JWT_SECRET, ACCESS_TOKEN_EXPIRE_MINUTES
+from config import JWT_ALGORITHM, JWT_SECRET, ACCESS_TOKEN_EXPIRE_MINUTES, COOKIE_SECURE
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -82,6 +82,10 @@ async def get_current_user(request: Request) -> dict | None:
     if not payload:
         return None
 
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+
     from user_manager import user_manager, ensure_admin_exists  # defer import
 
     if user_manager is None:
@@ -91,7 +95,7 @@ async def get_current_user(request: Request) -> dict | None:
         from user_manager import user_manager  # re-import after init
         if user_manager is None:
             return None
-    user = await user_manager.get_user(payload["sub"])
+    user = await user_manager.get_user(user_id)
     return _sanitize_user(user) if user else None
 
 
@@ -146,7 +150,7 @@ async def login(body: LoginRequest):
         httponly=True,
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         samesite="lax",
-        secure=False,  # Set True in production behind HTTPS
+        secure=COOKIE_SECURE,
     )
     return response
 

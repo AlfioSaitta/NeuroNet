@@ -201,7 +201,7 @@ if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
     except OSError as e:
         logger.warning(f"⚠️ Error scanning WORKSPACE_DIR ({WORKSPACE_DIR}): {e}")
 
-VECTOR_DB_VERSION = os.getenv("VECTOR_DB_VERSION", "v1")
+VECTOR_DB_VERSION = os.getenv("VECTOR_DB_VERSION", "v3")
 EXTERNAL_PROJECTS = os.getenv("EXTERNAL_PROJECTS", "")
 STATE_FILE = os.getenv("STATE_FILE", os.path.join(DATA_DIR, f"rag_state_{VECTOR_DB_VERSION}.json"))
 
@@ -324,6 +324,7 @@ if not JWT_SECRET:
         )
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))  # 24h default
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
 
 # ==============================================================================
 # IMPOSTAZIONI DI SISTEMA (Hardcoded Estratti)

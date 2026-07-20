@@ -161,6 +161,7 @@ class UserManager:
                 self._conn = await aiosqlite.connect(self.db_path)
                 self._conn.row_factory = aiosqlite.Row
                 await self._conn.execute("PRAGMA foreign_keys = ON")
+                await self._conn.execute("PRAGMA journal_mode=WAL")
                 await self._conn.executescript(CREATE_TABLES_SQL)
                 await self._conn.commit()
                 logger.info("User DB ready")
@@ -344,20 +345,33 @@ class UserManager:
         """Delete user. Returns True if deleted.
 
         Raises ValueError if this is the last admin remaining.
+        Atomic: check-and-delete under single lock acquisition.
         """
-        user = await self.get_user(user_id)
-        if not user:
-            return False
-
-        if user["role"] == "admin":
-            admin_count = await self._fetchone(
-                "SELECT COUNT(*) as cnt FROM users WHERE role = 'admin' AND is_active = 1"
+        async with self._lock:
+            cur = await self._conn.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
             )
-            if admin_count and admin_count["cnt"] <= 1:
-                raise ValueError("Cannot delete the last admin")
+            row = await cur.fetchone()
+            user = dict(row) if row else None
+            if not user:
+                return False
 
-        await self._execute("DELETE FROM users WHERE id = ?", (user_id,))
-        return True
+            if user["role"] == "admin":
+                # Atomic count: exclude this user so deactivating then deleting
+                # doesn't bypass the guard
+                cur = await self._conn.execute(
+                    "SELECT COUNT(*) FROM users WHERE role = 'admin' AND id != ?",
+                    (user_id,),
+                )
+                row = await cur.fetchone()
+                if row and row[0] == 0:
+                    raise ValueError("Cannot delete the last admin")
+
+            cur = await self._conn.execute(
+                "DELETE FROM users WHERE id = ?", (user_id,)
+            )
+            await self._conn.commit()
+            return cur.rowcount > 0
 
     async def verify_password(self, username: str, password: str) -> dict | None:
         """Verify credentials. Returns user dict (sanitized) or None."""
