@@ -445,10 +445,11 @@ class UserManager:
         return (key_row, user_row)
 
     async def get_user_api_keys(self, user_id: str) -> list[dict]:
-        """List user's API keys. Never exposes key_hash or full key."""
+        """List user's active API keys. Never exposes key_hash or full key.
+        Revoked keys are filtered out."""
         rows = await self._fetchall(
             """SELECT id, key_prefix, name, is_active, last_used_at, created_at
-               FROM api_keys WHERE user_id = ? ORDER BY created_at DESC""",
+               FROM api_keys WHERE user_id = ? AND is_active = 1 ORDER BY created_at DESC""",
             (user_id,),
         )
         return rows
