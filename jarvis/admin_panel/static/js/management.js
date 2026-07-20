@@ -454,4 +454,161 @@ window.toggleAdvancedMode = function() {
     loadSettingsData();
 };
 
+// ═══════════════════════════════════════════════════
+// Users CRUD
+// ═══════════════════════════════════════════════════
+
+async function loadUsers() {
+    const tbody = document.getElementById('users-table-body');
+    const countEl = document.getElementById('users-count');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-row">Loading...</td></tr>';
+    try {
+        const res = await fetchWithTimeout('/api/users');
+        if (!res.ok) { tbody.innerHTML = '<tr><td colspan="7" class="empty-row">Access denied</td></tr>'; return; }
+        const users = await res.json();
+        if (!users.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="empty-row">No users yet</td></tr>';
+            if (countEl) countEl.textContent = '0 users';
+            return;
+        }
+        tbody.innerHTML = users.map(u => {
+            const projects = Array.isArray(u.allowed_projects) ? u.allowed_projects.join(', ') : (u.allowed_projects || '');
+            return `<tr>
+                <td><strong>${escapeHtml(u.username)}</strong></td>
+                <td><span class="user-role-badge role-${u.role === 'admin' ? 'admin' : 'user'}">${u.role}</span></td>
+                <td>${escapeHtml(u.display_name || '')}</td>
+                <td class="text-muted">${u.telegram_id || '—'}</td>
+                <td class="text-xs" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${projects || '—'}</td>
+                <td>${u.is_active ? '<span class="text-primary">Active</span>' : '<span class="text-muted">Inactive</span>'}</td>
+                <td class="actions">
+                    <button class="btn btn-xs" onclick="openUserModal('${u.id}')">Edit</button>
+                    <button class="btn btn-xs btn-outline" onclick="deleteUser('${u.id}')">Delete</button>
+                </td>
+            </tr>`;
+        }).join('');
+        if (countEl) countEl.textContent = users.length + ' user' + (users.length !== 1 ? 's' : '');
+    } catch (e) {
+        if (e.name === 'AbortError') return;
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-row" style="color:var(--danger);">Error loading users</td></tr>';
+    }
+}
+
+function openUserModal(userId) {
+    const modal = document.getElementById('user-modal');
+    const title = document.getElementById('user-modal-title');
+    const idField = document.getElementById('user-id');
+    const usernameField = document.getElementById('user-username');
+    const passwordField = document.getElementById('user-password');
+    const displayField = document.getElementById('user-display-name');
+    const roleField = document.getElementById('user-role');
+    const tgField = document.getElementById('user-telegram-id');
+    const projectsField = document.getElementById('user-allowed-projects');
+    const activeField = document.getElementById('user-is-active');
+
+    if (!userId) {
+        // New user
+        title.textContent = 'New User';
+        idField.value = '';
+        usernameField.value = '';
+        passwordField.value = '';
+        passwordField.required = true;
+        passwordField.placeholder = 'Required for new users';
+        displayField.value = '';
+        roleField.value = 'user';
+        tgField.value = '';
+        projectsField.value = '';
+        activeField.checked = true;
+    } else {
+        // Edit existing
+        title.textContent = 'Edit User';
+        passwordField.required = false;
+        passwordField.placeholder = 'Leave empty to keep current';
+        // Load user data
+        const user = window.currentUser;
+        // Better: fetch the specific user
+        fetch('/api/users/' + userId).then(r => r.json()).then(u => {
+            if (!u) return;
+            idField.value = u.id;
+            usernameField.value = u.username || '';
+            displayField.value = u.display_name || '';
+            roleField.value = u.role || 'user';
+            tgField.value = u.telegram_id || '';
+            const projects = Array.isArray(u.allowed_projects) ? u.allowed_projects.join(', ') : '';
+            projectsField.value = projects;
+            activeField.checked = u.is_active !== false;
+        }).catch(() => {});
+    }
+    modal.style.display = 'block';
+}
+
+function closeUserModal() {
+    document.getElementById('user-modal').style.display = 'none';
+}
+
+async function saveUser(e) {
+    e.preventDefault();
+    const id = document.getElementById('user-id').value;
+    const username = document.getElementById('user-username').value.trim();
+    const password = document.getElementById('user-password').value;
+    const displayName = document.getElementById('user-display-name').value.trim();
+    const role = document.getElementById('user-role').value;
+    const telegramId = document.getElementById('user-telegram-id').value.trim();
+    const projectsRaw = document.getElementById('user-allowed-projects').value.trim();
+    const isActive = document.getElementById('user-is-active').checked;
+
+    if (!username) { showToast('Username required'); return; }
+
+    let allowed_projects = [];
+    if (projectsRaw === '*') {
+        allowed_projects = ['*'];
+    } else if (projectsRaw) {
+        allowed_projects = projectsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    const body = { username, display_name: displayName, role, telegram_id: telegramId || null, allowed_projects, is_active: isActive };
+    if (password) body.password = password;
+
+    try {
+        const isNew = !id;
+        const res = await fetch(id ? '/api/users/' + id : '/api/users', {
+            method: id ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            closeUserModal();
+            loadUsers();
+            // If a new user was created, show the API key
+            if (isNew && data.api_key) {
+                showToast('✅ User created! API key: ' + data.api_key + ' (copy now)');
+            } else {
+                showToast(id ? '✅ User updated.' : '✅ User created.');
+            }
+        } else {
+            const data = await res.json().catch(() => ({}));
+            showToast('Error: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (e) {
+        showToast('Connection error');
+    }
+}
+
+async function deleteUser(userId) {
+    if (!confirm('Delete this user? This action cannot be undone.')) return;
+    try {
+        const res = await fetch('/api/users/' + userId, { method: 'DELETE' });
+        if (res.ok) {
+            showToast('✅ User deleted.');
+            loadUsers();
+        } else {
+            const data = await res.json().catch(() => ({}));
+            showToast('Error: ' + (data.detail || 'Cannot delete'));
+        }
+    } catch (e) {
+        showToast('Connection error');
+    }
+}
+
 

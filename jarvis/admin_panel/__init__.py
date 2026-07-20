@@ -6,15 +6,16 @@ Usato da main.py tramite setup_admin_panel(app).
 
 import os
 import logging
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from starlette.types import Scope, Receive, Send
 
 logger = logging.getLogger(__name__)
 
 ADMIN_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PATH = os.path.join(ADMIN_DIR, "templates", "index.html")
+LOGIN_TEMPLATE_PATH = os.path.join(ADMIN_DIR, "templates", "login.html")
 STATIC_DIR = os.path.join(ADMIN_DIR, "static")
 
 admin_router = APIRouter()
@@ -38,14 +39,38 @@ class _NoCacheStaticFiles(StaticFiles):
         await super().__call__(scope, receive, send_nocache)
 
 
+@admin_router.get("/admin/login")
+async def login_page():
+    """Serve la pagina di login standalone."""
+    if not os.path.exists(LOGIN_TEMPLATE_PATH):
+        return FileResponse(
+            TEMPLATE_PATH,
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
+    return FileResponse(
+        LOGIN_TEMPLATE_PATH,
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
 @admin_router.get("/")
-@admin_router.get("/dashboard")
-async def get_admin_panel():
-    """Serve il pannello di amministrazione (SPA)."""
+@admin_router.get("/admin/")
+async def get_admin_panel(request: Request):
+    """Serve il pannello di amministrazione (SPA) se autenticato.
+
+    L'auth check è gestito dal middleware dashboard_auth_middleware in main.py,
+    ma se per qualche motivo il middleware non intercetta, redirect a login.
+    """
     return FileResponse(
         TEMPLATE_PATH,
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
+
+
+@admin_router.get("/dashboard")
+async def admin_dashboard_redirect():
+    """Redirect obsoleto /dashboard → /admin/."""
+    return RedirectResponse(url="/admin/", status_code=301)
 
 
 def setup_admin_panel(app):
@@ -63,4 +88,4 @@ def setup_admin_panel(app):
 
     # Register the admin HTML router
     app.include_router(admin_router)
-    logger.info("🖥️  Admin panel router registered at / and /dashboard")
+    logger.info("🖥️  Admin panel router registered at / and /admin/")

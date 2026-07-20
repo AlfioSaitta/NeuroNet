@@ -44,6 +44,27 @@
         <span class="version">v9.7</span>
     </div>
     <span class="navbar-spacer"></span>
+    <div class="user-dropdown" id="user-info" style="display:none;">
+        <div class="user-dropdown-trigger" onclick="toggleUserDropdown(event)">
+            <span class="user-avatar" id="user-avatar">👤</span>
+            <span class="user-name" id="user-name"></span>
+            <span class="user-role-badge" id="user-role-badge"></span>
+            <span class="dropdown-arrow">▾</span>
+        </div>
+        <div class="user-dropdown-menu" id="user-dropdown-menu">
+            <div class="user-dropdown-header" id="dropdown-user-info">
+                <span class="dropdown-user-name" id="dropdown-user-name"></span>
+                <span class="dropdown-user-role" id="dropdown-user-role"></span>
+            </div>
+            <div class="user-dropdown-item" onclick="switchView('profile'); closeUserDropdown()">
+                <span class="dd-icon">👤</span> Profile
+            </div>
+            <div class="user-dropdown-divider"></div>
+            <div class="user-dropdown-item" onclick="logout()">
+                <span class="dd-icon">🚪</span> Logout
+            </div>
+        </div>
+    </div>
     <div class="navbar-status">
         <div class="status-chip" title="GPU Temperature">
             <span class="dot dot-primary navbar-dot" id="navbar-gpu-dot"></span>
@@ -79,20 +100,23 @@
             <span class="si-icon">🕸️</span><span class="si-label">Code Graph</span>
         </button>
 
-        <div class="sidebar-section-label">Management</div>
-        <button class="sidebar-item" data-view="models" onclick="switchView('models')">
+        <div class="sidebar-section-label admin-only" id="section-management">Management</div>
+        <button class="sidebar-item admin-only" data-view="users" onclick="switchView('users')">
+            <span class="si-icon">👥</span><span class="si-label">Users</span>
+        </button>
+        <button class="sidebar-item admin-only" data-view="models" onclick="switchView('models')">
             <span class="si-icon">🤖</span><span class="si-label">Models</span>
         </button>
-        <button class="sidebar-item" data-view="tasks" onclick="switchView('tasks')">
+        <button class="sidebar-item admin-only" data-view="tasks" onclick="switchView('tasks')">
             <span class="si-icon">☑️</span><span class="si-label">Tasks</span>
         </button>
-        <button class="sidebar-item" data-view="logs" onclick="switchView('logs')">
+        <button class="sidebar-item admin-only" data-view="logs" onclick="switchView('logs')">
             <span class="si-icon">📋</span><span class="si-label">Logs</span>
         </button>
-        <button class="sidebar-item" data-view="analytics" onclick="switchView('analytics')">
+        <button class="sidebar-item admin-only" data-view="analytics" onclick="switchView('analytics')">
             <span class="si-icon">📈</span><span class="si-label">Analytics</span>
         </button>
-        <button class="sidebar-item" data-view="settings" onclick="switchView('settings')">
+        <button class="sidebar-item admin-only" data-view="settings" onclick="switchView('settings')">
             <span class="si-icon">⚙️</span><span class="si-label">Settings</span>
         </button>
 
@@ -605,6 +629,99 @@
             </div>
             <div class="settings-save-bar-container" id="settings-save-bar-container"></div>
         </div>
+
+        <!-- ── VIEW: Users (admin only) ── -->
+        <div class="view" id="view-users">
+          <div class="card flex-col h-full">
+            <div class="card-header mb-8 flex-shrink-0">
+              <span class="dot dot-accent"></span> 👥 User Management
+              <span class="flex-1"></span>
+              <span id="users-count" class="text-muted text-sm"></span>
+              <button class="btn btn-xs" onclick="openUserModal()">+ New User</button>
+            </div>
+            <div class="table-wrap">
+              <table class="mgmt-table text-sm">
+                <thead>
+                  <tr><th>Username</th><th>Role</th><th>Display Name</th><th>Telegram ID</th><th>Projects</th><th>Active</th><th>Actions</th></tr>
+                </thead>
+                <tbody id="users-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── VIEW: Profile ── -->
+        <div class="view" id="view-profile">
+          <div class="card flex-col h-full">
+            <div class="card-header mb-8 flex-shrink-0">
+              <span class="dot dot-accent"></span> 👤 My Profile
+            </div>
+            <div class="profile-scroll">
+              <div class="profile-section">
+                <h3>Account</h3>
+                <div class="profile-info-grid">
+                  <div class="profile-info-item">
+                    <span class="profile-info-label">Username</span>
+                    <span class="profile-info-value" id="profile-username">—</span>
+                  </div>
+                  <div class="profile-info-item">
+                    <span class="profile-info-label">Role</span>
+                    <span id="profile-role" class="profile-info-value role-badge"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="profile-section">
+                <h3>Change Password</h3>
+                <form id="change-password-form" class="profile-form">
+                  <div class="form-group">
+                    <label for="old-password">Current Password</label>
+                    <input type="password" id="old-password" placeholder="Enter current password" required>
+                  </div>
+                  <div class="form-group">
+                    <label for="new-password">New Password</label>
+                    <input type="password" id="new-password" placeholder="Min 8 characters" required>
+                  </div>
+                  <div class="form-actions">
+                    <button type="submit" class="btn">Change Password</button>
+                    <span id="password-msg" class="form-msg"></span>
+                  </div>
+                </form>
+              </div>
+              <div class="profile-section">
+                <h3>API Key</h3>
+                <p class="text-muted text-sm">Use this key for OpenAI-compatible clients (Cursor, Claude Desktop, scripts).</p>
+                <div id="api-key-list" class="mt-12"></div>
+                <div class="flex items-center gap-10 mt-12">
+                  <button class="btn btn-xs" onclick="regenerateApiKey()">🔄 Regenerate & Replace</button>
+                  <span class="text-muted text-xs" id="api-key-last-used"></span>
+                </div>
+                <div id="api-key-new-display" class="mt-12 api-key-new" style="display:none;">
+                  <div class="card p-12 warning-border">
+                    <p class="text-sm fw-600 mb-8">⚠️ Save this key now — it won't be shown again!</p>
+                    <code id="api-key-value" class="api-key-masked"></code>
+                    <button class="btn btn-xs mt-8" onclick="copyNewApiKey()">📋 Copy to Clipboard</button>
+                  </div>
+                </div>
+              </div>
+              <div class="profile-section">
+                <h3>Telegram</h3>
+                <p class="text-muted text-sm">Link your Telegram account to use Jarvis from the bot.</p>
+                <form id="telegram-form" class="profile-form">
+                  <div class="form-group">
+                    <label for="telegram-id">Telegram ID</label>
+                    <div class="form-inline-row">
+                      <input type="text" id="telegram-id" placeholder="Numeric Telegram ID" class="form-inline-input">
+                      <button type="submit" class="btn btn-xs" id="telegram-save-btn">Save</button>
+                      <button type="button" class="btn btn-xs" id="telegram-remove-btn" style="display:none;">Remove</button>
+                    </div>
+                  </div>
+                  <span id="telegram-msg" class="form-msg"></span>
+                </form>
+                <p class="text-muted text-xs mt-8">🤖 Find your ID by sending /id to @userinfobot on Telegram</p>
+              </div>
+            </div>
+          </div>
+        </div>
     </div>
 </div>
 
@@ -683,6 +800,57 @@
         </div>
     </div>
 </div>
+<!-- ── User Modal ── -->
+<div class="modal" id="user-modal" style="display:none;">
+  <div class="modal-content" style="max-width:520px;">
+    <div class="modal-header">
+      <span id="user-modal-title">New User</span>
+      <span class="close-modal" onclick="closeUserModal()">&times;</span>
+    </div>
+    <div class="modal-body">
+      <form id="user-form" autocomplete="off">
+        <input type="hidden" id="user-id">
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="user-username" required>
+        </div>
+        <div class="form-group">
+          <label>Password (min 8 chars)</label>
+          <input type="password" id="user-password">
+        </div>
+        <div class="form-group">
+          <label>Display Name</label>
+          <input type="text" id="user-display-name">
+        </div>
+        <div class="form-group">
+          <label>Role</label>
+          <select id="user-role">
+            <option value="user">User</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Telegram ID (optional)</label>
+          <input type="text" id="user-telegram-id" placeholder="Numeric Telegram ID">
+        </div>
+        <div class="form-group">
+          <label>Allowed Projects (comma-separated, or "*" for all)</label>
+          <input type="text" id="user-allowed-projects" placeholder='e.g. NeuroNet, SlotBuilder or * for all'>
+        </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="user-is-active" checked> Active
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" onclick="closeUserModal()">Cancel</button>
+          <button type="submit" class="btn" id="user-save-btn">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 
 <!-- ── Toast ── -->
 <div id="toast" class="hidden"></div>
@@ -699,6 +867,7 @@
 <script>
     // ── Init ──
     document.addEventListener('DOMContentLoaded', () => {
+        checkAuth();
         initCharts();
         fetchStats();
         fetchTelemetry();
@@ -710,6 +879,19 @@
         if (chatInput) {
             chatInput.addEventListener('keydown', handleInputKeydown);
         }
+
+        // Change password form
+        const pwForm = document.getElementById('change-password-form');
+        if (pwForm) pwForm.addEventListener('submit', changePassword);
+
+        // Telegram form
+        const tgForm = document.getElementById('telegram-form');
+        if (tgForm) tgForm.addEventListener('submit', saveTelegram);
+        document.getElementById('telegram-remove-btn')?.addEventListener('click', removeTelegram);
+
+        // User form
+        const uForm = document.getElementById('user-form');
+        if (uForm) uForm.addEventListener('submit', saveUser);
     });
 </script>
 
