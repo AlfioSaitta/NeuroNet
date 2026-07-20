@@ -2,6 +2,197 @@
 // NeuroNet Admin Panel — Management views (Code Graph, Models, Tasks, Cron, Settings, Analytics)
 // ═══════════════════════════════════════════════════
 
+// ── Projects ──
+
+async function loadProjects() {
+    const container = document.getElementById('projects-container');
+    const countEl = document.getElementById('projects-count');
+    if (!container) return;
+    container.innerHTML = '<p class="text-muted" style="text-align:center;padding:2rem;">Loading...</p>';
+    try {
+        const res = await fetchWithTimeout('/api/projects');
+        const data = await res.json();
+        if (!data.projects || data.projects.length === 0) {
+            container.innerHTML = '<p class="text-muted" style="text-align:center;padding:2rem;">No projects</p>';
+            if (countEl) countEl.textContent = '';
+            return;
+        }
+        container.innerHTML = data.projects.map(p => {
+            const pathShort = p.path ? p.path.replace(/^.*?([^/]{2,}[^/]{0,20})$/, '...$1') : '—';
+            const lastIdx = p.last_indexed ? new Date(p.last_indexed * 1000).toLocaleString() : 'never';
+            const badgeClass = 'badge-' + (p.source || 'orphan');
+            return `<div class="card project-card" style="margin:0;">
+                <div class="project-card-header">
+                    <span class="mono fw-600">${escapeHtml(p.name)}</span>
+                    <span class="${badgeClass}">${escapeHtml(p.source || 'orphan')}</span>
+                    <span class="flex-1"></span>
+                    <span class="status-dot status-${p.status || 'red'}" title="Status: ${p.status}"></span>
+                </div>
+                <div class="project-card-body">
+                    <div class="project-stat">
+                        <span class="stat-label">Points</span>
+                        <span class="stat-value">${p.points ?? '?'}</span>
+                    </div>
+                    <div class="project-stat">
+                        <span class="stat-label">Dimension</span>
+                        <span class="stat-value">${p.dimension ?? '?'}</span>
+                    </div>
+                    <div class="project-stat" style="grid-column:span 2;">
+                        <span class="stat-label">Path</span>
+                        <span class="stat-value mono text-muted text-xs" title="${escapeHtml(p.path || '')}">${escapeHtml(pathShort)}</span>
+                    </div>
+                    <div class="project-stat" style="grid-column:span 2;">
+                        <span class="stat-label">Collection</span>
+                        <span class="stat-value mono text-muted text-xs">${escapeHtml(p.collection_name)}</span>
+                    </div>
+                    <div class="project-stat">
+                        <span class="stat-label">Last Indexed</span>
+                        <span class="stat-value text-muted text-xs">${lastIdx}</span>
+                    </div>
+                    <div class="project-stat">
+                        <span class="stat-label">Status</span>
+                        <span class="stat-value text-xs">${p.status || 'unknown'}</span>
+                    </div>
+                </div>
+                <div class="project-card-actions">
+                    <button class="btn btn-xs" onclick="reindexProject('${escapeHtml(p.name)}')">⟳ Re-index</button>
+                    <button class="btn btn-xs btn-outline" onclick="deleteProjectCollection('${escapeHtml(p.name)}')">🗑️ Delete Collection</button>
+                </div>
+            </div>`;
+        }).join('');
+        if (countEl) countEl.textContent = data.projects.length + ' project' + (data.projects.length !== 1 ? 's' : '');
+    } catch(e) {
+        if (e.name === 'AbortError') return;
+        container.innerHTML = '<p class="text-muted" style="text-align:center;padding:2rem;color:var(--danger);">Error loading projects</p>';
+    }
+}
+
+async function reindexProject(name) {
+    try {
+        const res = await fetchWithTimeout('/api/projects/reindex', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name}),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            showToast(err.detail || 'Re-index failed', 'error');
+            return;
+        }
+        const data = await res.json();
+        showToast(data.message || 'Re-index started', 'success');
+        setTimeout(loadProjects, 2000);
+    } catch(e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function deleteProjectCollection(name) {
+    if (!confirm('Delete collection for "' + name + '"? This cannot be undone.')) return;
+    try {
+        const res = await fetchWithTimeout('/api/projects/' + encodeURIComponent(name) + '/collection', { method: 'DELETE' });
+        if (res.ok) {
+            showToast('Collection for ' + name + ' deleted', 'success');
+            loadProjects();
+        } else {
+            const err = await res.json().catch(() => ({}));
+            showToast('Error: ' + (err.detail || 'Cannot delete'), 'error');
+        }
+    } catch(e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+function openRegisterProjectModal() {
+    document.getElementById('register-project-modal').style.display = 'flex';
+    document.getElementById('register-project-path').value = '';
+    document.getElementById('register-project-name').value = '';
+    document.getElementById('register-project-msg').textContent = '';
+    loadAvailableProjects();
+}
+
+function closeRegisterProjectModal() {
+    document.getElementById('register-project-modal').style.display = 'none';
+}
+
+async function registerProject(event) {
+    event.preventDefault();
+    const path = document.getElementById('register-project-path').value.trim();
+    const name = document.getElementById('register-project-name').value.trim();
+    const msgEl = document.getElementById('register-project-msg');
+    if (!path || !name) { msgEl.textContent = 'Both fields required'; return; }
+    msgEl.textContent = 'Registering...';
+    try {
+        const res = await fetchWithTimeout('/api/projects/register', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({path, name}),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            msgEl.textContent = '';
+            showToast(data.message || 'Project registered', 'success');
+            closeRegisterProjectModal();
+            loadProjects();
+        } else {
+            msgEl.textContent = data.detail || 'Registration failed';
+        }
+    } catch(e) {
+        msgEl.textContent = 'Connection error';
+    }
+}
+
+async function loadAvailableProjects() {
+    const listEl = document.getElementById('available-projects-list');
+    if (!listEl) return;
+    listEl.innerHTML = '<p class="text-muted">Loading...</p>';
+    try {
+        const res = await fetchWithTimeout('/api/projects/available');
+        const data = await res.json();
+        if (!data.candidates || data.candidates.length === 0) {
+            listEl.innerHTML = '<p class="text-muted">No unindexed projects found in workspace.</p>';
+            return;
+        }
+        listEl.innerHTML = data.candidates.map(c =>
+            `<div class="clickable-candidate" onclick="document.getElementById('register-project-path').value='${escapeHtml(c.path)}';document.getElementById('register-project-name').value='${escapeHtml(c.name)}';" style="cursor:pointer;padding:4px 8px;border-radius:4px;display:flex;gap:8px;align-items:center;">
+                <span class="badge badge-${c.source}">${escapeHtml(c.source)}</span>
+                <span class="mono text-sm">${escapeHtml(c.name)}</span>
+                <span class="text-muted text-xs">${escapeHtml(c.path)}</span>
+            </div>`
+        ).join('');
+    } catch(e) {
+        listEl.innerHTML = '<p class="text-muted" style="color:var(--danger);">Error loading candidates</p>';
+    }
+}
+
+async function populateProjectSelect(selectedProjects) {
+    const select = document.getElementById('user-allowed-projects');
+    if (!select || select.tagName !== 'SELECT') return;
+    try {
+        const res = await fetch('/api/projects');
+        const data = await res.json();
+        select.innerHTML = '<option value="*">* (All projects)</option>';
+        if (data.projects) {
+            data.projects.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.name;
+                opt.textContent = p.name;
+                if (selectedProjects && selectedProjects.includes(p.name)) {
+                    opt.selected = true;
+                }
+                select.appendChild(opt);
+            });
+        }
+        if (selectedProjects && selectedProjects.length === 1 && selectedProjects[0] === '*') {
+            select.value = ['*'];
+        }
+    } catch(e) {
+        // Fallback a input text se API non risponde
+        const val = (selectedProjects || []).join(', ');
+        select.outerHTML = '<input type="text" id="user-allowed-projects" placeholder="e.g. NeuroNet, SlotBuilder or * for all" value="' + escapeHtml(val) + '">';
+    }
+}
+
 // ── Code Graph ──
 
 async function loadGraphCollections() {
@@ -503,7 +694,6 @@ function openUserModal(userId) {
     const displayField = document.getElementById('user-display-name');
     const roleField = document.getElementById('user-role');
     const tgField = document.getElementById('user-telegram-id');
-    const projectsField = document.getElementById('user-allowed-projects');
     const activeField = document.getElementById('user-is-active');
 
     if (!userId) {
@@ -517,16 +707,14 @@ function openUserModal(userId) {
         displayField.value = '';
         roleField.value = 'user';
         tgField.value = '';
-        projectsField.value = '';
         activeField.checked = true;
+        populateProjectSelect([]);
     } else {
         // Edit existing
         title.textContent = 'Edit User';
         passwordField.required = false;
         passwordField.placeholder = 'Leave empty to keep current';
         // Load user data
-        const user = window.currentUser;
-        // Better: fetch the specific user
         fetch('/api/users/' + userId).then(r => r.json()).then(u => {
             if (!u) return;
             idField.value = u.id;
@@ -534,9 +722,9 @@ function openUserModal(userId) {
             displayField.value = u.display_name || '';
             roleField.value = u.role || 'user';
             tgField.value = u.telegram_id || '';
-            const projects = Array.isArray(u.allowed_projects) ? u.allowed_projects.join(', ') : '';
-            projectsField.value = projects;
             activeField.checked = u.is_active !== false;
+            const projects = Array.isArray(u.allowed_projects) ? u.allowed_projects : [];
+            populateProjectSelect(projects);
         }).catch(() => {});
     }
     modal.style.display = 'block';
@@ -554,16 +742,27 @@ async function saveUser(e) {
     const displayName = document.getElementById('user-display-name').value.trim();
     const role = document.getElementById('user-role').value;
     const telegramId = document.getElementById('user-telegram-id').value.trim();
-    const projectsRaw = document.getElementById('user-allowed-projects').value.trim();
+    const projectsEl = document.getElementById('user-allowed-projects');
     const isActive = document.getElementById('user-is-active').checked;
 
     if (!username) { showToast('Username required'); return; }
 
     let allowed_projects = [];
-    if (projectsRaw === '*') {
-        allowed_projects = ['*'];
-    } else if (projectsRaw) {
-        allowed_projects = projectsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    if (projectsEl && projectsEl.tagName === 'SELECT') {
+        const selected = Array.from(projectsEl.selectedOptions).map(o => o.value);
+        if (selected.includes('*')) {
+            allowed_projects = ['*'];
+        } else {
+            allowed_projects = selected;
+        }
+    } else if (projectsEl) {
+        // Fallback a input text
+        const projectsRaw = projectsEl.value.trim();
+        if (projectsRaw === '*') {
+            allowed_projects = ['*'];
+        } else if (projectsRaw) {
+            allowed_projects = projectsRaw.split(',').map(s => s.trim()).filter(Boolean);
+        }
     }
 
     const body = { username, display_name: displayName, role, telegram_id: telegramId || null, allowed_projects, is_active: isActive };

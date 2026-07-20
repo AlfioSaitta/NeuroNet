@@ -44,6 +44,11 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
         const res = await fetch(url, { ...options, signal: controller.signal });
+        // Redirect to login on session expiry (401), unless already on login page
+        if (res.status === 401 && !window.location.pathname.includes('/login')) {
+            window.location.href = '/admin/login';
+            throw new Error('Session expired');
+        }
         return res;
     } finally {
         clearTimeout(timeout);
