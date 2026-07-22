@@ -88,7 +88,7 @@ WATCHDOG_WATCH_MODE=per_project
 | Reranker duale | `rag_reranker.py` | Qwen3-Reranker + FlashRank fallback |
 | Watchdog real-time | `rag.py` | PollingObserver, re-embedding automatico |
 | Cache semantica | `rag_cache.py` | Soglia cosine 0.88 |
-| Synaptiq Engine | `synaptiq_engine.py` | Grafo strutturale, hybrid search, dead code, impact |
+| Synaptiq Engine | `synaptiq_engine.py` | Grafo strutturale, hybrid search, dead code, impact, **graph visualization con Sigma.js** |
 
 </details>
 
@@ -175,6 +175,7 @@ Accessibile su `/admin/` (primario; `/dashboard` redirect 301). Login su `/admin
 |---|---|
 | **Monitor** | GPU, modelli, health services (Qdrant/SearXNG/Crawl4AI), statistiche inferenza, metriche sistema, errori |
 | **Code Graph** | Visualizzazione Sigma.js delle collezioni Qdrant. Re-index e delete collection |
+| **Management → Projects** | Progetti RAG registrati, pulsante 🧬 **Graph** per grafo Synaptiq per-progetto (nodi/relazioni simboli), Re-index con analisi automatica Synaptiq, Delete Collection |
 | **Chat** | Streaming SSE in-browser, drag-drop file, shortcut `/` |
 | **Management → Settings** | **73 env var** categorizzate in 12 gruppi. Tipi: text, number, float, boolean, select, secret. Simple/Advanced Mode. Badge ⚡ restart. Persistenza su `.env` |
 | **Management → Models** | Lista GGUF, switch runtime |
@@ -199,7 +200,7 @@ jarvis/admin_panel/
         ├── graph.js      # Sigma.js FA2 layout
         ├── chat.js       # Streaming SSE, drag-drop
         ├── telemetry.js  # Polling telemetry, Page Visibility API
-        ├── management.js # Settings, Code Graph, Models, Tasks, Cron, Analytics
+        ├── management.js # Settings, Code Graph, Synaptiq Graph, Projects, Users, Models, Tasks, Cron, Analytics
         ├── logs.js       # Docker logs viewer
         └── utils.js      # fetchWithTimeout, showToast, escapeHtml
 ```
@@ -226,11 +227,12 @@ Jarvis usa **solo `llama-cpp-python`** con file GGUF. Nessun Ollama.
 
 | Categoria | Quantità |
 |---|---|
-| Jarvis nativi (`/api/*`) | 8 |
+| Jarvis nativi (`/api/*`) | 9 |
 | OpenAI-compatibili (`/v1/*`) | 25 |
 | Pipeline Telemetry | 8 |
 | MCP v2 (Streamable HTTP) | 8 tool + 7 resources |
 
+🆕 `GET /api/projects/{name}/synaptiq/graph` — grafo Synaptiq per progetto con Sigma.js
 📖 Endpoint completi: [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md)
 
 ---

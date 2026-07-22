@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-07-20 (User Management & ACL — JWT auth, admin panel, API keys)
+> **Data ultimo aggiornamento:** 2026-07-21 (Synaptiq Graph Visualization — FA2 freeze fix, per-project graph, WORKSPACE_DIR prefix)
 
 ---
 
@@ -179,7 +179,7 @@ Master jarvis:8000
 | `mcp_server.py` | Server MCP stdio per diagnostica AI esterna. 9 tool + 7 resources. | `urllib` (HTTP proxy a Jarvis) |
 | `mcp_server_v2.py` | **Nuovo Server MCP v2 (Streamable HTTP).** Endpoint POST `/api/mcp/v2`. 8 tool + 7 resources. | `fastapi`, `telemetry` |
 | `_mcp_handlers.py` | **(Deprecato)** Handler MCP condivisi. Sostituito dalla logica in `mcp_server_v2.py`. | `state`, `telemetry` |
-| `synaptiq_engine.py` | **Synaptiq Engine.** Wrapper asincrono thread-safe per Synaptiq v2.0.5 (LadybugBackend + run_pipeline). Analisi strutturale del codice, hybrid search, symbol context, traversal, dead code, community detection. Watchdog integration: `notify_file_event()` con debounce per-project 30s. | `synaptiq.core.*`, `asyncio` |
+| `synaptiq_engine.py` | **Synaptiq Engine.** Wrapper asincrono thread-safe per Synaptiq v2.0.5 (LadybugBackend + run_pipeline). Analisi strutturale del codice, hybrid search, symbol context, traversal, dead code, community detection. Watchdog integration: `notify_file_event()` con debounce per-project 30s. **Graph visualization**: `get_graph_data()` con KnowledgeGraph API, `_last_project_path` tracking, Counter-based project name inference. | `synaptiq.core.*`, `asyncio` |
 | `synaptiq_bridge.py` | Bridge che fonde RAG (Qdrant) + Synaptiq (grafo) per hybrid code search. Replaces `code_intelligence.py`. | `synaptiq_engine`, `rag` (lazy) |
 | `code_intelligence.py` | **Legacy re-export.** `from synaptiq_bridge import hybrid_code_search` per retrocompatibilità. | `synaptiq_bridge` |
 | `session_store.py` | Chat session store persistente su SQLite. `ChatSessionStore` con `save_session()`/`load_session()`/`list_sessions()`/`delete_session()`. Usato da dashboard e main.py. | `sqlite3`, `state` |
@@ -193,9 +193,10 @@ Master jarvis:8000
 Pacchetto route FastAPI per user management e self-service:
 
 | File | Responsabilità |
-|---|---|
+|---|---|---|
 | `profile.py` | **Profile self-service API** (prefix `/api/auth`, richiede `require_auth`). Endpoint: `GET/POST /api-key` (list/generate with rotate), `GET /api-auth/api-key/{key_id}/reveal` (revela chiave cache), `POST /api-key/{id}/revoke`, `POST /change-password`, `POST /telegram` (link/unlink Telegram ID). Caching: `_RECENT_KEYS` dict in-memory con TTL 5 min per chiavi appena generate |
 | `users.py` | **Admin user management API** (prefix `/api/users`, richiede `require_admin`). Endpoint: `GET /` (list users), `POST /` (create user), `PUT /{id}` (update), `DELETE /{id}`, `PUT /{id}/activate`, `PUT /{id}/deactivate` |
+| `projects.py` | **Project management API** (prefix `/api/projects`, richiede `require_admin`). Endpoint: `GET /` (list projects con stato), `POST /{name}/reindex` (trigger RAG ingest + Synaptiq analysis), `DELETE /{name}/collection`, `POST /register` (registra nuovo progetto), `GET /{name}/synaptiq/graph` (nodi/relazioni grafo Synaptiq per Sigma.js con project_match check) |
 
 ### Sotto-pacchetto `jarvis/admin_panel/`
 
@@ -209,10 +210,10 @@ Pacchetto dashboard web modulare estratto da `dashboard_template.py`. Template H
 | `static/css/style.css` | Foglio di stile unico (~500 righe). Tema chiaro/scuro con CSS custom properties: 60+ variabili `--*-rgb` per rgba() (primary, secondary, danger, warning, accent, text-main, text-muted, card-bg, input-bg, surface-subtle, border-subtle, bg-elevated). 30+ classi utility: `.mono`, `.text-muted`, `.flex`, `.gap-*`, `.grid-*`, `.mb-*`, `.mt-*`, `.p-*`, `.fw-*`, `.card-compact`, `.card-header-sm` |
 | `static/js/main.js` | Inizializzazione dashboard: cambio view, polling `/api/dashboard/*`, refresh metrics, modali, notifiche toast. **Auth**: `checkAuth()`, `login()`, `logout()`, `loadProfile()`, `loadApiKeys()`, `regenerateApiKey()`. **Users view**: `loadUsers()`, `createUser()`, `updateUser()`, `deleteUser()`, `toggleUser()` |
 | `static/js/charts.js` | Chart.js grafici: GPU usage (line 60s), inference counters, RAG chunks history. Responsive resize |
-| `static/js/graph.js` | Sigma.js graph viewer (689 righe). `renderSigmaGraph()` funzione condivisa tra `openGraphModal()` e `openMemoryGraphModal()`. FA2, 7 event handler, stats panel, resize observer |
+| `static/js/graph.js` | Sigma.js graph viewer (~690 righe). `renderSigmaGraph()` funzione condivisa tra `openGraphModal()`, `openMemoryGraphModal()` e `openSynaptiqGraph()`. FA2 exclusively via Web Worker (NO sync assign — freeze fix per grandi grafi), loading indicator, auto-pause 30-60s, 7 event handler, stats panel, resize observer |
 | `static/js/chat.js` | Chat view: streaming SSE, paste event, drag-drop file, keydown '/' shortcut. Event listener consolidati in DOMContentLoaded (390 righe) |
 | `static/js/telemetry.js` | Polling telemetry (351 righe): 10 funzioni dominio-specifiche (`updateGPU()`, `updateModels()`, `updateHealth()`...), Page Visibility API per stop/resume polling su tab hidden |
-| `static/js/management.js` | Admin management views: Code Graph (collections, reindex, delete), Models (list, switch), Tasks (CRUD), Cron (list), Analytics (inference, telemetry, gatekeeper), **Settings (loadSettingsData, saveSettings, toggleAdvancedMode)** con 73 env var categorizzate, Simple/Advanced Mode toggle, persistenza locale |
+| `static/js/management.js` | Admin management views: Code Graph (collections, reindex, delete), **Synaptiq Graph** (openSynaptiqGraph con Sigma.js per progetto), **Projects** (list, register, reindex, delete collection), Models (list, switch), Tasks (CRUD), Cron (list), Analytics (inference, telemetry, gatekeeper), **Settings (loadSettingsData, saveSettings, toggleAdvancedMode)** con 73 env var categorizzate, Simple/Advanced Mode toggle, persistenza locale |
 | `static/js/logs.js` | Docker logs viewer con filtering e auto-scroll |
 | `static/js/utils.js` | Utility condivise: `fetchWithTimeout()`, `showLoading()`, `showToast()`, `escapeHtml()` |
 
@@ -401,6 +402,10 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 
 | Data | Modifica | Impatto |
 |---|---|---|
+| 21/07 | **Synaptiq Graph Visualization — Visualizzazione grafo per-progetto** | Nuovo endpoint `GET /api/projects/{name}/synaptiq/graph` in `routes/projects.py` con `get_graph_data()`, `_last_project_path` tracking, Counter-based project name inference, project_match check. Frontend: `openSynaptiqGraph()` in `management.js` con pulsante 🧬 Graph, legenda per tipo simbolo. Sigma.js integrato con `renderSigmaGraph()` condiviso. Re-index triggera analisi Synaptiq automatica |
+| 21/07 | **fix(graph.js): FA2 assign sincrono rimosso — freeze browser per minuti** | `window.__fa2.assign()` (80 iterazioni, 5659 nodi, 21711 relazioni) bloccava il browser. Sostituito con FA2Worker asincrono che parte subito con le posizioni di gruppo. Aggiunto loading indicator con spinner, auto-pause 60s per grafi grandi, try/catch in management.js |
+| 21/07 | **fix(config.py): WORKSPACE_DIR prefix HOST_FS_PREFIX** | WORKSPACE_DIR ora usa `HOST_FS_PREFIX` per tradurre path host→container (stesso pattern di EXTERNAL_PROJECTS). Introdotta variabile intermedia `WORKSPACE_DIR_RAW`. Corregge auto-discovery su path con prefisso `/host_fs` |
+| 21/07 | **fix(rag.py): log WORKSPACE_DIR non fuorviante** | Sostituito else generico con 3 casi distinti: single-project mode, WORKSPACE_DIR non configurato, path non accessibile. Eliminato falso "non configurato" durante re-index singolo progetto |
 | 19/07 | **Settings Dashboard — 73 env var categorizzate** | `dashboard.py` SETTINGS_META espansa da 11 a 73 setting (63 visibili in 12 categorie, 10 hidden). `_persist_env()` atomic write su `.env`. `update_settings()` con type coercion (int/float/bool/str). Frontend: float/select/secret tipi, badge ⚡ restart_required, toggle Simple/Advanced Mode. UI settings: Gatekeeper, Embedding & Reranker, Watchdog, Rate Limit cards separate |
 | 19/07 | **Monitor — Rimossa sezione Qdrant Collections** | Sezione inutile (duplicata da Code Graph) rimossa da index.html e telemetry.js. Funzione `updateQdrantCollections()` eliminata |
 | 20/07 | **User Management & ACL — JWT auth, admin panel, API keys** | Nuovo `user_manager.py` (UserManager SQLite, bcrypt, API key SHA256), `auth.py` (JWT, login/logout/me, require_auth/admin), `routes/profile.py` (self-service password/API key/Telegram), `routes/users.py` (admin CRUD). Admin panel: URL primario `/admin/` (redirect `/dashboard` → `/admin/`), login page `/admin/login`, nuove viste Users (CRUD) e Profile (API key/password/Telegram). `config.py`: JWT_SECRET auto-write su `.env`. `ensure_admin_exists()` safety net. Bug fix: `prefix`→`key_prefix` in profile.py (500 API key), Users/Profile views spostati dentro main-content (layout) |
@@ -548,7 +553,7 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/mcp_server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna |
 | `jarvis/_mcp_handlers.py` | ✅ Deprecato | Sostituito da `mcp_server_v2.py` |
 | `MCP Server v2` | ✅ **ATTIVO** | Streamable HTTP via `/api/mcp/v2` (protocollo MCP v2) |
-| `jarvis/synaptiq_engine.py` | ✅ **ATTIVO** | Synaptiq v2.0.5 wrapper: async thread-safe, hybrid search, symbol context, BFS traversal, dead code, community detection. Watchdog automation: `notify_file_event()` con debounce 30s per-project |
+| `jarvis/synaptiq_engine.py` | ✅ **ATTIVO** | Synaptiq v2.0.5 wrapper: async thread-safe, hybrid search, symbol context, BFS traversal, dead code, community detection. Watchdog automation: `notify_file_event()` con debounce 30s per-project. **Graph visualization**: `get_graph_data()` con KnowledgeGraph API, `_last_project_path` tracking, Counter-based project name inference |
 | `jarvis/synaptiq_bridge.py` | ✅ **ATTIVO** | Bridge RAG+Synaptiq per hybrid code search nel prompting LLM. Sostituisce `code_intelligence.py` |
 | `jarvis/synaptiq_engine.py` (automazione) | ✅ **COMPLETATA** | Debounce per-project + `run_initial_analysis()` al boot + hook watchdog RAG |
 | `jarvis/config.py` (Synaptiq) | ✅ **CONFIGURATO** | `SYNAPTIQ_ENABLED`, `SYNAPTIQ_STORAGE_PATH`, `SYNAPTIQ_EMBEDDING_TIER`, `parse_external_projects()` |
@@ -1086,6 +1091,18 @@ async def get_db() -> OpenAIDatabase:
 ```
 
 **Impatto:** Risolve il crash su endpoint Assistants/Threads/Runs in presenza di richieste concorrenti. Pattern double-checked locking standard per singleton asincroni.
+
+---
+
+### 🐛 Bug 17 (2026-07-21): FA2 `assign()` Sincrono — Browser Freeze su Grafi Grandi
+
+**Problema:** Con dataset Synaptiq di 5659 nodi e 21711 relazioni, cliccando **🧬 Graph** nella dashboard, la pagina si bloccava per **minuti** senza mostrare alcun grafo.
+
+**Diagnosi:** `renderSigmaGraph()` in `graph.js` chiamava `window.__fa2.assign()` con 80 iterazioni **sincrone** sul thread principale. FA2 processa ogni nodo × ogni edge per iterazione: 5659 × 21711 × 80 ≈ 9.8 miliardi di operazioni. Il browser si blocca completamente. Il Sigma renderer (creato DOPO `assign()`) non viene mai inizializzato, quindi l'utente vede solo il modale vuoto.
+
+**Soluzione:** Rimosso `window.__fa2.assign()` (righe 282-290 di `graph.js`). Il gruppo `buildGroupLayout()` fornisce posizioni iniziali sufficienti per un render immediato. Il FA2Worker (web worker asincrono) raffina il layout in background senza bloccare la UI. Aggiunto loading indicator con spinner per feedback visivo durante la costruzione.
+
+**Impatto:** CRITICAL — bloccava completamente la visualizzazione del grafo Synaptiq. Risolto con rimozione del `assign` sincrono.
 
 ---
 
