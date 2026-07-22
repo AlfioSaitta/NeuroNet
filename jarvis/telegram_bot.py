@@ -229,9 +229,15 @@ if TELEGRAM_ENABLED:
             from llm_engine import engine
             from config import ALLOWED_USERS
             try:
-                process = open('/proc/self/statm').read().split()[1]
-                ram_mb = round((int(process) * os.sysconf('SC_PAGE_SIZE')) / (1024 * 1024), 1)
-            except: ram_mb = 0
+                statm = '/proc/self/statm'
+                if os.path.isfile(statm):
+                    with open(statm) as f:
+                        ram_pages = f.read().split()[1]
+                    ram_mb = round((int(ram_pages) * os.sysconf('SC_PAGE_SIZE')) / (1024 * 1024), 1)
+                else:
+                    ram_mb = 0
+            except Exception:
+                ram_mb = 0
             
             active_todos, active_crons = 0, 0
             try:
@@ -239,7 +245,8 @@ if TELEGRAM_ENABLED:
                 active_todos = len([t for t in load_tasks().values() if t.get('status') != 'done'])
                 from cron_agent import load_jobs
                 active_crons = len(load_jobs())
-            except: pass
+            except Exception:
+                pass
             
             total_chunks = sum(len(f_data.get('chunks', [])) for f_data in state.rag_state.values())
             pending_events = state.file_event_queue.qsize() if hasattr(state, "file_event_queue") and state.file_event_queue else 0
@@ -259,8 +266,9 @@ if TELEGRAM_ENABLED:
                         total_vram_mb = int(used)
                         pct = int(used) / int(total) * 100 if int(total) > 0 else 0
                         models_str_parts.append(f"• GPU VRAM: `{used} MB / {total} MB ({pct:.0f}%)`")
-            except: pass
-            
+            except Exception:
+                pass
+
             chat_status = "✅ Caricato" if engine.chat_model else "❌ Non caricato"
             embed_status = "✅ Caricato" if engine.embed_model else "❌ Non caricato"
             from config import LLAMA_MODEL_PATH as _cfg_model, LLAMA_EMBED_MODEL_PATH as _cfg_embed
@@ -1114,7 +1122,12 @@ if TELEGRAM_ENABLED:
                     bot_reply = message_data.get("content", "")
                     # Salva risposta AI in Mem0 per continuità conversazionale
                     if bot_reply:
-                        asyncio.create_task(save_to_memory(f"AI: {bot_reply[:500]}", user_id=user_id))
+                        try:
+                            mem_task = asyncio.create_task(save_to_memory(f"AI: {bot_reply[:500]}", user_id=user_id))
+                            state.background_tasks.add(mem_task)
+                            mem_task.add_done_callback(state.background_tasks.discard)
+                        except Exception:
+                            pass
                     break
                 
                 # Eseguiamo i tool call

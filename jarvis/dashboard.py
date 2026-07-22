@@ -524,12 +524,14 @@ async def get_stats():
         from task_manager import load_tasks
         tasks = load_tasks()
         active_todos = len([t for t in tasks.values() if t.get('status') != 'done'])
-    except: pass
+    except Exception as e:
+        logger.warning(f"Dashboard: cannot load tasks — {e}")
     try:
         from cron_agent import load_jobs
         jobs = load_jobs()
         active_crons = len(jobs)
-    except: pass
+    except Exception as e:
+        logger.warning(f"Dashboard: cannot load cron jobs — {e}")
 
     total_chunks = sum(len(f_data.get('chunks', [])) for f_data in state.rag_state.values())
 

@@ -605,7 +605,8 @@ def _save_file_state_unsafe(rel_path):
             with _get_db() as conn:
                 conn.execute('DELETE FROM file_state WHERE filepath = ?', (rel_path,))
                 conn.commit()
-        except: pass
+        except Exception as e:
+            logger.warning(f"SQLite DELETE error for {rel_path}: {e}")
     else:
         try:
             with _get_db() as conn:
@@ -957,8 +958,12 @@ async def ingest_local_documents(single_project_path: str | None = None):
             for rp, fp in files.items():
                 if rp not in current_files:
                     current_files[rp] = fp
-    else:
+    elif single_project_path:
+        logger.info("Single-project mode — skip WORKSPACE_DIR auto-discovery.")
+    elif not WORKSPACE_DIR:
         logger.info("WORKSPACE_DIR non configurato — skip workspace auto-discovery.")
+    else:
+        logger.info(f"WORKSPACE_DIR ({WORKSPACE_DIR}) non accessibile — skip workspace auto-discovery.")
 
     # ── 2. Walk EXTERNAL_PROJECTS (backward compat) — SKIP in single-project mode ──
     # Skip progetti che sono già dentro WORKSPACE_DIR (già indicizzati al punto 1)

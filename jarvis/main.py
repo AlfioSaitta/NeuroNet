@@ -14,7 +14,7 @@ import sys
 import traceback
 import threading
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 _default_showwarning = warnings.showwarning
 
@@ -461,9 +461,13 @@ async def lifespan(app: FastAPI):
 
     if observer:
         observer.stop()
-        observer.join()
-    for t in list(state.background_tasks):
+        with suppress(Exception):
+            observer.join(timeout=5)
+    tasks_to_stop = list(state.background_tasks)
+    for t in tasks_to_stop:
         t.cancel()
+    if tasks_to_stop:
+        await asyncio.gather(*tasks_to_stop, return_exceptions=True)
 
     if state.telegram_app:
         await state.telegram_app.updater.stop()
@@ -472,8 +476,8 @@ async def lifespan(app: FastAPI):
 
     try:
         await stop_all_userbots()
-    except NameError:
-        pass
+    except Exception as e:
+        logger.warning(f"Userbot shutdown error: {e}")
 
     # MCP shutdown
     if MCP_ENABLED:
@@ -482,8 +486,8 @@ async def lifespan(app: FastAPI):
             mgr = get_mcp_manager()
             await mgr.close_all()
             logger.info("🔌 MCP: all servers shut down")
-        except ImportError:
-            pass
+        except Exception as e:
+            logger.warning(f"MCP shutdown error: {e}")
 
     # Salvataggio sessioni chat su disco
     try:
@@ -493,11 +497,27 @@ async def lifespan(app: FastAPI):
         logger.warning(f"SessionStore persist error during shutdown: {e}")
 
     # Close User Manager
-    from user_manager import close_user_manager
-    await close_user_manager()
+    try:
+        from user_manager import close_user_manager
+        await close_user_manager()
+    except Exception as e:
+        logger.warning(f"User manager close error: {e}")
 
-    await state.qdrant.close()
-    await state.http_client.aclose()
+    # Chiudi Qdrant e HTTP client in parallelo (se uno fallisce, l'altro comunque esegue)
+    await asyncio.gather(
+        state.qdrant.close(),
+        state.http_client.aclose(),
+        return_exceptions=True,
+    )
+
+    # ThreadPoolExecutor shutdown
+    from concurrent.futures import ThreadPoolExecutor
+    for executor_name in ('executor',):
+        executor = getattr(engine, executor_name, None)
+        if isinstance(executor, ThreadPoolExecutor):
+            executor.shutdown(wait=False)
+    if hasattr(state, 'mem0_executor') and isinstance(state.mem0_executor, ThreadPoolExecutor):
+        state.mem0_executor.shutdown(wait=False)
 
 
 # ==============================================================================
@@ -1496,10 +1516,20 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
                 bg_task.add_done_callback(state.background_tasks.discard)
             except Exception as e:
                 logger.warning(f"⚠️ Background tag processing error: {e}")
-        asyncio.create_task(semantic_cache_store(prompt, content))
+        try:
+            bg_task = asyncio.create_task(semantic_cache_store(prompt, content))
+            state.background_tasks.add(bg_task)
+            bg_task.add_done_callback(state.background_tasks.discard)
+        except Exception as e:
+            logger.warning(f"⚠️ Background semantic cache error: {e}")
         
         # Salva prompt utente in memoria (endpoint generate non usa build_omniscient_prompt)
-        asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
+        try:
+            bg_task = asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
+            state.background_tasks.add(bg_task)
+            bg_task.add_done_callback(state.background_tasks.discard)
+        except Exception as e:
+            logger.warning(f"⚠️ Background save_to_memory error: {e}")
         
         return JSONResponse(status_code=200, content={
             "model": body["model"],
@@ -1536,7 +1566,12 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
             final_content = "".join(full_resp)
 
             # Salva prompt utente in background
-            asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
+            try:
+                bg_task = asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
+                state.background_tasks.add(bg_task)
+                bg_task.add_done_callback(state.background_tasks.discard)
+            except Exception as e:
+                logger.warning(f"⚠️ Background save_to_memory error: {e}")
 
             # Strip tag veloce (regex, senza handler) per risposta immediata
             clean_resp = strip_action_tags(final_content) if final_content else ""
@@ -1558,7 +1593,12 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
                     bg_task.add_done_callback(state.background_tasks.discard)
                 except Exception as e:
                     logger.warning(f"⚠️ Background tag processing error: {e}")
-                asyncio.create_task(semantic_cache_store(prompt, final_content))
+                try:
+                    bg_task = asyncio.create_task(semantic_cache_store(prompt, final_content))
+                    state.background_tasks.add(bg_task)
+                    bg_task.add_done_callback(state.background_tasks.discard)
+                except Exception as e:
+                    logger.warning(f"⚠️ Background semantic cache error: {e}")
 
         return StreamingResponse(stream_gen(), media_type="application/x-ndjson")
 

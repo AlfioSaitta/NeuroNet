@@ -9,6 +9,8 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+import state
+from config import logger
 from .state import get_db
 from .run_engine import execute_run, continue_run_with_tool_outputs
 
@@ -118,7 +120,12 @@ async def create_run(thread_id: str, body: CreateRunRequest):
         metadata=body.metadata,
     )
     # Spawn async execution in the background.
-    asyncio.create_task(execute_run(row["id"], await get_db()))
+    try:
+        run_task = asyncio.create_task(execute_run(row["id"], await get_db()))
+        state.background_tasks.add(run_task)
+        run_task.add_done_callback(state.background_tasks.discard)
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to start Run execution: {e}")
     return _run_response(row)
 
 
@@ -217,7 +224,12 @@ async def submit_tool_outputs(thread_id: str, run_id: str,
         "required_action": None,
     })
     # Spawn continuation in the background.
-    asyncio.create_task(continue_run_with_tool_outputs(run_id, await get_db()))
+    try:
+        cont_task = asyncio.create_task(continue_run_with_tool_outputs(run_id, await get_db()))
+        state.background_tasks.add(cont_task)
+        cont_task.add_done_callback(state.background_tasks.discard)
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to continue Run with tool outputs: {e}")
     return _run_response(row)
 
 
