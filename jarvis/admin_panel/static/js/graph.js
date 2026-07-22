@@ -247,6 +247,13 @@ async function renderSigmaGraph(config) {
         document.getElementById('filter-container').style.display = "flex";
     }
 
+    // Show loading while we prepare the graph (large graphs take a moment)
+    document.getElementById('graph-container').innerHTML =
+        `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;">
+            <span style="animation:spin 1s linear infinite;display:inline-block;margin-right:8px;">⚡</span>
+            Loading ${nodeCount} nodes, ${links.length} edges…
+        </div>`;
+
     // Smart initial positions by group
     const positions = buildGroupLayout(points, n => n.ext || n.group || 'unknown');
 
@@ -279,17 +286,11 @@ async function renderSigmaGraph(config) {
         }
     });
 
-    // Warm-up with synchronous FA2
-    window.__fa2.assign(sigmaGraph, {
-        iterations: nodeCount > 500 ? 80 : 50,
-        settings: {
-            barnesHutOptimize: nodeCount > 500,
-            gravity: 0.5,
-            scalingRatio: nodeCount > 500 ? 5 : 2,
-        },
-    });
-
-    // Continuous FA2 in Web Worker
+    // Continuous FA2 in Web Worker (NO synchronous assign — it freezes the
+    // browser for minutes on large graphs. The group-based initial positions
+    // from buildGroupLayout are sufficient for instant render; the worker
+    // refines layout asynchronously.)
+    document.getElementById('graph-status').textContent = `⚡ Building graph (${nodeCount} nodes, ${links.length} edges)…`;
     const layout = new window.__fa2Worker(sigmaGraph, {
         settings: {
             barnesHutOptimize: nodeCount > 500,
@@ -300,7 +301,7 @@ async function renderSigmaGraph(config) {
     layout.start();
     fa2Layout = layout;
 
-    // Auto-pause after 30 seconds
+    // Auto-pause after 30 seconds (60s for large graphs)
     if (fa2AutoPauseTimer) clearTimeout(fa2AutoPauseTimer);
     fa2AutoPauseTimer = setTimeout(() => {
         if (fa2Layout && fa2Layout.running) {
@@ -309,7 +310,7 @@ async function renderSigmaGraph(config) {
             document.getElementById('graph-status').textContent = '✓ Stabilized';
             document.getElementById('graph-status').style.color = 'var(--primary)';
         }
-    }, 30000);
+    }, nodeCount > 1000 ? 60000 : 30000);
 
     // Show FA2 controls
     document.getElementById('graph-controls').style.display = 'flex';

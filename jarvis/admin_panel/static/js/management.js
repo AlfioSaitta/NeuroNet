@@ -55,6 +55,7 @@ async function loadProjects() {
                     </div>
                 </div>
                 <div class="project-card-actions">
+                    <button class="btn btn-xs btn-accent" onclick="openSynaptiqGraph('${escapeHtml(p.name)}')">🧬 Graph</button>
                     <button class="btn btn-xs" onclick="reindexProject('${escapeHtml(p.name)}')">⟳ Re-index</button>
                     <button class="btn btn-xs btn-outline" onclick="deleteProjectCollection('${escapeHtml(p.name)}')">🗑️ Delete Collection</button>
                 </div>
@@ -807,6 +808,129 @@ async function deleteUser(userId) {
         }
     } catch (e) {
         showToast('Connection error');
+    }
+}
+
+// ── Synaptiq Graph Viewer ─────────────────────────────────────────────
+
+async function openSynaptiqGraph(projectName) {
+    const projName = encodeURIComponent(projectName);
+    const url = `/api/projects/${projName}/synaptiq/graph`;
+    let data;
+    try {
+        const res = await fetchWithTimeout(url);
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            showToast(err.error || 'Synaptiq graph error', 'error');
+            return;
+        }
+        data = await res.json();
+    } catch (e) {
+        showToast('Error fetching Synaptiq graph: ' + e.message, 'error');
+        return;
+    }
+
+    // Se Synaptiq ha il grafo di un altro progetto o nessun dato, mostra warning
+    if (data.warning) {
+        showToast(data.warning, 'warning');
+    }
+
+    if (!data.nodes || data.nodes.length === 0) {
+        // Mostra pulsante per triggerare analisi
+        showToast(
+            'No Synaptiq data for ' + projectName + '. Click Re-index to trigger analysis.',
+            'warning'
+        );
+        return;
+    }
+
+    // Prepara dati per renderSigmaGraph (graph.js)
+    // API attesa: points[] con id, label, group, payload; links[] con source, target
+    const points = data.nodes.map(n => ({
+        id: n.id,
+        label: n.name,
+        group: n.group || 'unknown',
+        payload: n,
+    }));
+
+    const links = data.edges.map(e => ({
+        source: e.source,
+        target: e.target,
+        type: e.type || 'CALLS',
+    }));
+
+    const nodeCount = points.length;
+
+    // Legenda per gruppo (label)
+    const groups = [...new Set(points.map(p => p.group))];
+    const GROUP_COLORS = {
+        'File': '#4fc3f7',
+        'function': '#81c784',
+        'method': '#ffb74d',
+        'class': '#e57373',
+        'interface': '#ba68c8',
+        'variable': '#a1887f',
+        'type': '#4dd0e1',
+    };
+
+    // Usa la funzione condivisa di graph.js con error handling
+    if (typeof renderSigmaGraph === 'function') {
+        try {
+            renderSigmaGraph({
+                points,
+                links,
+                title: `Synaptiq Graph: ${projectName} (${nodeCount} symbols)`,
+                errorPrefix: 'Synaptiq Graph',
+                filterField: 'group',
+                getLegendHTML: () => groups.map(g =>
+                    `<div class="legend-row"><span class="legend-dot" style="background:${GROUP_COLORS[g] || '#888'}"></span> ${g}</div>`
+                ).join(''),
+                setupFilter: () => {
+                    const filterSelect = document.getElementById('file-type-filter');
+                    filterSelect.innerHTML = '<option value="ALL">All Types</option>' +
+                        groups.map(g => `<option value="${g}">${g}</option>`).join('');
+                },
+                createNode: (p, pdeg, maxDeg, hubThreshold, nc) => {
+                    const group = p.group || 'unknown';
+                    const size = Math.max(4, Math.min(18, 1 + pdeg / maxDeg * 4));
+                    const isHub = pdeg > hubThreshold;
+                    return {
+                        label: isHub
+                            ? `${p.label || p.name} — ${pdeg} refs`
+                            : (nc < 300 ? `${p.label || p.name}` : ''),
+                        size: nc > 500 ? size * 0.6 : size,
+                        color: GROUP_COLORS[group] || '#888888',
+                        group: group,
+                    };
+                },
+                createEdge: (l) => ({
+                    color: 'rgba(255, 200, 100, 0.5)',
+                    size: 0.8,
+                    type: l.type || 'CALLS',
+                }),
+                onNodeClick: (nodeId, attrs) => {
+                    const p = attrs.payload || {};
+                    let html = `<div class="property-row"><div class="property-label">Symbol</div><div class="property-value mono">${escapeHtml(p.name || nodeId)}</div></div>`;
+                    html += `<div class="property-row"><div class="property-label">Type</div><div class="property-value">${escapeHtml(p.group || p.label || '?')}</div></div>`;
+                    if (p.file_path) {
+                        html += `<div class="property-row"><div class="property-label">File</div><div class="property-value mono text-xs">${escapeHtml(p.file_path)}</div></div>`;
+                    }
+                    if (p.start_line) {
+                        html += `<div class="property-row"><div class="property-label">Line</div><div class="property-value">${escapeHtml(p.start_line)}</div></div>`;
+                    }
+                    return html;
+                },
+                hoverLabel: (nodeId, attrs) => {
+                    const p = attrs.payload || {};
+                    return p.name ? `${p.name} — ${p.group || '?'}` : `${nodeId} — ${attrs.degree || 0} refs`;
+                },
+            });
+        } catch (e) {
+            console.error('Synaptiq graph render error:', e);
+            showToast('Graph render error: ' + e.message, 'error');
+        }
+    } else {
+        showToast('Sigma viewer not available (renderSigmaGraph not found)', 'error');
     }
 }
 

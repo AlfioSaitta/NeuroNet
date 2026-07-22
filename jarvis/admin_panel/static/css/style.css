@@ -1365,4 +1365,5 @@ select.form-input { cursor: pointer; }
 .badge-workspace { background: rgba(59, 130, 246, 0.15); color: #3b82f6; padding: 1px 6px; border-radius: 4px; font-size: 0.65rem; }
 .badge-external { background: rgba(139, 92, 246, 0.15); color: #8b5cf6; padding: 1px 6px; border-radius: 4px; font-size: 0.65rem; }
 .badge-orphan { background: rgba(234, 179, 8, 0.15); color: #eab308; padding: 1px 6px; border-radius: 4px; font-size: 0.65rem; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 

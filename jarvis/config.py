@@ -185,7 +185,10 @@ MODELS_DIR = os.getenv("MODELS_DIR", "/app/models")
 DOCUMENTS_DIR = os.getenv("DOCUMENTS_DIR", "/app/documents")
 HOST_FS_PREFIX = os.getenv("HOST_FS_PREFIX", "/host_fs")
 
-WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "")
+WORKSPACE_DIR_RAW = os.getenv("WORKSPACE_DIR", "")
+
+# Apply HOST_FS_PREFIX to translate host path → container path (same pattern as EXTERNAL_PROJECTS)
+WORKSPACE_DIR = os.path.join(HOST_FS_PREFIX, WORKSPACE_DIR_RAW.lstrip('/')) if HOST_FS_PREFIX and WORKSPACE_DIR_RAW else WORKSPACE_DIR_RAW
 
 # Auto-discover projects from WORKSPACE_DIR
 WORKSPACE_PROJECTS: list[str] = []

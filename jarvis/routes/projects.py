@@ -8,6 +8,7 @@ Uses state.qdrant methods (not REST API) per QDRANT_HOST=="local" safety.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from typing import Any
@@ -16,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from auth import require_auth, require_admin
-from config import WORKSPACE_PROJECTS, EXTERNAL_PROJECTS, HOST_FS_PREFIX, parse_external_projects
+from config import WORKSPACE_PROJECTS, EXTERNAL_PROJECTS, HOST_FS_PREFIX, SYNAPTIQ_ENABLED, parse_external_projects
 from dashboard import _persist_env
 from rag import (
     list_rag_projects, get_project_col_name, get_project_path,
@@ -24,6 +25,8 @@ from rag import (
     _save_state_unsafe,
 )
 import state
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -194,7 +197,31 @@ async def reindex_project(body: dict, _: dict = Depends(require_admin)):
     state.background_tasks.add(task)
     task.add_done_callback(state.background_tasks.discard)
 
-    return {"status": "ok", "message": f"Re-index started for {name}"}
+    # Triggera Synaptiq analysis per questo progetto
+    synaptiq_triggered = False
+    if SYNAPTIQ_ENABLED:
+        try:
+            from synaptiq_engine import synaptiq_engine
+            if synaptiq_engine and synaptiq_engine.is_initialized:
+                # Analisi immediata (non debounced) — usa _analyze_one
+                # che aggiorna _last_project_path e serializza accessi
+                async def _trigger_synaptiq():
+                    try:
+                        await synaptiq_engine._analyze_one(project_path)
+                    except Exception as e:
+                        logger.warning("Synaptiq reindex analyze fallito: %s", e)
+                st = asyncio.create_task(_trigger_synaptiq())
+                state.background_tasks.add(st)
+                st.add_done_callback(state.background_tasks.discard)
+                synaptiq_triggered = True
+        except Exception as e:
+            logger.debug("Synaptiq trigger skipped: %s", e)
+
+    msg = f"Re-index started for {name}"
+    if synaptiq_triggered:
+        msg += " (Synaptiq analysis triggered)"
+
+    return {"status": "ok", "message": msg}
 
 
 @router.delete("/{name}/collection")
@@ -294,3 +321,71 @@ async def register_project(body: dict, _: dict = Depends(require_admin)):
         "message": f"Project {name} registered and indexing started",
         "needs_restart": True,
     }
+
+
+@router.get("/{name}/synaptiq/graph")
+async def get_synaptiq_project_graph(name: str, _: dict = Depends(require_admin)):
+    """Restituisce nodi e relazioni del grafo Synaptiq per visualizzazione Sigma.js.
+
+    Poiché LadybugBackend.bulk_load() sovrascrive l'intero DB a ogni analisi,
+    il grafo contiene sempre l'ultimo progetto analizzato. Se non corrisponde
+    al progetto ``name`` richiesto, la risposta include ``project_match: false``
+    e un messaggio di avviso.
+    """
+    if not SYNAPTIQ_ENABLED:
+        return JSONResponse(
+            content={"error": "Synaptiq non abilitato", "nodes": [], "edges": []},
+            status_code=400,
+        )
+
+    try:
+        from synaptiq_engine import synaptiq_engine
+    except ImportError:
+        return JSONResponse(
+            content={"error": "Synaptiq non installato", "nodes": [], "edges": []},
+            status_code=400,
+        )
+
+    if not synaptiq_engine or not synaptiq_engine.is_initialized:
+        return JSONResponse(
+            content={"error": "Synaptiq non inizializzato", "nodes": [], "edges": []},
+            status_code=400,
+        )
+
+    graph_data = await synaptiq_engine.get_graph_data()
+    nodes = graph_data.get("nodes", [])
+    edges = graph_data.get("edges", [])
+    g_project = graph_data.get("project_name", "") or ""
+
+    # Caso 1: nessun dato — analisi mai eseguita
+    if not nodes:
+        return {
+            "nodes": [],
+            "edges": [],
+            "project_path": "",
+            "project_name": "",
+            "project_match": False,
+            "warning": (
+                f"Synaptiq non ha ancora dati. "
+                f"L'analisi iniziale è in corso o non è mai partita per '{name}'. "
+                f"Usa l'endpoint POST /api/synaptiq/analyze per triggerarla."
+            ),
+        }
+
+    # Caso 2: dati presenti — verifica corrispondenza progetto
+    project_match = g_project.lower() == name.lower()
+    result = {
+        "nodes": nodes,
+        "edges": edges,
+        "project_path": graph_data.get("project_path", ""),
+        "project_name": g_project,
+        "project_match": project_match,
+    }
+
+    if not project_match:
+        result["warning"] = (
+            f"Synaptiq contiene il grafo di '{g_project}', "
+            f"non '{name}'. Re-index per aggiornare."
+        )
+
+    return result

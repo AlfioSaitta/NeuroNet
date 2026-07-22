@@ -17,6 +17,8 @@ Usage:
 
 import asyncio
 import logging
+import os
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,7 @@ class SynaptiqEngine:
         self._last_analysis_time: dict[str, float] = {}
         self._pending_tasks: dict[str, asyncio.Task] = {}
         self._pending_requests: set[str] = set()
+        self._last_project_path: str = ""
 
     @property
     def is_initialized(self) -> bool:
@@ -83,7 +86,13 @@ class SynaptiqEngine:
             )
 
     async def close(self) -> None:
-        """Chiude LadybugDB e rilascia risorse."""
+        """Chiude LadybugDB, cancella pending tasks e rilascia risorse."""
+        # Cancella tutti i debounced task pendenti
+        for path, t in list(self._pending_tasks.items()):
+            if not t.done():
+                t.cancel()
+            self._pending_tasks.pop(path, None)
+
         async with self._rwlock.writer():
             if self._storage:
                 try:
@@ -481,6 +490,7 @@ class SynaptiqEngine:
             "storage_path": self.storage_path,
             "embedding_tier": self.embedding_tier,
             "last_analyze_duration": self._last_analyze_duration,
+            "last_project_path": self._last_project_path,
             "nodes_count": 0,
             "relationships_count": 0,
             "db_size_bytes": 0,
@@ -504,6 +514,87 @@ class SynaptiqEngine:
                     pass
 
         return stats
+
+    # ── Graph Data (per visualizzazione frontend) ────────────────────────────────
+
+    async def get_graph_data(self) -> dict[str, Any]:
+        """Recupera nodi e relazioni del grafo Synaptiq corrente per visualizzazione.
+
+        LadybugBackend.bulk_load() sovrascrive l'intero DB a ogni analisi,
+        quindi questo metodo restituisce sempre il grafo dell'ultimo progetto
+        analizzato (identificato da ``_last_project_path``).
+
+        Returns:
+            dict con: nodes=[], edges=[], project_path, project_name.
+        """
+        result: dict[str, Any] = {
+            "nodes": [],
+            "edges": [],
+            "project_path": self._last_project_path,
+            "project_name": "",
+        }
+        if self._last_project_path:
+            result["project_name"] = os.path.basename(
+                self._last_project_path.rstrip("/\\")
+            )
+
+        if not self._storage or not self._initialized:
+            return result
+
+        async with self._rwlock.reader():
+            storage = self._storage
+            assert storage is not None
+
+            try:
+                graph = storage.load_graph()
+            except Exception as e:
+                logger.warning("Synaptiq get_graph_data: load_graph fallito: %s", e)
+                return result
+
+            # Nodi via KnowledgeGraph API (robusta, non raw SQL)
+            seen_ids: set[str] = set()
+            for node in graph.iter_nodes():
+                nid = node.id
+                if nid in seen_ids:
+                    continue
+                seen_ids.add(nid)
+                result["nodes"].append({
+                    "id": nid,
+                    "name": node.name or "",
+                    "file_path": node.file_path or "",
+                    "start_line": node.start_line or 0,
+                    "group": node.label.value if node.label else "unknown",
+                })
+
+            # Relazioni via KnowledgeGraph API
+            for rel in graph.iter_relationships():
+                if rel.source in seen_ids and rel.target in seen_ids:
+                    result["edges"].append({
+                        "source": rel.source,
+                        "target": rel.target,
+                        "type": rel.type.value if rel.type else "CALLS",
+                    })
+
+            # Se abbiamo nodi ma nessun project_name, inferisci dai file_path
+            if result["nodes"] and not result["project_name"]:
+                paths = [n["file_path"] for n in result["nodes"] if n.get("file_path")]
+                if paths:
+                    # Usa la directory radice più frequente
+                    roots = Counter()
+                    for p in paths:
+                        parts = p.replace("\\", "/").split("/")
+                        if len(parts) > 1:
+                            root = parts[0]
+                        else:
+                            root = os.path.dirname(p) or "."
+                        roots[root] += 1
+                    if roots:
+                        best_root = roots.most_common(1)[0][0]
+                        if best_root and best_root != ".":
+                            result["project_name"] = best_root
+                            result["project_path"] = best_root
+
+        return result
 
 
     # ── Watchdog Integration (debounced background analysis) ─────────────────────
@@ -581,6 +672,9 @@ class SynaptiqEngine:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         ok = sum(1 for r in results if not isinstance(r, Exception))
         logger.info("Synaptiq initial analysis completata: %d/%d ok", ok, len(valid))
+        # Salva l'ultimo progetto analizzato
+        if valid:
+            self._last_project_path = valid[-1]
 
     # ── Internal ─────────────────────────────────────────────────────────────────
 
@@ -597,7 +691,9 @@ class SynaptiqEngine:
         self._pending_requests.add(project_path)
         try:
             async with self._analysis_lock:
-                return await self.analyze(project_path, full_rebuild=False)
+                result = await self.analyze(project_path, full_rebuild=False)
+                self._last_project_path = project_path
+                return result
         except asyncio.CancelledError:
             logger.debug("Synaptiq analyze cancellato per %s", project_path)
             return {}
