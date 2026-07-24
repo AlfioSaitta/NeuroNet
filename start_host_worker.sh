@@ -73,6 +73,12 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
 fi
 
 # ── 4. Avvio servizi Docker ───────────────────────────────────────
+echo -e "${YELLOW}📦 Rimozione vecchi container (se presenti)...${NC}"
+for c in searxng qdrant_db crawl4ai_server; do
+    if docker ps -a --format '{{.Names}}' | grep -q "^$c$"; then
+        docker rm -f "$c" 2>/dev/null && echo -e "  🗑️  Rimosso $c"
+    fi
+done
 echo -e "${YELLOW}📦 Avvio servizi Docker (Qdrant, SearXNG, Crawl4AI)...${NC}"
 docker compose -f "$SCRIPT_DIR/docker-compose.services.yml" up -d
 echo -e "${GREEN}✅ Servizi Docker avviati.${NC}"
