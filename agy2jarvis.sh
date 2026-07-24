@@ -15,7 +15,8 @@ set -euo pipefail
 
 JARVIS_URL="${JARVIS_URL:-http://localhost:8000/api/chat}"
 AGY_BIN="${AGY_BIN:-$(command -v agy)}"
-DOCS_DIR="${DOCS_DIR:-/home/alfio/Projects/ai-ecosystem/data/documents}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DOCS_DIR="${DOCS_DIR:-$SCRIPT_DIR/data/documents}"
 PROJECTS_DIR="${PROJECTS_DIR:-/home/alfio/Projects}"
 
 usage() {
@@ -32,8 +33,8 @@ usage() {
     echo ""
     echo "Esempi percorsi RAG:"
     echo "  --project NeuroNet              → PROJECTS_DIR/NeuroNet/docs/rag/"
-    echo "  --project NeuroNet --project-path /home/alfio/Projects/ai-ecosystem"
-    echo "                                  → /home/alfio/Projects/ai-ecosystem/docs/rag/"
+    echo "  --project NeuroNet --project-path $SCRIPT_DIR"
+    echo "                                  → $SCRIPT_DIR/docs/rag/"
     echo ""
     echo "Variabili ambiente:"
     echo "  JARVIS_URL    (default: http://localhost:8000/api/chat)"

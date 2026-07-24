@@ -41,12 +41,13 @@ rsync -avz --delete \
     --exclude '__pycache__/' \
     --exclude 'node_modules/' \
     --exclude '.env' \
-    /home/alfio/Projects/ai-ecosystem/ "$VPS_USER@$VPS_IP:$REMOTE_DIR/"
+    "$(cd "$(dirname "$0")" && pwd)/" "$VPS_USER@$VPS_IP:$REMOTE_DIR/"
 
 # 3. Trasferimento file .env
 echo -e "${YELLOW}🔐 Trasferimento file .env (assicurati di aggiungere EXTERNAL_GPU_URL in futuro)...${NC}"
-if [ -f "/home/alfio/Projects/ai-ecosystem/.env" ]; then
-    scp -i "$SSH_KEY" /home/alfio/Projects/ai-ecosystem/.env "$VPS_USER@$VPS_IP:$REMOTE_DIR/.env"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    scp -i "$SSH_KEY" "$SCRIPT_DIR/.env" "$VPS_USER@$VPS_IP:$REMOTE_DIR/.env"
 else
     echo -e "${RED}⚠️ Nessun file .env trovato localmente, ricordati di crearlo sul VPS!${NC}"
 fi
