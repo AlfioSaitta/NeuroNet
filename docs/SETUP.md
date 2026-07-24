@@ -28,7 +28,7 @@ docker logs jarvis_worker | grep -i cuda
 - Modelli GGUF in `jarvis/models/`
 
 ```bash
-cd ~/ai-ecosystem
+cd ~/NeuroNet
 
 # 1. Avviare Qdrant locale
 docker run -d --name qdrant_local \

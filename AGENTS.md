@@ -125,7 +125,7 @@ Master jarvis:8000
 ### Root del Progetto
 
 ```
-/home/alfio/Projects/ai-ecosystem/
+/home/alfio/Projects/NeuroNet/
 ├── .env                         # Segreti e configurazione (gitignored, NON committare mai)
 ├── docker-compose.vps.yml       # Stack Master VPS (NO sezione deploy GPU)
 ├── docker-compose.worker.yml    # Stack Worker GPU locale
@@ -467,7 +467,7 @@ pip install huggingface_hub
 # I file sono già scaricati in jarvis/models/.
 # huggingface-cli download unsloth/gemma-4-E2B-it-GGUF \
 #   gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf \
-#   --local-dir /home/alfio/Projects/ai-ecosystem/jarvis/models/
+#   --local-dir /home/alfio/Projects/NeuroNet/jarvis/models/
 
 # Master VPS — Gemma 4 26B A4B
 huggingface-cli download unsloth/gemma-4-26B-A4B-it-GGUF \
@@ -475,8 +475,8 @@ huggingface-cli download unsloth/gemma-4-26B-A4B-it-GGUF \
   --local-dir /home/debian/ai-ecosystem/jarvis/models/
 
 # Reranker — Qwen3-Reranker-0.6B (per container Docker)
-mkdir -p /home/alfio/Projects/ai-ecosystem/jarvis/models/Qwen3-Reranker-0.6B
-python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Qwen/Qwen3-Reranker-0.6B', local_dir='/home/alfio/Projects/ai-ecosystem/jarvis/models/Qwen3-Reranker-0.6B')"
+mkdir -p /home/alfio/Projects/NeuroNet/jarvis/models/Qwen3-Reranker-0.6B
+python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Qwen/Qwen3-Reranker-0.6B', local_dir='/home/alfio/Projects/NeuroNet/jarvis/models/Qwen3-Reranker-0.6B')"
 ```
 
 ---
@@ -762,7 +762,7 @@ I tag XML vengono intercettati dalla risposta del LLM e processati da `tag_proce
 
 ```bash
 # Avviare/Riavviare il Worker
-cd /home/alfio/Projects/ai-ecosystem
+cd /home/alfio/Projects/NeuroNet
 ./start_worker.sh
 docker compose -f docker-compose.worker.yml up -d jarvis_worker
 

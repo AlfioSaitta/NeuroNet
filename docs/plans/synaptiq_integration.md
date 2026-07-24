@@ -505,7 +505,7 @@ class SynaptiqEngine:
 - [ ] Verificare import: `python -c "import synaptiq; print(synaptiq.__version__)"`
 - [ ] Testare analisi CLI su un progetto piccolo:
   ```bash
-  synaptiq analyze /home/alfio/Projects/ai-ecosystem/jarvis/ --embeddings off
+  synaptiq analyze /home/alfio/Projects/NeuroNet/jarvis/ --embeddings off
   ```
 - [ ] Verificare `synaptiq query`, `synaptiq context`, `synaptiq impact` funzionano
 - [ ] Misurare tempo di analisi sul codebase Jarvis (storage locale)
@@ -719,7 +719,7 @@ Qdrant rimane per chunk RAG (768d, Qwen3-Embedding). LadybugDB per grafo simboli
 
 | Nodo | Storage Synaptiq | Dati |
 |---|---|---|
-| **Worker (Laptop)** | `data/synaptiq/` locale | Grafo dei progetti RAG locali (ai-ecosystem, SlotBuilder, ecc.) |
+| **Worker (Laptop)** | `data/synaptiq/` locale | Grafo dei progetti RAG locali (NeuroNet, SlotBuilder, ecc.) |
 | **Master (VPS)** | `data/synaptiq/` su VPS | Grafo dei progetti RAG del Master |
 
 **Motivazione:** LadybugDB è embedded (file `.lb`). Ogni nodo ha i propri progetti RAG montati localmente. Il grafo riflette i file presenti su quel nodo — non c'è bisogno di sincronizzazione perché i progetti sono diversi per nodo (Worker ha progetti di sviluppo, Master ha deployment projects).

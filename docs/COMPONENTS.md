@@ -3,7 +3,7 @@
 ## Struttura dei File
 
 ```
-ai-ecosystem/
+NeuroNet/
 ├── .env.example                     # Template configurazione
 ├── docker-compose.vps.yml           # Stack Master VPS (no GPU)
 ├── docker-compose.worker.yml        # Stack Worker GPU locale
