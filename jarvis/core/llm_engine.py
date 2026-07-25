@@ -349,6 +349,7 @@ class LlamaEngine:
         repeat_penalty = opts.get("repeat_penalty", 1.1)
         top_p = opts.get("top_p", 0.9)
         top_k = opts.get("top_k", 40)
+        response_format = opts.get("response_format")
         
         # Tools disponibili solo per main chat model (Gemma)
         openai_tools = None
@@ -426,14 +427,9 @@ class LlamaEngine:
             _max_tokens_cap = LLM_MAX_TOKENS
             max_tokens = min(max_tokens, _max_tokens_cap)
 
-        # Convert string grammar to LlamaGrammar object (llama_cpp expects object, not str)
-        if isinstance(grammar, str):
-            try:
-                from llama_cpp import LlamaGrammar
-                grammar = LlamaGrammar.from_string(grammar, verbose=False)
-            except Exception as e:
-                logger.warning(f"Failed to parse GBNF grammar string: {e}")
-                grammar = None
+        # Note: JSON mode (response_format=json_object) is handled natively by
+        # llama-cpp-python's create_chat_completion via response_format parameter.
+        # The grammar parameter is left as None — do NOT build a custom GBNF string here.
 
         if stream:
             async def async_generator():
@@ -453,7 +449,8 @@ class LlamaEngine:
                                     top_p=top_p,
                                     top_k=top_k,
                                     stream=True,
-                                    grammar=grammar
+                                    response_format=response_format,
+                                    grammar=None,
                                 )
                             ),
                         timeout=300
@@ -484,19 +481,20 @@ class LlamaEngine:
                     response = await asyncio.wait_for(
                         loop.run_in_executor(
                             self.executor,
-                            lambda: llm.create_chat_completion(
-                                messages=messages,
-                                tools=openai_tools,
-                                temperature=temperature,
-                                max_tokens=max_tokens,
-                                presence_penalty=presence_penalty,
-                                frequency_penalty=frequency_penalty,
-                                repeat_penalty=repeat_penalty,
-                                top_p=top_p,
-                                top_k=top_k,
-                                stream=False,
-                                grammar=grammar
-                            )
+                                lambda: llm.create_chat_completion(
+                                    messages=messages,
+                                    tools=openai_tools,
+                                    temperature=temperature,
+                                    max_tokens=max_tokens,
+                                    presence_penalty=presence_penalty,
+                                    frequency_penalty=frequency_penalty,
+                                    repeat_penalty=repeat_penalty,
+                                    top_p=top_p,
+                                    top_k=top_k,
+                                    stream=False,
+                                    response_format=response_format,
+                                    grammar=None,
+                                )
                         ),
                         timeout=300
                     )

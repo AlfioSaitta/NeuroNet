@@ -45,12 +45,12 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
         elif isinstance(stop_seq, str):
             options["stop"] = [stop_seq]
 
-    # ── response_format: json_object → JSON grammar ──
+    # ── response_format: json_object → pass to create_chat_completion natively ──
     response_format = body.get("response_format")
     grammar = None
-    if isinstance(response_format, dict) and response_format.get("type") == "json_object":
-        grammar = "root ::= object\nobject ::= \"{\" pair (\",\" pair)* \"}\"\npair ::= string \":\" value\nstring ::= \"\\\"\" [^\"]* \"\\\"\"\nvalue ::= string | number | object | array | \"true\" | \"false\" | \"null\"\nnumber ::= [0-9]+ (\".\" [0-9]+)?\narray ::= \"[\" value (\",\" value)* \"]\"\n%whitespace ::= /[ \\t\\n]+/"
-        logger.info("JSON mode attivato via response_format=json_object")
+    if isinstance(response_format, dict) and response_format.get("type") in ("json_object", "json_schema"):
+        options["response_format"] = response_format
+        logger.info(f"JSON mode attivato via response_format={response_format.get('type')}")
 
     # ── logprobs ──
     logprobs_enabled = body.get("logprobs", False)
