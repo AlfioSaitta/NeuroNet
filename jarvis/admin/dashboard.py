@@ -135,30 +135,31 @@ async def _collect_health_cache() -> tuple[dict, dict]:
         pass
 
     sys_stats = {"uptime": "N/A", "load": "N/A", "disk": "N/A", "ram_mb": 0}
+    loop = asyncio.get_running_loop()
     try:
-        with open('/proc/uptime') as f:
-            uptime_seconds = float(f.readline().split()[0])
-            h, m = int(uptime_seconds // 3600), int((uptime_seconds % 3600) // 60)
-            sys_stats["uptime"] = f"{h}h {m}m"
+        content = await loop.run_in_executor(None, lambda: open('/proc/uptime').read())
+        uptime_seconds = float(content.split()[0])
+        h, m = int(uptime_seconds // 3600), int((uptime_seconds % 3600) // 60)
+        sys_stats["uptime"] = f"{h}h {m}m"
     except Exception:
         pass
     try:
-        with open('/proc/loadavg') as f:
-            sys_stats["load"] = " ".join(f.readline().split()[0:3])
+        content = await loop.run_in_executor(None, lambda: open('/proc/loadavg').read())
+        sys_stats["load"] = " ".join(content.split()[0:3])
     except Exception:
         pass
     try:
-        st = os.statvfs('/')
+        st = await loop.run_in_executor(None, os.statvfs, '/')
         total_gb = (st.f_blocks * st.f_frsize) / (1024 ** 3)
         free_gb = (st.f_bavail * st.f_frsize) / (1024 ** 3)
         sys_stats["disk"] = f"{total_gb - free_gb:.1f}G / {total_gb:.1f}G"
     except Exception:
         pass
     try:
-        with open('/proc/self/statm') as f:
-            process_pages = int(f.read().split()[1])
-            page_size = os.sysconf('SC_PAGE_SIZE')
-            sys_stats["ram_mb"] = round((process_pages * page_size) / (1024 * 1024), 1)
+        content = await loop.run_in_executor(None, lambda: open('/proc/self/statm').read())
+        process_pages = int(content.split()[1])
+        page_size = os.sysconf('SC_PAGE_SIZE')
+        sys_stats["ram_mb"] = round((process_pages * page_size) / (1024 * 1024), 1)
     except Exception:
         pass
 
@@ -424,8 +425,9 @@ async def get_stats():
     sys_stats = _telemetry_cache.sys_stats
     qdrant_collections = _telemetry_cache.qdrant_collections or []
 
-    # ── Sys metrics (on-demand: leggero, ~1ms) ──
-    sys_m = collect_sys_metrics()
+    # ── Sys metrics (on-demand: leggero, ~1ms, offload /proc I/O) ──
+    loop = asyncio.get_running_loop()
+    sys_m = await loop.run_in_executor(None, collect_sys_metrics)
 
     # ── Inference delta tracking ──
     prev_req = getattr(state, '_prev_total_requests', None)
@@ -2352,12 +2354,13 @@ async def get_system_info():
         "docker_available": os.path.exists("/var/run/docker.sock") or os.path.exists("/run/docker.sock"),
     }
     try:
-        with open('/proc/uptime') as f:
-            uptime_seconds = float(f.readline().split()[0])
-            d = int(uptime_seconds // 86400)
-            h = int((uptime_seconds % 86400) // 3600)
-            m = int((uptime_seconds % 3600) // 60)
-            result["uptime"] = f"{d}d {h}h {m}m"
+        loop = asyncio.get_running_loop()
+        content = await loop.run_in_executor(None, lambda: open('/proc/uptime').read())
+        uptime_seconds = float(content.split()[0])
+        d = int(uptime_seconds // 86400)
+        h = int((uptime_seconds % 86400) // 3600)
+        m = int((uptime_seconds % 3600) // 60)
+        result["uptime"] = f"{d}d {h}h {m}m"
     except Exception:
         pass
     return JSONResponse(result)
