@@ -153,35 +153,49 @@ Master jarvis:8000
 ### Moduli Jarvis (`jarvis/*.py`)
 
 | File | Responsabilità | Dipendenze Chiave |
-|---|---|---|
-| `config.py` | **Unica fonte di verità per tutte le costanti.** Legge `.env` con `os.getenv()`. NON modificare valori hardcoded qui — usare `.env`. | `os`, `logging` |
-| `state.py` | Stato globale mutabile condiviso tra moduli (singleton). Popolato nel `lifespan` di main.py. | — |
-| `llm_engine.py` | Carica i modelli GGUF, gestisce inferenza, thinking mode, offloading al Worker. | `llama_cpp`, `httpx`, `config`, `state` |
-| `main.py` | Entry point FastAPI, lifespan, tutti gli endpoint HTTP, integrazione componenti. | Tutti i moduli |
-| `rag.py` | Pipeline RAG: AST chunking, embedding, Qdrant, watchdog filesystem. | `config`, `state`, `llm_engine` |
-| `memory.py` | Mem0: inizializzazione, salvataggio e recupero ricordi. | `config`, `state` |
-| `prompt_builder.py` | Costruisce il super-prompt omnisciente con tag XML. LLM Gatekeeper. | `rag`, `memory`, `web_search` |
-| `agent_tools.py` | TOOLS_SCHEMA per tool-calling, esecuzione tool (file/shell/skills). | `config`, `state` |
-| `telegram_bot.py` | Handler bot Telegram ufficiale (comandi, dashboard inline, whitelist). | `llm_engine`, `prompt_builder` |
-| `telegram_userbot_manager.py` | Multi-userbot Telethon (MTProto), autenticazione OTP. | `config`, `state` |
-| `web_search.py` | SearXNG metasearch + Crawl4AI scraping parallelo. | `config`, `state` |
-| `cron_agent.py` | APScheduler: promemoria, task ricorrenti, timer relativi. | `config`, `state` |
-| `dashboard.py` | Pannello web di controllo Jarvis. **SETTINGS_META** (73 env var categorizzate con metadati: type, editable, category, restart_required, sensitive, basic). `_persist_env()` persistenza atomica su `.env`. `update_settings()` con type coercion e restart detection. Endpoint: `/api/dashboard/settings` | `state`, `.env` |
-| `skills_manager.py` | Carica skill dinamiche da `jarvis/skills/` a runtime. | — |
-| `reflection_agent.py` | Job notturno di consolidamento memoria. | `memory`, `llm_engine` |
-| `openai_router.py` | Router legacy endpoint OpenAI (`/v1/*`) in main.py. | `config`, `llm_engine`, `prompt_builder` |
-| `rag_reranker.py` | Reranker modulare: Qwen3-Reranker (transformers, cpu fp16) + fallback FlashRank ONNX. | `config` |
-| `rag_cache.py` | Cache semantica Qdrant + Web Knowledge persistence (salva/ricerca conoscenza web). | `state`, `config` |
-| `tag_processor.py` | Registro e processing 21 tag XML d'azione: `TagSafeStream` (stream-safe), `process_all_tags()`, `strip_action_tags()`, `register_tag()`. | `re`, `memory`, `cron_agent`, `task_manager` |
-| `telegram_format.py` | Utility formattazione Telegram MarkdownV2 e Markdown legacy. | `re` |
-| `dashboard_template.py` | Template HTML/CSS/JS della dashboard web (Chart.js, Sigma.js, stile cyberpunk). | — |
-| `telemetry.py` | PipelineTracer per-request + GatekeeperStats cumulativi. Tracciamento step, LLM calls, tool calls. | `state` |
-| `mcp_server.py` | Server MCP stdio per diagnostica AI esterna. 9 tool + 7 resources. | `urllib` (HTTP proxy a Jarvis) |
-| `mcp_server_v2.py` | **Nuovo Server MCP v2 (Streamable HTTP).** Endpoint POST `/api/mcp/v2`. 8 tool + 7 resources. | `fastapi`, `telemetry` |
-| `_mcp_handlers.py` | **(Deprecato)** Handler MCP condivisi. Sostituito dalla logica in `mcp_server_v2.py`. | `state`, `telemetry` |
-| `synaptiq_engine.py` | **Synaptiq Engine.** Wrapper asincrono thread-safe per Synaptiq v2.0.5 (LadybugBackend + run_pipeline). Analisi strutturale del codice, hybrid search, symbol context, traversal, dead code, community detection. Watchdog integration: `notify_file_event()` con debounce per-project 30s. **Graph visualization**: `get_graph_data()` con KnowledgeGraph API, `_last_project_path` tracking, Counter-based project name inference. | `synaptiq.core.*`, `asyncio` |
-| `synaptiq_bridge.py` | Bridge che fonde RAG (Qdrant) + Synaptiq (grafo) per hybrid code search. Replaces `code_intelligence.py`. | `synaptiq_engine`, `rag` (lazy) |
-| `code_intelligence.py` | **Legacy re-export.** `from synaptiq_bridge import hybrid_code_search` per retrocompatibilità. | `synaptiq_bridge` |
+|---|---|---|---|
+| `core/config.py` | **Unica fonte di verità per tutte le costanti.** Legge `.env` con `os.getenv()`. NON modificare valori hardcoded qui — usare `.env`. | `os`, `logging` |
+| `core/state.py` | Stato globale mutabile condiviso tra moduli (singleton). Popolato nel `lifespan` di main.py. Ring buffer `pipeline_traces` (500), gatekeeper stats, error counters. | — |
+| `core/llm_engine.py` | Carica i modelli GGUF, gestisce inferenza, thinking mode, offloading al Worker, decomposta in 6 helper per `load_models()` e `generate_chat()`. | `llama_cpp`, `httpx`, `config`, `state` |
+| `core/lifecycle.py` | Lifecycle manager: avvio componenti, shutdown graceful, watchdog health. | `config`, `state` |
+| `core/model_profiles.py` | Auto-rilevamento famiglia modello GGUF (Qwen, Gemma, DeepSeek, QwQ, Llama, Mistral, Phi). | `config` |
+| `core/telemetry.py` | PipelineTracer per-request + GatekeeperStats cumulativi. Tracciamento step, LLM calls, tool calls. Campi prompt: system_prompt, rag_context, user_content, compressed_text, llm_response. | `state` |
+| `main.py` | Entry point FastAPI, lifespan, endpoint HTTP, integrazione componenti. | Tutti i moduli |
+| `agent/prompt.py` | Costruisce il super-prompt omnisciente con tag XML. LLM Gatekeeper. Rifattorizzato in 6 helper: 3 web search + 3 memoria. | `rag`, `memory`, `web_search` |
+| `agent/tags.py` | Registro e processing 21 tag XML d'azione: `TagSafeStream` (stream-safe), `process_all_tags()` → `_execute_tag_handlers()` + `_apply_replacements()`, `register_tag()`. | `re`, `memory`, `cron_agent`, `task_manager` |
+| `agent/tools.py` | TOOLS_SCHEMA per tool-calling, dispatch table con 18 handler per esecuzione tool (file/shell/skills). | `config`, `state` |
+| `agent/skills.py` | Carica skill dinamiche da `jarvis/agent/skills/` a runtime. | — |
+| `agent/classifier.py` | Classificatore intenti centralizzato: `classify()`, `is_project_query()`, `is_greeting()`, `is_web_query()`. | `re` |
+| `agent/confirmation.py` | ConfirmationManager per conferme utente tool-calling con timeout 5 min, token univoci, callback. | `state`, `asyncio` |
+| `rag/engine.py` | Pipeline RAG: AST chunking (Tree-sitter), embedding Qdrant, watchdog filesystem PollingObserver. | `config`, `state`, `llm_engine` |
+| `rag/reranker.py` | Reranker modulare: Qwen3-Reranker (transformers, cpu fp16) + fallback FlashRank ONNX. | `config` |
+| `rag/cache.py` | Cache semantica Qdrant + Web Knowledge persistence (salva/ricerca conoscenza web). | `state`, `config` |
+| `rag/web_search.py` | SearXNG metasearch + Crawl4AI scraping parallelo. | `config`, `state` |
+| `memory/engine.py` | Mem0: inizializzazione, salvataggio e recupero ricordi. Ricerca filtrata per user+project. | `config`, `state` |
+| `memory/backup.py` | Export/import memoria in JSON per disaster recovery. | `memory` |
+| `memory/reflection.py` | Job notturno di consolidamento memoria episodica in profilo sintetico. | `memory`, `llm_engine` |
+| `tg_bot/bot.py` | Handler bot Telegram ufficiale (comandi, dashboard inline, whitelist, messaggi vocali). | `llm_engine`, `prompt_builder` |
+| `tg_bot/format.py` | Utility formattazione Telegram MarkdownV2 e Markdown legacy. | `re` |
+| `tg_bot/service.py` | Servizio Telegram (start/stop, health). | `config` |
+| `tg_bot/userbot.py` | Multi-userbot Telethon (MTProto), autenticazione OTP. | `config`, `state` |
+| `scheduler/cron.py` | APScheduler: promemoria, task ricorrenti, timer relativi. | `config`, `state` |
+| `scheduler/tasks.py` | ToDo persistenti con priorità e scadenze. | `config` |
+| `admin/dashboard.py` | Pannello web di controllo Jarvis. **SETTINGS_META** (73 env var categorizzate con metadati: type, editable, category, restart_required, sensitive, basic). `_persist_env()` persistenza atomica su `.env`. `update_settings()` con type coercion e restart detection. Endpoint: `/api/dashboard/settings` | `state`, `.env` |
+| `admin/panel/__init__.py` | Router FastAPI admin panel, mount static files, serve index.html + login.html. URL primario `/admin/`. | `fastapi` |
+| `api/auth/auth.py` | JWT auth (PyJWT): login/logout/me, require_auth/require_admin deps. Estrazione da cookie o header Bearer. | `user_manager`, `pyjwt` |
+| `api/auth/user_manager.py` | UserManager SQLite singleton: bcrypt password, CRUD utenti, API key SHA256, ensure_admin_exists(). | `aiosqlite`, `bcrypt` |
+| `api/mcp/server.py` | Server MCP stdio per diagnostica AI esterna. 9 tool + 7 resources. Legacy. | `urllib` (HTTP proxy a Jarvis) |
+| `api/mcp/server_v2.py` | **Server MCP v2 (Streamable HTTP).** Endpoint POST `/api/mcp/v2`. 8 tool + 7 resources. Conforme RFC 2025-11-25. | `fastapi`, `telemetry` |
+| `api/mcp/client.py` | Client MCP per tool esterni. HTTP proxy verso server MCP remoti. | `httpx` |
+| `routes/profile.py` | Profile self-service API: API key (list/create/rotate/revoke/reveal), change password, link Telegram. | `user_manager`, `auth` |
+| `routes/users.py` | Admin user management API CRUD: create/list/update/delete/activate/deactivate. | `user_manager`, `auth` |
+| `routes/projects.py` | Project management API: list, register, reindex, delete collection, synaptiq/graph. | `rag`, `synaptiq_engine`, `auth` |
+| `session/store.py` | ChatSessionStore SQLite persistente per sessioni chat. | `sqlite3`, `state` |
+| `graph/synaptiq_engine.py` | **Synaptiq Engine.** Wrapper asincrono thread-safe per Synaptiq v2.0.5. Analisi strutturale, hybrid search, symbol context, dead code, community detection. **Graph visualization**: `get_graph_data()` con KnowledgeGraph API, `_last_project_path` tracking, Counter-based project name inference. | `synaptiq.core.*`, `asyncio` |
+| `graph/synaptiq_bridge.py` | Bridge che fonde RAG (Qdrant) + Synaptiq (grafo) per hybrid code search. Sostituisce `code_intelligence.py`. | `synaptiq_engine`, `rag` (lazy) |
+| `openai_api/` (pacchetto) | 17 moduli con lazy import: Chat, Completions, Embeddings, Audio, Images, Assistants API, Vector Stores. | `config`, `llm_engine`, `prompt_builder` |
+| `external/infrastructure.py` | Registro server SSH per tag `<SSH>`. | `config` |
+| `external/providers.py` | Provider cloud esterni (BaseProvider + ProviderRouter). | `config`, `llm_engine` |
 | `session_store.py` | Chat session store persistente su SQLite. `ChatSessionStore` con `save_session()`/`load_session()`/`list_sessions()`/`delete_session()`. Usato da dashboard e main.py. | `sqlite3`, `state` |
 | `classificatore.py` | Classificatore intenti centralizzato: `classify()`, `is_project_query()`, `is_greeting()`, `is_web_query()`, `is_internal_query()`. Costanti `Intent.*` e `PROJECT_KEYWORDS`. | `re` |
 | `user_manager.py` | **UserManager** SQLite singleton per utenti e API key. CRUD utenti (bcrypt password), generate/revoke/resolve API key (SHA256 hash). `ensure_admin_exists()` safety net: crea admin default se nessun admin presente. | `aiosqlite`, `bcrypt`, `hashlib` |
@@ -549,14 +563,13 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/session_store.py` | ✅ Nuovo | ChatSessionStore SQLite persistente: save/load/list/delete sessioni |
 | `jarvis/classificatore.py` | ✅ Nuovo | Classificatore intenti centralizzato (Intent enum, classify(), is_project_query()) |
 | `jarvis/confirmation_manager.py` | ✅ Nuovo | Gestione conferme utente per tool-calling con timeout e token |
-| `jarvis/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls, ring buffer 500 trace. Prompt fields: system_prompt, rag_context, user_content, compressed_text, llm_response |
-| `jarvis/mcp_server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna |
-| `jarvis/_mcp_handlers.py` | ✅ Deprecato | Sostituito da `mcp_server_v2.py` |
-| `MCP Server v2` | ✅ **ATTIVO** | Streamable HTTP via `/api/mcp/v2` (protocollo MCP v2) |
-| `jarvis/synaptiq_engine.py` | ✅ **ATTIVO** | Synaptiq v2.0.5 wrapper: async thread-safe, hybrid search, symbol context, BFS traversal, dead code, community detection. Watchdog automation: `notify_file_event()` con debounce 30s per-project. **Graph visualization**: `get_graph_data()` con KnowledgeGraph API, `_last_project_path` tracking, Counter-based project name inference |
-| `jarvis/synaptiq_bridge.py` | ✅ **ATTIVO** | Bridge RAG+Synaptiq per hybrid code search nel prompting LLM. Sostituisce `code_intelligence.py` |
-| `jarvis/synaptiq_engine.py` (automazione) | ✅ **COMPLETATA** | Debounce per-project + `run_initial_analysis()` al boot + hook watchdog RAG |
-| `jarvis/config.py` (Synaptiq) | ✅ **CONFIGURATO** | `SYNAPTIQ_ENABLED`, `SYNAPTIQ_STORAGE_PATH`, `SYNAPTIQ_EMBEDDING_TIER`, `parse_external_projects()` |
+| `jarvis/core/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls, ring buffer 500 trace. Prompt fields: system_prompt, rag_context, user_content, compressed_text, llm_response |
+| `jarvis/api/mcp/server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna (legacy) |
+| `jarvis/api/mcp/server_v2.py` | ✅ **ATTIVO** | MCP v2 Streamable HTTP via `/api/mcp/v2` (protocollo MCP v2) |
+| `jarvis/graph/synaptiq_engine.py` | ✅ **ATTIVO** | Synaptiq v2.0.5 wrapper: async thread-safe, hybrid search, symbol context, BFS traversal, dead code, community detection. Watchdog automation: `notify_file_event()` con debounce 30s per-project. **Graph visualization**: `get_graph_data()` con KnowledgeGraph API, `_last_project_path` tracking, Counter-based project name inference |
+| `jarvis/graph/synaptiq_bridge.py` | ✅ **ATTIVO** | Bridge RAG+Synaptiq per hybrid code search nel prompting LLM. Sostituisce `code_intelligence.py` |
+| `jarvis/graph/synaptiq_engine.py` (automazione) | ✅ **COMPLETATA** | Debounce per-project + `run_initial_analysis()` al boot + hook watchdog RAG |
+| `jarvis/core/config.py` (Synaptiq) | ✅ **CONFIGURATO** | `SYNAPTIQ_ENABLED`, `SYNAPTIQ_STORAGE_PATH`, `SYNAPTIQ_EMBEDDING_TIER`, `parse_external_projects()` |
 | `jarvis/Dockerfile` | ✅ CUDA 13.0 | overlay cuda-compiler-13-0 + cudart-dev + cublas-dev su base 12.2; llama-cpp-python buildato con GGML_CUDA=on |
 | `docker-compose.vps.yml` | ✅ Pronto | Stack Master senza GPU (no sezione deploy) |
 | `docker-compose.worker.yml` | ✅ Pronto | QDRANT_HOST da .env, volumi mem0+documents montati |
@@ -660,7 +673,7 @@ def my_function():
             pass
 ```
 
-**Dove si applica:** `main.py` (lifespan), `rag.py` (rag_queue_worker + search_documents), `dashboard.py`, `mcp_server_v2.py`, `prompt_builder.py`.
+**Dove si applica:** `main.py` (lifespan), `rag/engine.py` (rag_queue_worker + search_documents), `admin/dashboard.py`, `api/mcp/server_v2.py`, `agent/prompt.py`.
 
 **Eccezioni consentite:**
 - `config.py` — import a livello modulo ma dentro `try/except ImportError`
@@ -713,18 +726,18 @@ Assistants API (beta):
 
 ### Tool Calling
 
-Lo schema dei tool è definito in `agent_tools.py`. Per aggiungere un nuovo tool:
+Lo schema dei tool è definito in `agent/tools.py`. Per aggiungere un nuovo tool:
 1. Aggiungere la entry in `TOOLS_SCHEMA` (formato JSON Schema)
-2. Aggiungere il case in `execute_tool_call()`
-3. Documentare il tool nel system prompt (in `prompt_builder.py`)
+2. Aggiungere il handler nella dispatch table di `execute_tool_call()`
+3. Documentare il tool nel system prompt (in `agent/prompt.py`)
 
 ### Skills Dinamiche
 
-Le skill in `jarvis/skills/` vengono caricate automaticamente a runtime da `skills_manager.py`. Ogni skill è un file Python con una classe che implementa l'interfaccia skill.
+Le skill in `jarvis/agent/skills/` vengono caricate automaticamente a runtime da `jarvis/agent/skills.py`. Ogni skill è un file Python con una classe che implementa l'interfaccia skill.
 
 ### Tag XML d'Azione (21 tag registrati)
 
-I tag XML vengono intercettati dalla risposta del LLM e processati da `tag_processor.py` prima che il testo pulito arrivi all'utente. La visibilità determina se il tag e il suo contenuto vengono rimossi (`hidden`/`action`) o lasciati nel testo (`kept`). I tag `action` generano feedback visibile all'utente.
+I tag XML vengono intercettati dalla risposta del LLM e processati da `agent/tags.py` prima che il testo pulito arrivi all'utente. La visibilità determina se il tag e il suo contenuto vengono rimossi (`hidden`/`action`) o lasciati nel testo (`kept`). I tag `action` generano feedback visibile all'utente.
 
 | Tag | Formato | Visibilità | Self-Closing | Descrizione |
 |---|---|---|---|---|
@@ -750,7 +763,7 @@ I tag XML vengono intercettati dalla risposta del LLM e processati da `tag_proce
 | `COMMIT` | `<COMMIT>message</COMMIT>` | action | ❌ | Crea un commit git con i cambiamenti locali |
 | `EXEC` | `<EXEC>timeout\|comando</EXEC>` | action | ❌ | Esegue un comando shell readonly (whitelist) |
 
-**Streaming:** `TagSafeStream` in `tag_processor.py` gestisce i tag che si estendono su più chunk tramite uno state machine `_in_tag`/`_sc_pending`. Ogni chunk viene passato a `TagSafeStream.process()`, e solo il contenuto safe viene yieldato al client. A fine stream, `process_response_tags()` elabora il testo completo (con tag) per effetti collaterali.
+**Streaming:** `TagSafeStream` in `agent/tags.py` gestisce i tag che si estendono su più chunk tramite uno state machine `_in_tag`/`_sc_pending`. Ogni chunk viene passato a `TagSafeStream.process()`, e solo il contenuto safe viene yieldato al client. A fine stream, `process_all_tags()` elabora il testo completo (con tag) per effetti collaterali, delegando a `_execute_tag_handlers()` e `_apply_replacements()`.
 
 **Estendibilità:** Nuovi tag registrabili a runtime via `register_tag(TagDef)`.
 
