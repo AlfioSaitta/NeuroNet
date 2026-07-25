@@ -143,7 +143,103 @@ class LlamaEngine:
         self.gatekeeper_lock = PriorityLock()
         self.initialized = True
 
+    # ── Helper di caricamento modelli ────────────────────────────────
+
+    def _load_chat_model(self, path: str) -> None:
+        """Carica il modello chat principale (Gemma 4) su GPU."""
+        from core.config import (
+            N_GPU_LAYERS as _cfg_gpu, LLM_NUM_CTX as _cfg_ctx,
+            LLM_BATCH_SIZE as _cfg_batch, LLM_UBATCH_SIZE as _cfg_ubatch,
+            LLM_FLASH_ATTN as _cfg_flash, MODEL_PROFILE as _init_profile,
+        )
+        n_gpu_layers, n_ctx, n_batch = _cfg_gpu, _cfg_ctx, _cfg_batch
+        n_ubatch, flash_attn = _cfg_ubatch, _cfg_flash
+        _chat_format = _init_profile.chat_format
+        logger.info(f"Caricamento Chat Model (MAIN BRAIN): {path}")
+        logger.info(f"⚙️ n_gpu_layers={n_gpu_layers} n_ctx={n_ctx} "
+                    f"n_batch={n_batch} n_ubatch={n_ubatch} flash_attn={flash_attn}")
+        logger.info(f"⚙️ chat_format={_chat_format} (family={_init_profile.family})")
+
+        self.chat_model = Llama(
+            model_path=path,
+            n_gpu_layers=n_gpu_layers, n_ctx=n_ctx,
+            n_batch=n_batch, n_ubatch=n_ubatch,
+            n_threads=6, flash_attn=flash_attn,
+            use_mmap=True, chat_format=_chat_format, verbose=False,
+        )
+        log_vram_usage("Dopo caricamento Chat Model (Gemma 4)")
+
+        # Estrazione metadati GGUF e aggiornamento MODEL_PROFILE
+        try:
+            _metadata = {}
+            if hasattr(self.chat_model, 'metadata') and self.chat_model.metadata:
+                _metadata = dict(self.chat_model.metadata)
+            if hasattr(self.chat_model, 'model_metadata') and self.chat_model.model_metadata:
+                _metadata = dict(self.chat_model.model_metadata)
+
+            if _metadata:
+                from core.model_profiles import detect_from_metadata
+                from core.config import MODEL_PROFILE as _old_profile
+                _new_profile = detect_from_metadata(_metadata, _old_profile)
+                import core.config as _cfg
+                _cfg.MODEL_PROFILE = _new_profile
+                if not _cfg.LLM_THINKING_MODE_RAW:
+                    _cfg.LLM_THINKING_MODE = _new_profile.thinking_support
+                logger.info(f"🧠 Modello rilevato: {_new_profile.model_name} "
+                            f"({_new_profile.family}/{_new_profile.variant}) "
+                            f"chat_format={_new_profile.chat_format} | "
+                            f"thinking={'✅' if _new_profile.thinking_support else '❌'}")
+            else:
+                logger.info("ℹ️  Nessun metadato GGUF disponibile, uso profilo da filename")
+        except Exception as _meta_err:
+            logger.warning(f"⚠️ Estrazione metadati modello fallita: {_meta_err}")
+
+    def _load_embed_model(self, path: str) -> None:
+        """Carica il modello embedding (Qwen3-Embedding) su CPU."""
+        from core.config import EMBED_N_GPU_LAYERS as _cfg_embed_gpu
+        logger.info(f"Caricamento Embed Model (CPU): {path}")
+        logger.info(f"⚙️ n_gpu_layers={_cfg_embed_gpu} (CPU), n_ctx=8192, pooling=2")
+        self.embed_model = Llama(
+            model_path=path, embedding=True,
+            n_gpu_layers=_cfg_embed_gpu, n_ctx=8192,
+            n_batch=256, n_threads=4, verbose=False, pooling=2,
+        )
+        log_vram_usage("Dopo caricamento Embed Model (dovrebbe essere 0 incremento)")
+        try:
+            logger.info("🔄 Warmup Embed Model (CPU first-call)...")
+            self.embed_model.create_embedding(["warmup"])
+            logger.info("✅ Embed Model warmup completato")
+        except Exception as e:
+            logger.warning(f"⚠️ Embed Model warmup fallito (non critico): {e}")
+
+    def _load_gatekeeper_model(self, path: str) -> None:
+        """Carica il modello gatekeeper (Qwen3.5) per intent classification + compressione."""
+        from core.config import (
+            GATEKEEPER_N_CTX as _gk_ctx,
+            GATEKEEPER_N_THREADS as _gk_threads,
+            GATEKEEPER_N_GPU_LAYERS as _gk_gpu,
+        )
+        _dev = "GPU" if _gk_gpu != 0 else "CPU"
+        logger.info(f"Caricamento Gatekeeper Model ({_dev}): {path}")
+        logger.info(f"⚙️ n_gpu_layers={_gk_gpu} n_ctx={_gk_ctx} n_threads={_gk_threads}")
+        self.gatekeeper_model = Llama(
+            model_path=path,
+            n_gpu_layers=_gk_gpu, n_ctx=_gk_ctx,
+            n_batch=128, n_ubatch=128, n_threads=_gk_threads,
+            flash_attn=False, use_mmap=True, chat_format="chatml", verbose=False,
+        )
+        logger.info(f"✅ Gatekeeper Model caricato ({_dev})")
+        try:
+            logger.info("🔄 Warmup Gatekeeper Model (CPU first-call)...")
+            self.gatekeeper_model.create_completion("warmup", max_tokens=1)
+            logger.info("✅ Gatekeeper Model warmup completato")
+        except Exception as e:
+            logger.warning(f"⚠️ Gatekeeper Model warmup fallito (non critico): {e}")
+
+    # ── Caricamento orchestrato ──────────────────────────────────────
+
     def load_models(self):
+        """Carica tutti i modelli LLM: chat, embedding, gatekeeper."""
         if Llama is None:
             logger.error("Impossibile caricare i modelli: llama-cpp-python mancante.")
             return
@@ -153,145 +249,26 @@ class LlamaEngine:
             LLAMA_EMBED_MODEL_PATH as _cfg_embed_path,
             GATEKEEPER_MODEL_PATH as _cfg_gk_path,
         )
-        chat_model_path = _cfg_model_path
-        embed_model_path = _cfg_embed_path
-        gatekeeper_model_path = _cfg_gk_path
 
-        # ════════════════════════════════════════════════════════════════
-        # 1. MAIN BRAIN — Gemma 4 su GPU (n_gpu_layers=-1 = full offload)
-        # ════════════════════════════════════════════════════════════════
-        if os.path.exists(chat_model_path):
-            from core.config import N_GPU_LAYERS as _cfg_gpu, LLM_NUM_CTX as _cfg_ctx, LLM_BATCH_SIZE as _cfg_batch
-            from core.config import LLM_UBATCH_SIZE as _cfg_ubatch, LLM_FLASH_ATTN as _cfg_flash
-            n_gpu_layers = _cfg_gpu
-            n_ctx = _cfg_ctx
-            n_batch = _cfg_batch
-            n_ubatch = _cfg_ubatch
-            flash_attn = _cfg_flash
-            logger.info(f"Caricamento Chat Model (MAIN BRAIN): {chat_model_path}")
-            logger.info(f"⚙️ n_gpu_layers={n_gpu_layers} n_ctx={n_ctx} n_batch={n_batch} n_ubatch={n_ubatch} flash_attn={flash_attn}")
-            from core.config import MODEL_PROFILE as _init_profile
-            _chat_format = _init_profile.chat_format
-            logger.info(f"⚙️ chat_format={_chat_format} (family={_init_profile.family})")
-
-            self.chat_model = Llama(
-                model_path=chat_model_path,
-                n_gpu_layers=n_gpu_layers,
-                n_ctx=n_ctx,
-                n_batch=n_batch,
-                n_ubatch=n_ubatch,
-                n_threads=6,
-                flash_attn=flash_attn,
-                use_mmap=True,
-                chat_format=_chat_format,
-                verbose=False
-            )
-            log_vram_usage("Dopo caricamento Chat Model (Gemma 4)")
-
-            # ── Estrazione metadati GGUF e aggiornamento MODEL_PROFILE ──
-            try:
-                _metadata = {}
-                if hasattr(self.chat_model, 'metadata') and self.chat_model.metadata:
-                    _metadata = dict(self.chat_model.metadata)
-                if hasattr(self.chat_model, 'model_metadata') and self.chat_model.model_metadata:
-                    _metadata = dict(self.chat_model.model_metadata)
-
-                if _metadata:
-                    from core.model_profiles import detect_from_metadata
-                    from core.config import MODEL_PROFILE as _old_profile
-                    _new_profile = detect_from_metadata(_metadata, _old_profile)
-                    import core.config as _cfg
-                    _cfg.MODEL_PROFILE = _new_profile
-                    if not _cfg.LLM_THINKING_MODE_RAW:
-                        _cfg.LLM_THINKING_MODE = _new_profile.thinking_support
-                    logger.info(f"🧠 Modello rilevato: {_new_profile.model_name} "
-                                f"({_new_profile.family}/{_new_profile.variant}) "
-                                f"chat_format={_new_profile.chat_format} | "
-                                f"thinking={'✅' if _new_profile.thinking_support else '❌'}")
-                else:
-                    logger.info("ℹ️  Nessun metadato GGUF disponibile, uso profilo da filename")
-            except Exception as _meta_err:
-                logger.warning(f"⚠️ Estrazione metadati modello fallita: {_meta_err}")
+        if os.path.exists(_cfg_model_path):
+            self._load_chat_model(_cfg_model_path)
         else:
-            logger.warning(f"File chat model {chat_model_path} non trovato!")
+            logger.warning(f"File chat model {_cfg_model_path} non trovato!")
 
-        # ════════════════════════════════════════════════════════════════
-        # 2. EMBEDDING MODEL — Qwen3-Embedding su CPU (n_gpu_layers=0)
-        #    Libera ~400MiB VRAM per Gemma 4. La latenza passa da ~5ms a
-        #    ~50ms per batch, ma le embedding sono in coda asincrona e non
-        #    bloccano il flusso principale di chat.
-        # ════════════════════════════════════════════════════════════════
-        if os.path.exists(embed_model_path):
-            from core.config import EMBED_N_GPU_LAYERS as _cfg_embed_gpu
-            logger.info(f"Caricamento Embed Model (CPU): {embed_model_path}")
-            logger.info(f"⚙️ n_gpu_layers={_cfg_embed_gpu} (CPU), n_ctx=8192, pooling=2")
-            self.embed_model = Llama(
-                model_path=embed_model_path,
-                embedding=True,
-                n_gpu_layers=_cfg_embed_gpu,
-                n_ctx=8192,
-                n_batch=256,
-                n_threads=4,
-                verbose=False,
-                pooling=2
-            )
-            log_vram_usage("Dopo caricamento Embed Model (dovrebbe essere 0 incremento)")
-
-            # Warmup embedding su CPU (JIT non serve, ma first-call è lenta
-            # per la compilazione del grafo GGUF)
-            try:
-                logger.info(f"🔄 Warmup Embed Model (CPU first-call)...")
-                self.embed_model.create_embedding(["warmup"])
-                logger.info(f"✅ Embed Model warmup completato")
-            except Exception as e:
-                logger.warning(f"⚠️ Embed Model warmup fallito (non critico): {e}")
+        if os.path.exists(_cfg_embed_path):
+            self._load_embed_model(_cfg_embed_path)
         else:
-            logger.warning(f"File embed model {embed_model_path} non trovato!")
+            logger.warning(f"File embed model {_cfg_embed_path} non trovato!")
 
-        # ════════════════════════════════════════════════════════════════
-        # 3. GATEKEEPER LLM — Qwen3.5-0.8B-Instruct
-        #    Usato per: classificazione intenti + compressione caveman prompt.
-        #    Default: CPU (n_gpu_layers=0). Imposta GATEKEEPER_N_GPU_LAYERS=-1
-        #    nel .env per GPU offload. Modello tiny (~0.8B).
-        # ════════════════════════════════════════════════════════════════
-        if os.path.exists(gatekeeper_model_path):
-            from core.config import (
-                GATEKEEPER_N_CTX as _cfg_gk_ctx,
-                GATEKEEPER_N_THREADS as _cfg_gk_threads,
-                GATEKEEPER_N_GPU_LAYERS as _cfg_gk_gpu,
-            )
-            _gk_device = "GPU" if _cfg_gk_gpu != 0 else "CPU"
-            logger.info(f"Caricamento Gatekeeper Model ({_gk_device}): {gatekeeper_model_path}")
-            logger.info(f"⚙️ n_gpu_layers={_cfg_gk_gpu} n_ctx={_cfg_gk_ctx} n_threads={_cfg_gk_threads}")
-            self.gatekeeper_model = Llama(
-                model_path=gatekeeper_model_path,
-                n_gpu_layers=_cfg_gk_gpu,
-                n_ctx=_cfg_gk_ctx,
-                n_batch=128,
-                n_ubatch=128,
-                n_threads=_cfg_gk_threads,
-                flash_attn=False,
-                use_mmap=True,
-                chat_format="chatml",
-                verbose=False,
-            )
-            logger.info(f"✅ Gatekeeper Model caricato ({_gk_device})")
-
-            # Warmup: prima chiamata per compilazione grafo GGUF
-            try:
-                logger.info(f"🔄 Warmup Gatekeeper Model (CPU first-call)...")
-                self.gatekeeper_model.create_completion("warmup", max_tokens=1)
-                logger.info(f"✅ Gatekeeper Model warmup completato")
-            except Exception as e:
-                logger.warning(f"⚠️ Gatekeeper Model warmup fallito (non critico): {e}")
+        if os.path.exists(_cfg_gk_path):
+            self._load_gatekeeper_model(_cfg_gk_path)
         else:
             logger.warning(
-                f"File gatekeeper model {gatekeeper_model_path} non trovato! "
+                f"File gatekeeper model {_cfg_gk_path} non trovato! "
                 "Gatekeeper e compressione disabilitati. "
                 "Imposta GATEKEEPER_MODEL_PATH nel .env per abilitare."
             )
 
-        # Report VRAM finale
         log_vram_usage("VRAM finale dopo caricamento tutti i modelli")
 
     def _resolve_model(self, model: str):
@@ -311,6 +288,56 @@ class LlamaEngine:
             return self.gatekeeper_lock
         return self.chat_lock
 
+    # ── Helper di generazione ────────────────────────────────────────
+
+    @staticmethod
+    def _inject_thinking_tag(model: str, messages: list) -> list:
+        """Inietta il tag di thinking nel system prompt per modelli che lo supportano."""
+        if model == "chat" and LLM_THINKING_MODE and MODEL_PROFILE.thinking_support and messages:
+            _thinking_tag = "[Thinking]" if MODEL_PROFILE.chat_format == "gemma" else "<|think|>"
+            processed = []
+            for msg in messages:
+                if isinstance(msg, dict) and msg.get("role") == "system":
+                    content = msg.get("content", "")
+                    if _thinking_tag not in content:
+                        msg = {**msg, "content": f"{_thinking_tag}\n" + content}
+                processed.append(msg)
+            return processed
+        return messages
+
+    @staticmethod
+    def _normalize_tools(tools: Optional[list], model: str) -> Optional[list]:
+        """Normalizza tool in formato OpenAI per llama-cpp-python."""
+        if not tools or model != "chat":
+            return None
+        normalized = []
+        for t in tools:
+            if isinstance(t, dict) and "function" in t:
+                normalized.append(t)
+            elif isinstance(t, dict) and "name" in t:
+                normalized.append({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name"),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                })
+        return normalized or None
+
+    @staticmethod
+    def _build_external_payload(messages: list, tools: Optional[list], stream: bool, opts: dict) -> dict:
+        """Costruisce il payload per la richiesta HTTP al Worker GPU remoto."""
+        payload: dict = {
+            "model": MODEL_ID,
+            "messages": messages,
+            "stream": stream,
+            "options": {"skip_rag": True, **opts},
+        }
+        if tools:
+            payload["tools"] = tools
+        return payload
+
     async def generate_chat(self, messages, tools=None, options=None, stream=False, grammar=None, model="chat"):
         """Genera rispresa da un modello Llama.
 
@@ -329,18 +356,7 @@ class LlamaEngine:
 
         opts = options or {}
 
-        # --- Thinking Mode — solo per main chat model (Gemma) ---
-        if model == "chat" and LLM_THINKING_MODE and MODEL_PROFILE.thinking_support and messages:
-            _thinking_tag = "[Thinking]" if MODEL_PROFILE.chat_format == "gemma" else "<|think|>"
-            processed_messages = []
-            for msg in messages:
-                if isinstance(msg, dict) and msg.get("role") == "system":
-                    content = msg.get("content", "")
-                    if _thinking_tag not in content:
-                        msg = {**msg, "content": f"{_thinking_tag}\n" + content}
-                processed_messages.append(msg)
-            messages = processed_messages
-        # ----------------------------
+        messages = self._inject_thinking_tag(model, messages)
 
         temperature = opts.get("temperature", 1.0)
         max_tokens = opts.get("num_predict", 2048)
@@ -351,33 +367,12 @@ class LlamaEngine:
         top_k = opts.get("top_k", 40)
         response_format = opts.get("response_format")
         
-        # Tools disponibili solo per main chat model (Gemma)
-        openai_tools = None
-        if tools and model == "chat":
-            openai_tools = []
-            for t in tools:
-                if isinstance(t, dict) and "function" in t:
-                    openai_tools.append(t)
-                elif isinstance(t, dict) and "name" in t:
-                    openai_tools.append({
-                        "type": "function",
-                        "function": {
-                            "name": t.get("name"),
-                            "description": t.get("description", ""),
-                            "parameters": t.get("parameters", {"type": "object", "properties": {}})
-                        }
-                    })
+        openai_tools = self._normalize_tools(tools, model)
 
         # --- DELEGAZIONE EXTERNAL GPU — solo per main chat model ---
         if model == "chat" and EXTERNAL_GPU_URL:
             try:
-                payload = {
-                    "model": MODEL_ID,
-                    "messages": messages,
-                    "stream": stream,
-                    "options": {"skip_rag": True, **opts}
-                }
-                if tools: payload["tools"] = tools
+                payload = self._build_external_payload(messages, tools, stream, opts)
 
                 async with httpx.AsyncClient(timeout=1.5) as client:
                     await client.get(f"{EXTERNAL_GPU_URL.rstrip('/')}/")
