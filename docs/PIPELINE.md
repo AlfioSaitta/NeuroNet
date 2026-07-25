@@ -14,12 +14,17 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
 │  │ Endpoint API → handler specifico:                                       ││
-│  │  ├── POST /api/chat       → handle_chat()                               ││
-│  │  ├── POST /api/generate   → handle_generate()                           ││
-│  │  ├── POST /v1/chat/*      → openai.chat.chat_completions()               ││
-│  │  ├── POST /v1/completions → openai.completions.completions()            ││
-│  │  ├── POST /api/embed      → handle_embed()                              ││
-│  │  └── Telegram message     → telegram_bot.handle_telegram_message()      ││
+│  │  ├── POST /api/chat          → handle_chat()                            ││
+│  │  ├── POST /api/generate      → handle_generate()                        ││
+│  │  ├── POST /api/embed         → handle_embed()                           ││
+│  │  ├── POST /api/mcp/v2        → mcp_v2.handle_mcp_request()              ││
+│  │  ├── POST /v1/chat/*         → openai_api.chat.chat_completions()       ││
+│  │  ├── POST /v1/completions    → openai_api.completions.completions()     ││
+│  │  ├── POST /api/auth/*        → auth.require_auth + endpoints            ││
+│  │  ├── POST /api/dashboard/*   → dashboard.settings_router                ││
+│  │  ├── GET/POST /api/projects/* → routes.projects_router                  ││
+│  │  ├── GET/POST /api/users/*   → routes.users_router (admin only)         ││
+│  │  └── Telegram message        → tg_bot.bot.handle_telegram_message()     ││
 │  └─────────────────────────────────────────────────────────────────────────┘│
 └───────────────────────────────────┬──────────────────────────────────────────┘
                                     │
@@ -35,7 +40,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  3. GATEKEEPER (prompt_builder.py)                                          │
+│  3. GATEKEEPER (jarvis/agent/prompt.py)                                      │
 │                                                                              │
 │  build_omniscient_prompt(user_message)                                       │
 │                                                                              │
@@ -53,7 +58,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  4. CONTEXT GATHERING (prompt_builder.py)                                   │
+│  4. CONTEXT GATHERING (jarvis/agent/prompt.py)                              │
 │                                                                              │
 │  Fase parallela di arricchimento — ogni sorgente è indipendente:            │
 │                                                                              │
@@ -97,7 +102,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  5. SUPER-PROMPT ASSEMBLY (prompt_builder.py)                               │
+│  5. SUPER-PROMPT ASSEMBLY (jarvis/agent/prompt.py)                          │
 │                                                                              │
 │  Costruzione prompt XML strutturato con 7 sezioni:                          │
 │                                                                              │
@@ -117,7 +122,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  6. GENERAZIONE LLM (llm_engine.py)                                         │
+│  6. GENERAZIONE LLM (jarvis/core/llm_engine.py)                             │
 │                                                                              │
 │  LlamaEngine.generate_chat()                                                 │
 │                                                                              │
@@ -141,7 +146,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  7. STREAMING + TAG PROCESSING (tag_processor.py)                           │
+│  7. STREAMING + TAG PROCESSING (jarvis/agent/tags.py)                       │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
 │  │ TagSafeStream — Anti-leak tag XML in streaming                         ││
@@ -156,7 +161,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │                                                                              │
 │  A FINE STREAM:                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │ process_response_tags(full_text) → side effects:                        ││
+│  │ process_all_tags(full_text) → side effects:                                ││
 │  │                                                                         ││
 │  │  ├── <MEMORY>testo</MEMORY>       → Mem0.save()                        ││
 │  │  ├── <SCHEDULE>cron|msg</SCHEDULE> → cron_agent.add_job()              ││
@@ -182,7 +187,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  8. TOOL-CALLING LOOP (agent_tools.py) — Se risposta contiene tool_calls    │
+│  8. TOOL-CALLING LOOP (jarvis/agent/tools.py) — Se risposta contiene tool_calls │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
 │  │ execute_tool_call(tool_name, arguments):                                ││

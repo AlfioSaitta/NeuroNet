@@ -1,6 +1,6 @@
 # Tag d'Azione XML — Riferimento Completo
 
-I tag XML vengono intercettati dalla risposta del LLM e processati da `tag_processor.py` prima che il testo pulito arrivi all'utente. La visibilità determina se il tag e il suo contenuto vengono rimossi (`hidden`/`action`) o lasciati nel testo (`kept`). I tag `action` generano feedback visibile all'utente.
+I tag XML vengono intercettati dalla risposta del LLM e processati da `jarvis/agent/tags.py` prima che il testo pulito arrivi all'utente. La visibilità determina se il tag e il suo contenuto vengono rimossi (`hidden`/`action`) o lasciati nel testo (`kept`). I tag `action` generano feedback visibile all'utente.
 
 ## Registro Completo (21 tag)
 
@@ -30,7 +30,7 @@ I tag XML vengono intercettati dalla risposta del LLM e processati da `tag_proce
 
 ## TagSafeStream — Anti-Leak in Streaming
 
-Nello streaming, i tag che si estendono su più chunk vengono gestiti da `TagSafeStream` (stato `_in_tag`/`_sc_pending`), che trattiene il contenuto in buffer fino al completamento del tag. A fine stream, `process_response_tags()` elabora il testo completo (con tag) per gli effetti collaterali (memoria, scheduling, notifiche).
+Nello streaming, i tag che si estendono su più chunk vengono gestiti da `TagSafeStream` (stato `_in_tag`/`_sc_pending`), che trattiene il contenuto in buffer fino al completamento del tag. A fine stream, `process_all_tags()` elabora il testo completo (con tag) per gli effetti collaterali (memoria, scheduling, notifiche), delegando a `_execute_tag_handlers()` e `_apply_replacements()`.
 
 ## Estendibilità
 

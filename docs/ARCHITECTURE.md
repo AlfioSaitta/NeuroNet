@@ -24,7 +24,7 @@
 │                                                                  │
 │  Nodo WORKER GPU (Online):                                       │
 │  ├── jarvis_worker:8000   QDRANT_HOST=100.64.0.1                │
-│  ├── Modello: Qwen3.5-4B-UD-Q4_K_XL.gguf (GPU)                 │
+│  ├── Modello: Gemma 4 E2B QAT (gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf, GPU, 1036 MiB VRAM) │
 │  └── TELEGRAM_ENABLED=false (centralizzato sul Master)          │
 └──────────────────────────────────────────────────────────────────┘
 ```

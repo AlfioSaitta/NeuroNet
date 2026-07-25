@@ -15,6 +15,55 @@
 | `/api/reset-all` | GET/POST | Reset RAG + Mem0 |
 | `/docs` | GET | Swagger UI |
 
+### Auth & Profile
+
+| Endpoint | Metodo | Funzione |
+|---|---|---|
+| `/api/auth/login` | POST | Login con username/password → JWT cookie |
+| `/api/auth/logout` | POST | Logout, cancella cookie JWT |
+| `/api/auth/me` | GET | Info utente corrente (richiede auth) |
+| `/api/auth/api-key` | GET | Lista API key dell'utente corrente |
+| `/api/auth/api-key` | POST | Genera nuova API key (con rotate option) |
+| `/api/auth/api-key/{key_id}/reveal` | GET | Rivela chiave appena generata (cache 5 min) |
+| `/api/auth/api-key/{id}/revoke` | POST | Revoca API key |
+| `/api/auth/change-password` | POST | Cambia password utente corrente |
+| `/api/auth/telegram` | POST | Link/unlink Telegram ID |
+
+### Admin: User Management
+
+| Endpoint | Metodo | Funzione |
+|---|---|---|
+| `/api/users` | GET | Lista utenti (admin only) |
+| `/api/users` | POST | Crea nuovo utente (admin only) |
+| `/api/users/{id}` | PUT | Modifica utente (admin only) |
+| `/api/users/{id}` | DELETE | Elimina utente (admin only) |
+| `/api/users/{id}/activate` | PUT | Attiva utente (admin only) |
+| `/api/users/{id}/deactivate` | PUT | Disattiva utente (admin only) |
+
+### Admin: Project Management
+
+| Endpoint | Metodo | Funzione |
+|---|---|---|
+| `/api/projects` | GET | Lista progetti con stato |
+| `/api/projects/register` | POST | Registra nuovo progetto RAG |
+| `/api/projects/{name}/reindex` | POST | Trigger re-ingestion RAG + Synaptiq |
+| `/api/projects/{name}/collection` | DELETE | Cancella collezione Qdrant |
+| `/api/projects/{name}/synaptiq/graph` | GET | Grafo Synaptiq (nodi/relazioni per Sigma.js) |
+
+### Dashboard & Settings
+
+| Endpoint | Metodo | Funzione |
+|---|---|---|
+| `/api/dashboard/settings` | GET | Lista 73 env var con metadati (type, category, restart_required) |
+| `/api/dashboard/settings` | POST | Aggiorna variabili, type coercion, persist su `.env` |
+| `/api/dashboard/*` | GET | Metriche GPU, modelli, health, RAG, telemetry |
+
+### MCP v2 (Streamable HTTP)
+
+| Endpoint | Metodo | Funzione |
+|---|---|---|
+| `/api/mcp/v2` | POST | Endpoint MCP Streamable HTTP (JSON-RPC) — 8 tool + 7 resources |
+
 ### Pipeline Telemetry
 
 | Endpoint | Metodo | Funzione |
@@ -71,13 +120,13 @@
 - **Ring buffer 500 trace**: ultimi 500 trace completati sempre disponibili in memoria
 - **HTTP REST**: 8 endpoint `/api/telemetry/*` per query diretta
 - **MCP stdio**: server esterno per Claude Code / Cursor via `.mcp.json`
-- **MCP SSE**: endpoint in-app `/api/mcp/sse` per connessioni persistenti
+- **MCP v2**: endpoint Streamable HTTP `/api/mcp/v2` — 8 tool + 7 resources
 
 ---
 
 ## Connessione al Server MCP di Jarvis
 
-Jarvis espone due modalità di accesso MCP per permettere ad agenti AI esterni (Claude Code, Cursor, Continue, ecc.) di ispezionare lo stato interno del sistema a fini di diagnostica e debug.
+Jarvis espone due modalità di accesso MCP per permettere ad agenti AI esterni (Claude Code, Cursor, Continue, ecc.) di ispezionare lo stato interno del sistema a fini di diagnostica e debug. Il server MCP v1 (stdio e SSE) è deprecato in favore di MCP v2 Streamable HTTP.
 
 ### Modalità 1: Server MCP stdio (per agenti esterni)
 
@@ -111,25 +160,35 @@ Se Jarvis è su un host diverso:
 JARVIS_URL=http://192.168.1.100:8000 python -m jarvis.mcp_server
 ```
 
-### Modalità 2: Endpoint MCP SSE (in-app)
+### Modalità 2: Endpoint MCP v2 Streamable HTTP
 
-Jarvis espone un endpoint SSE direttamente via FastAPI. Utile per agenti che supportano il trasporto SSE persistente.
+Jarvis espone un endpoint MCP v2 conforme al protocollo Streamable HTTP (RFC 2025-11-25) direttamente via FastAPI.
 
-1. Connessione SSE:
-   ```
-   GET /api/mcp/sse
-   ```
-   Il server risponde con un evento `endpoint` che specifica l'URL per i messaggi.
+```
+POST /api/mcp/v2
+Content-Type: application/json
 
-2. Invio comandi JSON-RPC:
-   ```
-   POST /api/mcp/message?session_id=<id>
-   Content-Type: application/json
+{"jsonrpc":"2.0","id":1,"method":"tools/list"}
+```
 
-   {"jsonrpc":"2.0","id":1,"method":"tools/list"}
-   ```
+Lo streaming delle risposte avviene via SSE quando il client invia l'header `Accept: text/event-stream`.
 
-### Elenco Completo Tool MCP
+**Esempio di chiamata con curl:**
+```bash
+curl -X POST http://localhost:8000/api/mcp/v2 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+**Connessione SSE per streaming:**
+```bash
+curl -X POST http://localhost:8000/api/mcp/v2 \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+### Elenco Completo Tool MCP v2
 
 | Tool | Descrizione | Parametri |
 |---|---|---|
@@ -141,7 +200,6 @@ Jarvis espone un endpoint SSE direttamente via FastAPI. Utile per agenti che sup
 | `get_status` | Stato sistema: uptime, richieste, token | nessuno |
 | `get_model_info` | Info modello LLM: family, GPU layers | nessuno |
 | `get_pending_ops` | Operazioni pendenti: background tasks, coda watchdog | nessuno |
-| `get_llm_call_breakdown` | Analisi aggregata chiamate LLM da ultimi 100 trace | nessuno |
 
 ### Risorse MCP (resources)
 
