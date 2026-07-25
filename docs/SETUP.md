@@ -59,7 +59,7 @@ docker logs jarvis_worker | grep -i "vram\|n_gpu_layers"
 ```bash
 curl -s -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen","messages":[{"role":"user","content":"Ciao, presentati"}],"max_tokens":100}' \
+  -d '{"model":"gemma","messages":[{"role":"user","content":"Ciao, presentati"}],"max_tokens":100}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])"
 ```
 
@@ -134,7 +134,7 @@ QDRANT_HOST=localhost            # localhost in offline, IP Tailscale in online
 EXTERNAL_GPU_URL=                # Master: http://100.64.0.2:8000 | Worker: vuoto
 
 # === MODELLO LLM ===
-LLAMA_MODEL_PATH=./models/Qwen3.5-4B-UD-Q4_K_XL.gguf
+LLAMA_MODEL_PATH=./models/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
 N_GPU_LAYERS=15                  # 0 su VPS (CPU-only), max 15 su RTX 3050 Ti 4GB
 LLM_FLASH_ATTN=true
 

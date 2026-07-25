@@ -61,9 +61,9 @@ gantt
 
 | Cosa | Perché | Sforzo |
 |---|---|---|
-| Test per `rag.py` (78KB) | Modulo più critico, zero test | ⏰ 3-4gg |
-| Test per `tag_processor.py` | Streaming + stripping = bug subtili | ⏱️ 1-2gg |
-| Test per `prompt_builder.py` | Gatekeeper + routing = core decisione | ⏱️ 1-2gg |
+| Test per `rag/engine.py` (1974 righe) | Modulo più critico, zero test | ⏰ 3-4gg |
+| Test per `agent/tags.py` | Streaming + stripping = bug subtili | ⏱️ 1-2gg |
+| Test per `agent/prompt.py` | Gatekeeper + routing = core decisione | ⏱️ 1-2gg |
 | Test per OpenAI `/v1/*` | 25 endpoint, compatibilità con client | ⏰ 2-3gg |
 | Property-based (Hypothesis) | RAG invarianti, idempotenza persistenza | ⏰ 1-2gg |
 | CI pipeline (GitHub Actions) | `pytest` su ogni push | ⏱️ 0.5gg |
@@ -280,9 +280,9 @@ flowchart TD
 
 | Pattern tossico | Dove | Fix |
 |---|---|---|
-| `from X import *` | `rag.py` top | Import espliciti |
-| Moduli > 2000 LOC | `rag.py`, `telegram_bot.py`, `dashboard_template.py` | Split modulare |
-| Incrocio dipendenze circolari | `state.py` ↔ `rag.py` ↔ `prompt_builder.py` | Dependency injection |
+| `from X import *` | `rag/engine.py` top | Import espliciti |
+| Moduli > 2000 LOC | `rag/engine.py`, `tg_bot/bot.py`, `admin/dashboard.py` | Split modulare |
+| Incrocio dipendenze circolari | `core/state.py` ↔ `rag/engine.py` ↔ `agent/prompt.py` | Dependency injection |
 | Hardcoded path | `DATA_DIR`, `MODELS_DIR` in 5+ file | Config singleton |
 | Magic number | `512` chunk, `768` dims, `20` messaggi | Costanti nominate |
 

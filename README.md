@@ -84,11 +84,11 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| AST Chunking semantico | `rag.py` | Tree-sitter per 9 linguaggi |
+| AST Chunking semantico | `rag/engine.py` | Tree-sitter per 9 linguaggi |
 | Reranker duale | `rag_reranker.py` | Qwen3-Reranker + FlashRank fallback |
-| Watchdog real-time | `rag.py` | PollingObserver, re-embedding automatico |
+| Watchdog real-time | `rag/engine.py` | PollingObserver, re-embedding automatico |
 | Cache semantica | `rag_cache.py` | Soglia cosine 0.88 |
-| Synaptiq Engine | `synaptiq_engine.py` | Grafo strutturale, hybrid search, dead code, impact, **graph visualization con Sigma.js** |
+| Synaptiq Engine | `graph/synaptiq_engine.py` | Grafo strutturale, hybrid search, dead code, impact, **graph visualization con Sigma.js** |
 
 </details>
 
@@ -99,8 +99,8 @@ WATCHDOG_WATCH_MODE=per_project
 |---|---|---|
 | Memoria episodica | `memory.py` | Mem0 + Qdrant, metadati progetto |
 | Ricerca filtrata | `memory.py` | Per `user_id` + `project` |
-| Tag `<MEMORY>` | `tag_processor.py` | Salvataggio esplicito da risposta LLM |
-| Consolidamento notturno | `reflection_agent.py` | Episodica → profilo sintetico (3:00 UTC) |
+| Tag `<MEMORY>` | `agent/tags.py` | Salvataggio esplicito da risposta LLM |
+| Consolidamento notturno | `memory/reflection.py` | Episodica → profilo sintetico (3:00 UTC) |
 
 </details>
 
@@ -109,10 +109,10 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| LLM Gatekeeper | `prompt_builder.py` | Classifica intento (keyword+regex+LLM) |
-| Budget Allocator | `prompt_builder.py` | 55% RAG / 20% web / 10% mem / 15% tree, max 15K char |
-| Super-prompt XML | `prompt_builder.py` | 7 tag contestuali |
-| 21 tag d'azione | `tag_processor.py` | MEMORY, SCHEDULE, SSH, TODO, WEB, FILE, EXEC, COMMIT... |
+| LLM Gatekeeper | `agent/prompt.py` | Classifica intento (keyword+regex+LLM) |
+| Budget Allocator | `agent/prompt.py` | 55% RAG / 20% web / 10% mem / 15% tree, max 15K char |
+| Super-prompt XML | `agent/prompt.py` | 7 tag contestuali |
+| 21 tag d'azione | `agent/tags.py` | MEMORY, SCHEDULE, SSH, TODO, WEB, FILE, EXEC, COMMIT... |
 
 </details>
 
@@ -121,9 +121,9 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| Bot ufficiale | `telegram_bot.py` | Menu a bottoni, whitelist, admin panel |
-| Multi-Userbot | `telegram_userbot_manager.py` | Clone per utente via OTP |
-| Messaggi vocali | `telegram_bot.py` | Trascrizione faster-whisper + risposta gTTS |
+| Bot ufficiale | `tg_bot/bot.py` | Menu a bottoni, whitelist, admin panel |
+| Multi-Userbot | `tg_bot/userbot.py` | Clone per utente via OTP |
+| Messaggi vocali | `tg_bot/bot.py` | Trascrizione faster-whisper + risposta gTTS |
 
 </details>
 
@@ -132,9 +132,9 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| Tool-calling nativo | `agent_tools.py` | 5 built-in tool + skill dinamiche |
-| Conferma utente | `agent_tools.py` | Timeout 5 min per op. distruttive |
-| APScheduler | `cron_agent.py` | CronTrigger, DateTrigger, timer relativi |
+| Tool-calling nativo | `agent/tools.py` | 5 built-in tool + skill dinamiche |
+| Conferma utente | `agent/tools.py` | Timeout 5 min per op. distruttive |
+| APScheduler | `scheduler/cron.py` | CronTrigger, DateTrigger, timer relativi |
 | Task Manager | `task_manager.py` | Task persistenti con priorità e scadenze |
 
 </details>

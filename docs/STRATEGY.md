@@ -42,7 +42,7 @@ Jarvis è **100% locale** — nessuna dipendenza da provider cloud. L'unica ecce
 ## Implementazione Suggerita
 
 **Nuovi file:**
-- `jarvis/external_providers.py` — Classe base astratta `BaseProvider` + `ProviderRouter`
+- `jarvis/external/providers.py` — Classe base astratta `BaseProvider` + `ProviderRouter`
 - `jarvis/gemini_provider.py` — Implementazione Google Gemini via `google-generativeai`
 
 **Modifiche a file esistenti:**
@@ -72,6 +72,6 @@ Jarvis è **100% locale** — nessuna dipendenza da provider cloud. L'unica ecce
 | **2** | Creare `external_providers.py` con `BaseProvider` + `ProviderRouter` | Alta |
 | **3** | Creare `gemini_provider.py` con wrapper Google Generative AI | Alta |
 | **4** | Integrare `ProviderRouter` in `llm_engine.py` (fallback + selective) | Alta |
-| **5** | Aggiungere routing selettivo in `prompt_builder.py` (web knowledge) | Media |
+| **5** | Aggiungere routing selettivo in `agent/prompt.py` (web knowledge) | Media |
 | **6** | Aggiungere supporto multimodale (immagini in input) | Media |
 | **7** | Documentare strategia e privacy nella configurazione | Bassa |
