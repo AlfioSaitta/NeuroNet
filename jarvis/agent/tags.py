@@ -866,6 +866,56 @@ class TagSafeStream:
 # ======================================================================
 
 
+async def _execute_tag_handlers(
+    tag: TagDef,
+    text: str,
+    context: TagContext,
+    feedback: list[str],
+) -> list[tuple[int, int, str]]:
+    """
+    Processa TUTTI i match di un singolo tag nel testo.
+    
+    Per ogni match:
+      1. Estrae contenuto (o stringa vuota per auto-chiudenti)
+      2. Se handler presente: lo esegue, accumula feedback
+      3. Segna lo span per la rimozione (se visibility lo richiede)
+    
+    Returns:
+        Lista di (start, end, replacement) da applicare al testo.
+    """
+    replacements: list[tuple[int, int, str]] = []
+    for match in tag.pattern.finditer(text):
+        content = match.group(1) if not tag.is_self_closing else ""
+        start, end = match.start(), match.end()
+
+        if tag.handler:
+            try:
+                msg = await tag.handler(tag, content, context)
+                if msg and tag.visibility == "action":
+                    feedback.append(msg)
+            except Exception as e:
+                from core.config import logger
+                logger.warning(f"⚠️ Tag handler {tag.name} error: {e}")
+
+        if tag.visibility in ("hidden", "action"):
+            replacements.append((start, end, ""))
+
+    return replacements
+
+
+def _apply_replacements(text: str, replacements: list[tuple[int, int, str]]) -> str:
+    """
+    Applica sostituzioni (start, end, replacement) dalla fine all'inizio
+    per non invalidare gli offset durante l'applicazione.
+    """
+    if not replacements:
+        return text
+    replacements.sort(key=lambda x: -x[0])
+    for start, end, replacement in replacements:
+        text = text[:start] + replacement + text[end:]
+    return text
+
+
 async def process_all_tags(
     text: str,
     context: Optional[TagContext] = None,
@@ -903,38 +953,19 @@ async def process_all_tags(
     # Step 1: Pulisci blocchi di thinking/reasoning (ora model-aware)
     text = strip_thinking_blocks(text, model_family=model_family)
 
-    # Step 2: Estrai e processa tutti i tag
+    # Step 2: Estrai e processa tutti i tag del registro
     feedback: list[str] = []
-    # Lavoriamo su una copia del testo per l'estrazione, ma le sostituzioni
-    # le facciamo progressivamente per evitare conflitti di span
-    processed = text
-    replacements: list[tuple[int, int, str]] = []  # (start, end, replacement)
+    all_replacements: list[tuple[int, int, str]] = []
 
     for tag in _TAG_REGISTRY.values():
-        for match in tag.pattern.finditer(processed):
-            content = match.group(1) if not tag.is_self_closing else ""
-            start, end = match.start(), match.end()
-
-            if tag.handler:
-                try:
-                    msg = await tag.handler(tag, content, context)
-                    if msg and tag.visibility == "action":
-                        feedback.append(msg)
-                except Exception as e:
-                    from core.config import logger
-                    logger.warning(f"⚠️ Tag handler {tag.name} error: {e}")
-
-            # Segna per la rimozione
-            if tag.visibility in ("hidden", "action"):
-                replacements.append((start, end, ""))
+        tag_replacements = await _execute_tag_handlers(tag, text, context, feedback)
+        all_replacements.extend(tag_replacements)
 
     # Step 3: Applica le sostituzioni (dalla fine all'inizio per non invalidare gli offset)
-    replacements.sort(key=lambda x: -x[0])
-    for start, end, replacement in replacements:
-        processed = processed[:start] + replacement + processed[end:]
+    text = _apply_replacements(text, all_replacements)
 
     # Step 4: Pulisci spazi multipli residui
-    cleaned = re.sub(r'\s+', ' ', processed).strip()
+    cleaned = re.sub(r'\s+', ' ', text).strip()
 
     return cleaned, feedback
 
