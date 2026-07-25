@@ -30,11 +30,11 @@ from core.telemetry import PipelineTracer, GatekeeperStats
 import core.state as state
 
 # ════════════════════════════════════════════════════════════════
-# FUNZIONE DI CONTESTO TEMPORALE
+# CONTESTO TEMPORALE
 # ════════════════════════════════════════════════════════════════
 
 def _datetime_context() -> str:
-    """Restituisce una stringa formattata con data/ora correnti e timezone locale."""
+    """Current date/time string with timezone for LLM context injection."""
     now = datetime.datetime.now()
     return (
         f"Current date and time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}. "
@@ -135,6 +135,10 @@ CAVEMAN_GEMMA_SYSTEM_ADDENDUM = (
 )
 
 
+# ════════════════════════════════════════════════════════════════
+# FUNZIONI DI SUPPORTO (estratte da build_omniscient_prompt)
+# ════════════════════════════════════════════════════════════════
+
 async def _keyword_bypass(user_message: str, context: dict) -> GatekeeperResult | None:
     """STEP 1: Fast path bypass — 0 LLM calls.
 
@@ -189,62 +193,24 @@ def _record_gatekeeper_stats(intent: str, confidence: float, bypassed: bool, pro
         logger.warning(f"Errore aggiornamento gatekeeper_stats: {exc}")
 
 
-async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False, request_id=None, finalize_trace: bool = True, user=None):
+# ────────────────────────────────────────────────────────────────
+# Helper: inject datetime into messages
+# ────────────────────────────────────────────────────────────────
+
+def _inject_datetime(messages) -> str:
+    """Truncate history, inject current datetime as system + user message.
+
+    Returns _dt_now string for downstream use.
     """
-    Pipeline di arricchimento a 4 step con Caveman Compression.
-
-    FLUSSO:
-      STEP 1: Keyword Bypass (regex, 0 LLM)
-      STEP 2: Qwen3.5 Gatekeeper (CPU, classificazione intento)
-      STEP 3: Qwen3.5 Caveman Compression (CPU, comprime RAG+history+query)
-      STEP 4: Gemma 4 (GPU) → risposta caveman
-
-    Se concise=True, salta RAG/memoria/web e usa compressed prompt minimo.
-
-    Args:
-        request_id: Se fornito, riusa un PipelineTracer esistente (da main.py).
-                    Altrimenti ne crea uno nuovo internamente.
-        finalize_trace: Se True (default), chiama tracer.finish() prima di tornare.
-                        Se False, lascia il tracer aperto per uso esterno (MCP chat_send).
-    """
-    user_messages = [m["content"] for m in messages if m["role"] == "user"]
-    latest_msg = user_messages[-1] if user_messages else ""
-    if not latest_msg:
-        if request_id:
-            tracer = PipelineTracer.get(request_id)
-            if tracer:
-                tracer.step("build_omniscient_prompt", status="skipped", details={"reason": "empty_message"})
-                if finalize_trace:
-                    tracer.finish()
-        return messages
-
-    # ── Pipeline Telemetry ──
-    current_user_id = user_id if user_id else "alfio_dev"
-    tracer: PipelineTracer | None = None
-    if request_id:
-        tracer = PipelineTracer.get(request_id)
-    if tracer is None:
-        tracer = PipelineTracer.begin(user_message=latest_msg, user_id=current_user_id)
-    tracer.start_step("prompt_preprocessing")
-
+    # Truncate
     if len(messages) > 20:
-        messages = messages[-20:]
-
+        messages[:] = messages[-20:]  # mutate in place
     for m in messages[:-1]:
         if m.get("content") and len(m["content"]) > 1500:
             m["content"] = m["content"][:1500] + "\n...[TRUNCATED FOR CONTEXT LIMIT]..."
 
-    # Inietta data/ora corrente in OGNI richiesta — il modello ignora i system message
-    # perché ha un prior training forte ("non conosco l'ora"). Per forzare la
-    # cognizione temporale, la data/ora viene iniettata sia come system message
-    # (tracciabilità storica) sia nel contenuto dell'ultimo user message (certezza
-    # di lettura). I path che sostituiscono user_content (concise/full/meta) hanno
-    # la data/ora già nel system prompt.
     _dt_now = _datetime_context()
     messages.insert(0, {"role": "system", "content": _dt_now})
-    # Inietta anche nell'ultimo messaggio utente — il modello LO LEGGE SEMPRE.
-    # Il formato [CURRENT DATETIME — YOU MUST USE THIS: ...] contraddice
-    # esplicitamente il training prior del LLM ("non so che ora è").
     for _i in range(len(messages) - 1, -1, -1):
         if messages[_i]["role"] == "user":
             messages[_i]["content"] = (
@@ -252,348 +218,50 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 f"{messages[_i]['content']}"
             )
             break
+    return _dt_now
 
-    tracer.end_step("prompt_preprocessing", details={"msg_len": len(latest_msg), "history_len": len(messages)})
 
-    # ── MODALITÀ CONCISE: compressione minima, skip RAG/memoria/web ──
-    if concise:
-        tracer.start_step("concise_pipeline")
-        _, clean_msg = await perform_web_search_and_crawl(latest_msg)
-        if state.memory:
-            try:
-                async def _bg_add_concise():
-                    await save_to_memory(clean_msg, user_id=current_user_id)
-                task = asyncio.create_task(_bg_add_concise())
-                state.background_tasks.add(task)
-                task.add_done_callback(state.background_tasks.discard)
-            except Exception:
-                pass
-        # Saluti in concise: messaggio originale, niente caveman
-        if PURE_GREETING.match(clean_msg.strip().lower()):
-            logger.info("🗣️ Concise + saluto: skip caveman compression")
-            tracer.end_step("concise_pipeline", status="skipped", details={"reason": "greeting"})
-            if finalize_trace:
-                tracer.finish()
-            return messages
-        # Compressione caveman anche in modalità concise
-        compressed = await engine.compress_prompt(
-            user_query=clean_msg,
-            rag_context="",
-            history="",
-            active_project=None,
-        )
-        comp_ok = bool(compressed and len(compressed) >= 20)
-        tracer.add_llm_call(compressed._as_llm_record("caveman_compression") if hasattr(compressed, '_as_llm_record') else
-                            __import__('telemetry', fromlist=['LlmCallRecord']).LlmCallRecord(
-                                model="gatekeeper", step="caveman_compression",
-                                duration_ms=0, temperature=0.0))
-        # Se la compressione fallisce (output troppo corto o errore), usa raw
-        if not compressed or len(compressed) < 20:
-            logger.warning("⚠️ Caveman compress fallita in concise mode, fallback raw")
-            user_content = f"Query: {clean_msg}"
-            tracer.end_step("concise_pipeline", status="error", details={"fallback": "raw", "comp_len": len(compressed) if compressed else 0})
-        else:
-            user_content = compressed
-            tracer.end_step("concise_pipeline", details={"comp_len": len(compressed)})
-        # System prompt in messaggio system, non nella user query — previene echo
-        system_prompt = (
-            f"[{_datetime_context()}]\n\n"
-            + CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
-        )
-        messages.append({"role": "system", "content": system_prompt})
-        for m in reversed(messages):
-            if m["role"] == "user":
-                m["content"] = user_content
-                break
-        # Cattura prompt testuali sul tracer
-        tracer.set_system_prompt(system_prompt)
-        tracer.set_user_content(user_content)
-        if not PURE_GREETING.match(clean_msg.strip().lower()):
-            tracer.set_compressed_text(compressed if isinstance(compressed, str) else str(compressed))
-        if finalize_trace:
-            tracer.finish()
-        return messages
+# ────────────────────────────────────────────────────────────────
+# Helper: parse <PERSONA>, <FOCUS>, <LANG>, <MEMORY_COUNT> tags
+# ────────────────────────────────────────────────────────────────
 
-    # ════════════════════════════════════════════════════════════════
-    # CONTEXT GATHERING (invariato rispetto a prima)
-    # ════════════════════════════════════════════════════════════════
-    web_ctx, clean_msg = await perform_web_search_and_crawl(latest_msg)
-    mem_ctx, rag_ctx = "", ""
+def _parse_super_tags(msg: str) -> tuple[str, dict]:
+    """Extract super-prompt tags from user message. Returns (clean_msg, overrides_dict).
 
-    # Super-prompt tag preprocessing
-    _user_override_persona = ""
-    _user_override_focus = ""
-    _user_override_lang = ""
-    _user_override_mem_count = 0
-    _super_tag_re = re.compile(r"<(PERSONA|FOCUS|LANG|MEMORY_COUNT)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
-    for match in _super_tag_re.finditer(latest_msg):
+    overrides_dict keys: persona, focus, lang, mem_count (int, default 0)
+    """
+    overrides = {
+        "persona": "",
+        "focus": "",
+        "lang": "",
+        "mem_count": 0,
+    }
+    tag_re = re.compile(r"<(PERSONA|FOCUS|LANG|MEMORY_COUNT)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+    for match in tag_re.finditer(msg):
         tag_name = match.group(1).upper()
-        _ = match.group(2)
         tag_content = match.group(3).strip()
         if tag_name == "PERSONA":
-            _user_override_persona = tag_content
+            overrides["persona"] = tag_content
         elif tag_name == "FOCUS":
-            _user_override_focus = tag_content
+            overrides["focus"] = tag_content
         elif tag_name == "LANG":
-            _user_override_lang = tag_content
+            overrides["lang"] = tag_content
         elif tag_name == "MEMORY_COUNT":
             try:
-                _user_override_mem_count = max(0, int(tag_content))
+                overrides["mem_count"] = max(0, int(tag_content))
             except ValueError:
                 pass
-    if _super_tag_re.search(latest_msg):
-        latest_msg = _super_tag_re.sub("", latest_msg).strip()
+    if tag_re.search(msg):
+        msg = tag_re.sub("", msg).strip()
+    return msg, overrides
 
-    # ── BUILD GATEKEEPER CONTEXT ──
-    _active_before = state.get_last_project(current_user_id, conversation_id)
-    _all_projects = await list_rag_projects(user=user)
-    _recent_user_msgs = [m["content"] for m in messages if m["role"] == "user"][-3:]
-    
-    # ════════════════════════════════════════════════════════════════
-    # STEP 1: KEYWORD BYPASS (0 LLM calls)
-    # ════════════════════════════════════════════════════════════════
-    _gk_context = {
-        "active_project": _active_before,
-        "projects_available": _all_projects,
-        "recent_messages": _recent_user_msgs,
-    }
-    tracer.start_step("keyword_bypass")
-    gk = await _keyword_bypass(latest_msg, _gk_context)
-    _bypassed = gk is not None
-    if _bypassed:
-        tracer.end_step("keyword_bypass", details={"bypassed": True, "intent": gk.intent, "project": gk.project})
-    else:
-        tracer.end_step("keyword_bypass", details={"bypassed": False})
-    
-    # ════════════════════════════════════════════════════════════════
-    # STEP 2: QWEN3.5 GATEKEEPER (solo se bypass fallisce)
-    # ════════════════════════════════════════════════════════════════
-    if gk is None:
-        tracer.start_step("gatekeeper_llm")
-        gk = await _run_gatekeeper(latest_msg, _gk_context)
-        tracer.end_step("gatekeeper_llm", details={"intent": gk.intent, "project": gk.project, "confidence": gk.confidence})
-    
-    # Registra risultato gatekeeper nel tracer e nelle stats
-    tracer.set_gatekeeper(intent=gk.intent, project=gk.project, confidence=gk.confidence, bypassed=_bypassed)
-    tracer._gatekeeper_model = "bypass" if _bypassed else "qwen"
-    _record_gatekeeper_stats(gk.intent, gk.confidence, _bypassed, gk.project)
-    
-    # ── ROUTING: project / meta / general ──
-    active_project: str | None = None
-    _is_project_query: bool = False
-    _is_meta_query: bool = False
-    
-    if gk.intent == "meta":
-        _is_meta_query = True
-        if _all_projects:
-            rag_ctx = "📚 Progetti indicizzati nel RAG:\n" + "\n".join(f"- {p}" for p in _all_projects)
-        logger.info("🗂️ Gatekeeper META: lista progetti, contesto progetto saltato")
-    
-    elif gk.intent == "project":
-        _is_project_query = True
-        if gk.project and gk.project in _all_projects:
-            active_project = gk.project
-        else:
-            active_project = await detect_project_in_conversation(user_messages)
-        if not active_project:
-            active_project = state.get_last_project(current_user_id, conversation_id)
-            if active_project:
-                logger.info(f"📁 Progetto ripristinato dal contesto: {active_project}")
-        if active_project:
-            logger.info(f"📁 Progetto attivo: {active_project}")
-            state.set_last_project(current_user_id, conversation_id, active_project)
 
-    # Salva in memoria e recupera memorie
-    if state.memory:
-        try:
-            async def _bg_add():
-                await save_to_memory(clean_msg, user_id=current_user_id, project=active_project)
-            task = asyncio.create_task(_bg_add())
-            state.background_tasks.add(task)
-            task.add_done_callback(state.background_tasks.discard)
-        except Exception as e:
-            logger.warning(f"Errore memory add: {e}")
+# ────────────────────────────────────────────────────────────────
+# Helper: compute Max budget for compression
+# ────────────────────────────────────────────────────────────────
 
-    # ════════════════════════════════════════════════════════════════
-    # GENERAL INTENT: skip RAG/memoria pesante/caveman — usa messaggio originale
-    # ════════════════════════════════════════════════════════════════
-    # Per intento general (saluti, conversazione, ringraziamenti) il sistema
-    # deve comportarsi naturalmente, NON in stile caveman. La compressione
-    # [CONTEXT]/[USER_QUERY]/[INSTRUCTION] + caveman system prompt inibisce
-    # le risposte conversazionali (es. "Salve" → risponde con istruzioni).
-    if gk.intent == "general":
-        logger.info(f"🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
-        tracer.step("context_gathering", status="skipped", details={"reason": "general_intent"})
-        tracer.step("caveman_compression", status="skipped", details={"reason": "general_intent"})
-        if finalize_trace:
-            tracer.finish()
-        return messages
-
-    # ════════════════════════════════════════════════════════════════
-    # META INTENT: skip caveman compression — risposta conversazionale
-    # ════════════════════════════════════════════════════════════════
-    # Per intento meta (lista progetti, capacità, chi sei) il sistema deve
-    # rispondere in modo naturale, non in stile caveman. Includiamo la
-    # lista progetti nel messaggio utente così Gemma 4 risponde
-    # conversazionalmente.
-    if gk.intent == "meta":
-        logger.info(f"🗂️ Intento META: skip caveman compression, risposta conversazionale")
-        meta_context = "\n".join(f"- {p}" for p in _all_projects) if _all_projects else "Nessun progetto indicizzato."
-        meta_prompt = f"[CURRENT DATETIME — YOU MUST USE THIS: {_dt_now}]\n\nProgetti disponibili:\n{meta_context}\n\nDomanda: {clean_msg}"
-        for m in reversed(messages):
-            if m["role"] == "user":
-                m["content"] = meta_prompt
-                break
-        tracer.set_user_content(meta_prompt)
-        tracer.step("context_gathering", status="skipped", details={"reason": "meta_intent"})
-        tracer.step("caveman_compression", status="skipped", details={"reason": "meta_intent"})
-        if finalize_trace:
-            tracer.finish()
-        return messages
-
-    # ════════════════════════════════════════════════════════════════
-    # CONTEXT GATHERING: Memoria + RAG + Synaptiq (parallelo) + Web
-    # ════════════════════════════════════════════════════════════════
-    tracer.start_step("context_gathering")
-
-    # ── Raccolta Memoria (indipendente) ──
-    async def _gather_memory():
-        if not state.memory:
-            return ""
-        try:
-            loop = asyncio.get_running_loop()
-            _mem_limit = _user_override_mem_count if _user_override_mem_count > 0 else 5
-            memory_results = []
-
-            gen_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id}, limit=_mem_limit)
-            gen_res = await loop.run_in_executor(state.mem0_executor, gen_search)
-            if gen_res:
-                memory_results.append(gen_res)
-
-            if active_project:
-                proj_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id, "project": active_project}, limit=_mem_limit)
-                proj_res = await loop.run_in_executor(state.mem0_executor, proj_search)
-                if proj_res:
-                    memory_results.append(proj_res)
-
-            all_memories = []
-            if isinstance(memory_results, list):
-                for r in memory_results:
-                    extracted = extract_memories(r)
-                    if extracted:
-                        all_memories.append(extracted)
-            return "\n".join(all_memories) if all_memories else ""
-        except Exception as e:
-            logger.warning(f"Errore memory search: {e}")
-            return ""
-
-    # ── Raccolta RAG (indipendente) ──
-    async def _gather_rag():
-        if latest_msg.startswith("/web "):
-            return ""
-        full_files_content = ""
-        if _is_project_query:
-            matches = set(re.findall(r'\b([\w\.\-/]+\.(?:py|js|ts|jsx|tsx|go|c|cpp|h|hpp|rs|sql|yaml|yml|md|json))\b', latest_msg))
-            if matches:
-                filt = GitignoreFilter(DOC_DIR)
-                for match in matches:
-                    filename_only = match.split('/')[-1]
-                    for root, dirs, files in os.walk(DOC_DIR):
-                        dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', 'venv', 'vendor')]
-                        if filename_only in files:
-                            fp = os.path.join(root, filename_only)
-                            rp = os.path.relpath(fp, DOC_DIR)
-                            if not filt.is_ignored(rp):
-                                if match in rp or match == filename_only:
-                                    try:
-                                        with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                                            fc = f.read()
-                                            full_files_content += f"\n\n📄 FILE COMPLETO RICHIESTO ({rp}):\n```\n{fc}\n```\n"
-                                    except Exception as e:
-                                        logger.warning(f"Errore silenziato: {e}")
-
-        if not _is_meta_query:
-            _rag_project = _user_override_focus if _user_override_focus else active_project
-            rag_ctx_local = await search_documents(clean_msg, is_project_query=_is_project_query, project_name=_rag_project, user=user)
-        else:
-            rag_ctx_local = ""
-        if full_files_content:
-            rag_ctx_local = full_files_content + "\n" + rag_ctx_local
-        return rag_ctx_local
-
-    # ── Raccolta Synaptiq (indipendente) ──
-    async def _gather_synaptiq():
-        if latest_msg.startswith("/web "):
-            return ""
-        if not (_is_project_query and synaptiq_engine and synaptiq_engine.is_initialized):
-            return ""
-        try:
-            sy_raw = await synaptiq_engine.pack_snippets(clean_msg, limit=8)
-            if sy_raw and len(sy_raw) > 100:
-                logger.info(f"🧠 Synaptiq context: {len(sy_raw)} chars")
-                return f"\n<SYNAPTIQ>\n{sy_raw[:3000]}\n</SYNAPTIQ>\n"
-        except Exception as e:
-            logger.debug(f"Synaptiq explore non disponibile: {e}")
-        return ""
-
-    # Esegui memoria, RAG e Synaptiq in parallelo
-    mem_task = asyncio.create_task(_gather_memory())
-    rag_task = asyncio.create_task(_gather_rag())
-    synaptiq_task = asyncio.create_task(_gather_synaptiq())
-    mem_ctx, rag_ctx, cg_ctx = await asyncio.gather(mem_task, rag_task, synaptiq_task)
-
-    # Auto web discovery (dipende da rag_ctx → non parallelizzabile con RAG)
-    _is_short_greeting = len(clean_msg.strip()) < 20 and not _is_project_query
-    if not _is_short_greeting and not rag_ctx.strip() and not web_ctx:
-        search_query = clean_msg
-        if _is_project_query and active_project and active_project not in search_query:
-            search_query = f"{active_project} {search_query}"
-        web_knowledge_ctx = await search_web_knowledge(search_query)
-        if web_knowledge_ctx:
-            web_ctx = web_knowledge_ctx
-            logger.info(f"🌐 Web knowledge cache HIT: '{clean_msg[:60]}...'")
-        else:
-            web_search_ctx, _ = await perform_web_search_and_crawl(latest_msg, force=True)
-            if web_search_ctx and web_search_ctx != "Nessun risultato online.":
-                sources = []
-                for line in web_search_ctx.split("\n"):
-                    if line.startswith("URL: "):
-                        sources.append(line[5:])
-                await save_web_knowledge(search_query, web_search_ctx, sources)
-                web_ctx = web_search_ctx
-                tag = f" [progetto: {active_project}]" if active_project else ""
-                logger.info(f"🌐 Auto web discovery: ricercato e salvato '{clean_msg[:60]}...'{tag}")
-                async def _bg_save_web():
-                    summary = f"[Web Knowledge] Query: {clean_msg[:200]}\nFonti: {', '.join(sources[:3])}\nRisultati: {web_search_ctx[:600]}"
-                    await save_to_memory(summary, user_id=current_user_id, project=active_project)
-                task = asyncio.create_task(_bg_save_web())
-                state.background_tasks.add(task)
-                task.add_done_callback(state.background_tasks.discard)
-
-    # Log contesto raccolto
-    ctx_details = {
-        "rag_len": len(rag_ctx) if rag_ctx else 0,
-        "mem_len": len(mem_ctx) if mem_ctx else 0,
-        "web_len": len(web_ctx) if web_ctx else 0,
-        "project": active_project,
-    }
-    tracer.end_step("context_gathering", details=ctx_details)
-
-    # ── Popola tracer con dati contesto ──
-    _rag_project = (_user_override_focus if _user_override_focus else active_project) if _is_project_query else None
-    tracer._rag_ctx_len = len(rag_ctx) if rag_ctx else 0
-    tracer._rag_project = _rag_project
-    tracer._memory_records = len(mem_ctx.split("\n")) if mem_ctx else 0
-    tracer._web_search_performed = bool(web_ctx)
-    tracer._synaptiq_performed = bool(cg_ctx)
-    tracer._synaptiq_chars = len(cg_ctx) if cg_ctx else 0
-
-    # ════════════════════════════════════════════════════════════════
-    # STEP 3: QWEN3.5 CAVEMAN PROMPT COMPRESSION (solo project/meta)
-    # ════════════════════════════════════════════════════════════════
-    tracer.start_step("caveman_compression")
-
-    # Budget dinamico del contesto per il materiale raw da comprimere
+def _compute_max_budget() -> int:
+    """Calcola il budget massimo di caratteri per il contesto compresso."""
     num_ctx = int(LLM_OPTIONS.get("num_ctx", MODEL_PROFILE.default_ctx))
     if num_ctx > MODEL_PROFILE.max_ctx:
         num_ctx = MODEL_PROFILE.max_ctx
@@ -603,7 +271,23 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         MAX_BUDGET = 15000
     elif MAX_BUDGET < 4000:
         MAX_BUDGET = 4000
+    return MAX_BUDGET
 
+
+# ────────────────────────────────────────────────────────────────
+# Helper: allocate budget across context sources
+# ────────────────────────────────────────────────────────────────
+
+def _allocate_budget(
+    rag_ctx: str, web_ctx: str, mem_ctx: str, cg_ctx: str,
+    active_project: str | None, MAX_BUDGET: int,
+    recent_user_msgs: list[str], user_id: str | None,
+) -> tuple[str, str, str, str, str, str, str, int]:
+    """Distribuisce il budget tra RAG, tree, web, memory, tasks.
+
+    Returns (rag_final, tree_ctx, web_final, mem_final, tasks_final,
+             history_str, rag_context_for_compress, raw_size).
+    """
     rag_budget = int(MAX_BUDGET * 0.55)
     rag_final = rag_ctx.strip()[:rag_budget] if rag_ctx and rag_ctx.strip() else ""
 
@@ -639,12 +323,11 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             t_type = "Progetto" if v.get("owner", "global") == "global" else "Personale"
             tasks_final += f"- [{k}] [{t_type}] {v['desc']} (Prio: {v['priority']}, Scad: {v['deadline']})\n"
 
-    # Nuova history string per il compressore
-    history_str = " | ".join(_recent_user_msgs) if _recent_user_msgs else ""
+    history_str = " | ".join(recent_user_msgs) if recent_user_msgs else ""
     if tasks_final:
         history_str = (history_str + "\n" + tasks_final) if history_str else tasks_final
 
-    # Assembla il contesto raw per il compressore
+    # Assemble context for compressor
     rag_context_for_compress = rag_final
     if tree_ctx:
         rag_context_for_compress = tree_ctx + "\n" + rag_context_for_compress if rag_context_for_compress else tree_ctx
@@ -655,9 +338,25 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     if cg_ctx:
         rag_context_for_compress = rag_context_for_compress + "\n" + cg_ctx if rag_context_for_compress else cg_ctx
 
-    raw_size = len(rag_context_for_compress) + len(history_str) + len(clean_msg)
+    raw_size = 0  # Caller recalculates with clean_msg
 
-    # Esegue la compressione caveman su Qwen3.5 (CPU)
+    return (rag_final, tree_ctx, web_final, mem_final, tasks_final,
+            history_str, rag_context_for_compress, raw_size)
+
+
+# ────────────────────────────────────────────────────────────────
+# Helper: caveman compression with fallback
+# ────────────────────────────────────────────────────────────────
+
+async def _run_compression(
+    clean_msg: str, rag_context_for_compress: str, history_str: str,
+    active_project: str | None, mem_final: str, tasks_final: str,
+    rag_final: str, web_final: str,
+) -> tuple[str, bool]:
+    """Compress context via Qwen3.5 caveman, fall back to raw labels on failure.
+
+    Returns (compressed_text, is_raw_fallback).
+    """
     compressed = await engine.compress_prompt(
         user_query=clean_msg,
         rag_context=rag_context_for_compress,
@@ -665,12 +364,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         active_project=active_project,
     )
 
-    # Se la compressione fallisce (Qwen3.5 non caricato o errore),
-    # usa fallback raw limitato
-    _compression_is_raw = False
+    is_raw = False
     if not compressed or len(compressed) < 20:
         logger.warning("⚠️ Caveman compression fallita, uso fallback raw")
-        _compression_is_raw = True
+        is_raw = True
         fallback_parts = []
         if mem_final:
             fallback_parts.append(f"Memory: {mem_final[:500]}")
@@ -685,32 +382,29 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         fallback_parts.append(f"Query: {clean_msg}")
         compressed = "\n".join(fallback_parts)[:4096]
 
-    # Rileva fallback raw da compress_prompt (quando ratio≤0 restituisce raw_data)
     if compressed.startswith("[PROJECT:") or compressed.startswith("[RAG_CONTEXT]"):
-        _compression_is_raw = True
+        is_raw = True
         logger.warning("⚠️ Caveman compression fallback raw (raw_data labels)")
 
-    comp_details = {
-        "raw_size": raw_size,
-        "comp_size": len(compressed),
-        "is_raw_fallback": _compression_is_raw,
-        "budget": MAX_BUDGET,
-    }
-    tracer.end_step("caveman_compression", details=comp_details)
-    tracer._compression_raw_size = raw_size
-    tracer._compression_is_raw = _compression_is_raw
+    return compressed, is_raw
 
-    # ════════════════════════════════════════════════════════════════
-    # STEP 4: BUILD GEMMA 4 PROMPT
-    # ════════════════════════════════════════════════════════════════
-    tracer.start_step("build_prompt")
-    # Se la compressione è fallata (raw fallback), usa system prompt
-    # conversazionale — evita che Gemma 4 echeggi le etichette raw
-    # (es. "PROJECT: SlotBuilder. CONTEXT: ... INSTRUCTION: ...").
-    # Se la compressione è riuscita, usa system prompt caveman per codice diretto.
-    # System prompt in messaggio system, non nella user query — previene echo
+
+# ────────────────────────────────────────────────────────────────
+# Helper: build final Gemma 4 prompt
+# ────────────────────────────────────────────────────────────────
+
+def _build_final_prompt(
+    compressed: str, is_raw: bool, messages: list,
+    _dt_now: str, mem_ctx: str, rag_final: str, web_ctx: str,
+    cg_ctx: str, tracer: PipelineTracer,
+) -> list:
+    """Build system prompt + user content from compressed context.
+
+    Mutates messages in-place (appends system prompt, replaces user content).
+    Returns messages for convenience.
+    """
     _dt = _datetime_context()
-    if _compression_is_raw:
+    if is_raw:
         system_prompt = (
             f"[{_dt}]\n\n"
             "You are Jarvis, a helpful coding assistant with access to project context.\n"
@@ -738,29 +432,392 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         user_content = compressed
 
     messages.append({"role": "system", "content": system_prompt})
-
     for m in reversed(messages):
         if m["role"] == "user":
             m["content"] = user_content
             break
 
-    # Cattura prompt testuali sul tracer per debug
+    # Tracer
     tracer.set_system_prompt(system_prompt)
     tracer.set_user_content(user_content)
     tracer.set_compressed_text(str(compressed) if compressed else "")
-    # RAG context: assembled context from all sources
     _rag_ctx_combined = (
-        f"[MEMORY]\n{mem_ctx}\n\n" if mem_ctx else ""
-    ) + (
-        f"[RAG]\n{rag_final}\n\n" if rag_ctx else ""
-    ) + (
-        f"[WEB]\n{web_ctx}\n\n" if web_ctx else ""
-    ) + (
-        f"[SYNAPTIQ]\n{cg_ctx}\n\n" if cg_ctx else ""
+        (f"[MEMORY]\n{mem_ctx}\n\n" if mem_ctx else "")
+        + (f"[RAG]\n{rag_final}\n\n" if rag_final else "")
+        + (f"[WEB]\n{web_ctx}\n\n" if web_ctx else "")
+        + (f"[SYNAPTIQ]\n{cg_ctx}\n\n" if cg_ctx else "")
     )
     tracer.set_rag_context(_rag_ctx_combined.strip())
+    return messages
 
-    tracer.end_step("build_prompt", details={"system_prompt_len": len(system_prompt), "user_content_len": len(user_content)})
+
+# ════════════════════════════════════════════════════════════════
+# BUILD OMNISCIENT PROMPT (orchestrator)
+# ════════════════════════════════════════════════════════════════
+
+async def build_omniscient_prompt(messages, user_id=None, conversation_id="default", concise=False, request_id=None, finalize_trace: bool = True, user=None):
+    """
+    Pipeline di arricchimento a 4 step con Caveman Compression.
+
+    FLUSSO:
+      STEP 1: Keyword Bypass (regex, 0 LLM)
+      STEP 2: Qwen3.5 Gatekeeper (CPU, classificazione intento)
+      STEP 3: Qwen3.5 Caveman Compression (CPU, comprime RAG+history+query)
+      STEP 4: Gemma 4 (GPU) → risposta caveman
+
+    Se concise=True, salta RAG/memoria/web e usa compressed prompt minimo.
+
+    Args:
+        request_id: Se fornito, riusa un PipelineTracer esistente (da main.py).
+                    Altrimenti ne crea uno nuovo internamente.
+        finalize_trace: Se True (default), chiama tracer.finish() prima di tornare.
+                        Se False, lascia il tracer aperto per uso esterno (MCP chat_send).
+    """
+    # ── Extract latest message and setup tracer ──
+    user_messages = [m["content"] for m in messages if m["role"] == "user"]
+    latest_msg = user_messages[-1] if user_messages else ""
+    if not latest_msg:
+        if request_id:
+            tracer = PipelineTracer.get(request_id)
+            if tracer:
+                tracer.step("build_omniscient_prompt", status="skipped", details={"reason": "empty_message"})
+                if finalize_trace:
+                    tracer.finish()
+        return messages
+
+    current_user_id = user_id if user_id else "alfio_dev"
+    tracer: PipelineTracer | None = None
+    if request_id:
+        tracer = PipelineTracer.get(request_id)
+    if tracer is None:
+        tracer = PipelineTracer.begin(user_message=latest_msg, user_id=current_user_id)
+    tracer.start_step("prompt_preprocessing")
+
+    # ── Inject datetime, truncate history ──
+    _dt_now = _inject_datetime(messages)
+
+    tracer.end_step("prompt_preprocessing", details={"msg_len": len(latest_msg), "history_len": len(messages)})
+
+    # ════════════════════════════════════════════════════
+    # CONCISE MODE
+    # ════════════════════════════════════════════════════
+    if concise:
+        tracer.start_step("concise_pipeline")
+        _, clean_msg = await perform_web_search_and_crawl(latest_msg)
+        if state.memory:
+            try:
+                async def _bg_add_concise():
+                    await save_to_memory(clean_msg, user_id=current_user_id)
+                task = asyncio.create_task(_bg_add_concise())
+                state.background_tasks.add(task)
+                task.add_done_callback(state.background_tasks.discard)
+            except Exception:
+                pass
+        if PURE_GREETING.match(clean_msg.strip().lower()):
+            logger.info("🗣️ Concise + saluto: skip caveman compression")
+            tracer.end_step("concise_pipeline", status="skipped", details={"reason": "greeting"})
+            if finalize_trace:
+                tracer.finish()
+            return messages
+
+        compressed = await engine.compress_prompt(
+            user_query=clean_msg, rag_context="", history="", active_project=None,
+        )
+        tracer.add_llm_call(
+            compressed._as_llm_record("caveman_compression") if hasattr(compressed, '_as_llm_record') else
+            __import__('telemetry', fromlist=['LlmCallRecord']).LlmCallRecord(
+                model="gatekeeper", step="caveman_compression", duration_ms=0, temperature=0.0
+            )
+        )
+        if not compressed or len(compressed) < 20:
+            logger.warning("⚠️ Caveman compress fallita in concise mode, fallback raw")
+            user_content = f"Query: {clean_msg}"
+            tracer.end_step("concise_pipeline", status="error", details={"fallback": "raw", "comp_len": len(compressed) if compressed else 0})
+        else:
+            user_content = compressed
+            tracer.end_step("concise_pipeline", details={"comp_len": len(compressed)})
+        system_prompt = f"[{_datetime_context()}]\n\n" + CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
+        messages.append({"role": "system", "content": system_prompt})
+        for m in reversed(messages):
+            if m["role"] == "user":
+                m["content"] = user_content
+                break
+        tracer.set_system_prompt(system_prompt)
+        tracer.set_user_content(user_content)
+        if not PURE_GREETING.match(clean_msg.strip().lower()):
+            tracer.set_compressed_text(compressed if isinstance(compressed, str) else str(compressed))
+        if finalize_trace:
+            tracer.finish()
+        return messages
+
+    # ════════════════════════════════════════════════════
+    # WEB SEARCH + SUPER TAG PARSING
+    # ════════════════════════════════════════════════════
+    web_ctx, clean_msg = await perform_web_search_and_crawl(latest_msg)
+    mem_ctx, rag_ctx = "", ""
+    latest_msg, user_overrides = _parse_super_tags(latest_msg)
+    _user_override_persona = user_overrides.get("persona", "")
+    _user_override_focus = user_overrides.get("focus", "")
+    _user_override_lang = user_overrides.get("lang", "")
+    _user_override_mem_count = user_overrides.get("mem_count", 0)
+
+    # ════════════════════════════════════════════════════
+    # STEP 1 + 2: GATEKEEPER
+    # ════════════════════════════════════════════════════
+    _active_before = state.get_last_project(current_user_id, conversation_id)
+    _all_projects = await list_rag_projects(user=user)
+    _recent_user_msgs = [m["content"] for m in messages if m["role"] == "user"][-3:]
+
+    _gk_context = {
+        "active_project": _active_before,
+        "projects_available": _all_projects,
+        "recent_messages": _recent_user_msgs,
+    }
+    tracer.start_step("keyword_bypass")
+    gk = await _keyword_bypass(latest_msg, _gk_context)
+    _bypassed = gk is not None
+    tracer.end_step("keyword_bypass", details={"bypassed": _bypassed, "intent": gk.intent if gk else None, "project": gk.project if gk else None})
+
+    if gk is None:
+        tracer.start_step("gatekeeper_llm")
+        gk = await _run_gatekeeper(latest_msg, _gk_context)
+        tracer.end_step("gatekeeper_llm", details={"intent": gk.intent, "project": gk.project, "confidence": gk.confidence})
+
+    tracer.set_gatekeeper(intent=gk.intent, project=gk.project, confidence=gk.confidence, bypassed=_bypassed)
+    tracer._gatekeeper_model = "bypass" if _bypassed else "qwen"
+    _record_gatekeeper_stats(gk.intent, gk.confidence, _bypassed, gk.project)
+
+    # ════════════════════════════════════════════════════
+    # ROUTING: project / meta / general
+    # ════════════════════════════════════════════════════
+    active_project: str | None = None
+    _is_project_query: bool = False
+    _is_meta_query: bool = False
+
+    if gk.intent == "meta":
+        _is_meta_query = True
+        if _all_projects:
+            rag_ctx = "📚 Progetti indicizzati nel RAG:\n" + "\n".join(f"- {p}" for p in _all_projects)
+        logger.info("🗂️ Gatekeeper META: lista progetti, contesto progetto saltato")
+
+    elif gk.intent == "project":
+        _is_project_query = True
+        if gk.project and gk.project in _all_projects:
+            active_project = gk.project
+        else:
+            active_project = await detect_project_in_conversation(user_messages)
+        if not active_project:
+            active_project = state.get_last_project(current_user_id, conversation_id)
+            if active_project:
+                logger.info(f"📁 Progetto ripristinato dal contesto: {active_project}")
+        if active_project:
+            logger.info(f"📁 Progetto attivo: {active_project}")
+            state.set_last_project(current_user_id, conversation_id, active_project)
+
+    if state.memory:
+        try:
+            async def _bg_add():
+                await save_to_memory(clean_msg, user_id=current_user_id, project=active_project)
+            task = asyncio.create_task(_bg_add())
+            state.background_tasks.add(task)
+            task.add_done_callback(state.background_tasks.discard)
+        except Exception as e:
+            logger.warning(f"Errore memory add: {e}")
+
+    # ════════════════════════════════════════════════════
+    # EARLY RETURNS: general / meta
+    # ════════════════════════════════════════════════════
+    if gk.intent == "general":
+        logger.info("🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
+        tracer.step("context_gathering", status="skipped", details={"reason": "general_intent"})
+        tracer.step("caveman_compression", status="skipped", details={"reason": "general_intent"})
+        if finalize_trace:
+            tracer.finish()
+        return messages
+
+    if gk.intent == "meta":
+        logger.info("🗂️ Intento META: skip caveman compression, risposta conversazionale")
+        meta_context = "\n".join(f"- {p}" for p in _all_projects) if _all_projects else "Nessun progetto indicizzato."
+        meta_prompt = f"[CURRENT DATETIME — YOU MUST USE THIS: {_dt_now}]\n\nProgetti disponibili:\n{meta_context}\n\nDomanda: {clean_msg}"
+        for m in reversed(messages):
+            if m["role"] == "user":
+                m["content"] = meta_prompt
+                break
+        tracer.set_user_content(meta_prompt)
+        tracer.step("context_gathering", status="skipped", details={"reason": "meta_intent"})
+        tracer.step("caveman_compression", status="skipped", details={"reason": "meta_intent"})
+        if finalize_trace:
+            tracer.finish()
+        return messages
+
+    # ════════════════════════════════════════════════════
+    # CONTEXT GATHERING (STEP 3)
+    # ════════════════════════════════════════════════════
+    tracer.start_step("context_gathering")
+
+    async def _gather_memory():
+        if not state.memory:
+            return ""
+        try:
+            loop = asyncio.get_running_loop()
+            _mem_limit = _user_override_mem_count if _user_override_mem_count > 0 else 5
+            memory_results = []
+            gen_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id}, limit=_mem_limit)
+            gen_res = await loop.run_in_executor(state.mem0_executor, gen_search)
+            if gen_res:
+                memory_results.append(gen_res)
+            if active_project:
+                proj_search = partial(state.memory.search, query=clean_msg, filters={"user_id": current_user_id, "project": active_project}, limit=_mem_limit)
+                proj_res = await loop.run_in_executor(state.mem0_executor, proj_search)
+                if proj_res:
+                    memory_results.append(proj_res)
+            all_memories = []
+            if isinstance(memory_results, list):
+                for r in memory_results:
+                    extracted = extract_memories(r)
+                    if extracted:
+                        all_memories.append(extracted)
+            return "\n".join(all_memories) if all_memories else ""
+        except Exception as e:
+            logger.warning(f"Errore memory search: {e}")
+            return ""
+
+    async def _gather_rag():
+        if latest_msg.startswith("/web "):
+            return ""
+        full_files_content = ""
+        if _is_project_query:
+            matches = set(re.findall(r'\b([\w\.\-/]+\.(?:py|js|ts|jsx|tsx|go|c|cpp|h|hpp|rs|sql|yaml|yml|md|json))\b', latest_msg))
+            if matches:
+                filt = GitignoreFilter(DOC_DIR)
+                for match in matches:
+                    filename_only = match.split('/')[-1]
+                    for root, dirs, files in os.walk(DOC_DIR):
+                        dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', 'venv', 'vendor')]
+                        if filename_only in files:
+                            fp = os.path.join(root, filename_only)
+                            rp = os.path.relpath(fp, DOC_DIR)
+                            if not filt.is_ignored(rp):
+                                if match in rp or match == filename_only:
+                                    try:
+                                        with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                                            fc = f.read()
+                                        full_files_content += f"\n\n📄 FILE COMPLETO RICHIESTO ({rp}):\n```\n{fc}\n```\n"
+                                    except Exception:
+                                        pass
+        if not _is_meta_query:
+            _rag_project = _user_override_focus if _user_override_focus else active_project
+            rag_ctx_local = await search_documents(clean_msg, is_project_query=_is_project_query, project_name=_rag_project, user=user)
+        else:
+            rag_ctx_local = ""
+        if full_files_content:
+            rag_ctx_local = full_files_content + "\n" + rag_ctx_local
+        return rag_ctx_local
+
+    async def _gather_synaptiq():
+        if latest_msg.startswith("/web "):
+            return ""
+        if not (_is_project_query and synaptiq_engine and synaptiq_engine.is_initialized):
+            return ""
+        try:
+            sy_raw = await synaptiq_engine.pack_snippets(clean_msg, limit=8)
+            if sy_raw and len(sy_raw) > 100:
+                logger.info(f"🧠 Synaptiq context: {len(sy_raw)} chars")
+                return f"\n<SYNAPTIQ>\n{sy_raw[:3000]}\n</SYNAPTIQ>\n"
+        except Exception as e:
+            logger.debug(f"Synaptiq explore non disponibile: {e}")
+        return ""
+
+    mem_task = asyncio.create_task(_gather_memory())
+    rag_task = asyncio.create_task(_gather_rag())
+    synaptiq_task = asyncio.create_task(_gather_synaptiq())
+    mem_ctx, rag_ctx, cg_ctx = await asyncio.gather(mem_task, rag_task, synaptiq_task)
+
+    # Auto web discovery (dipende da rag_ctx → non parallelizzabile)
+    _is_short_greeting = len(clean_msg.strip()) < 20 and not _is_project_query
+    if not _is_short_greeting and not rag_ctx.strip() and not web_ctx:
+        search_query = clean_msg
+        if _is_project_query and active_project and active_project not in search_query:
+            search_query = f"{active_project} {search_query}"
+        web_knowledge_ctx = await search_web_knowledge(search_query)
+        if web_knowledge_ctx:
+            web_ctx = web_knowledge_ctx
+            logger.info(f"🌐 Web knowledge cache HIT: '{clean_msg[:60]}...'")
+        else:
+            web_search_ctx, _ = await perform_web_search_and_crawl(latest_msg, force=True)
+            if web_search_ctx and web_search_ctx != "Nessun risultato online.":
+                sources = []
+                for line in web_search_ctx.split("\n"):
+                    if line.startswith("URL: "):
+                        sources.append(line[5:])
+                await save_web_knowledge(search_query, web_search_ctx, sources)
+                web_ctx = web_search_ctx
+                tag = f" [progetto: {active_project}]" if active_project else ""
+                logger.info(f"🌐 Auto web discovery: ricercato e salvato '{clean_msg[:60]}...'{tag}")
+                async def _bg_save_web():
+                    summary = f"[Web Knowledge] Query: {clean_msg[:200]}\nFonti: {', '.join(sources[:3])}\nRisultati: {web_search_ctx[:600]}"
+                    await save_to_memory(summary, user_id=current_user_id, project=active_project)
+                task = asyncio.create_task(_bg_save_web())
+                state.background_tasks.add(task)
+                task.add_done_callback(state.background_tasks.discard)
+
+    ctx_details = {
+        "rag_len": len(rag_ctx) if rag_ctx else 0,
+        "mem_len": len(mem_ctx) if mem_ctx else 0,
+        "web_len": len(web_ctx) if web_ctx else 0,
+        "project": active_project,
+    }
+    tracer.end_step("context_gathering", details=ctx_details)
+
+    # Popola tracer con dati contesto
+    _rag_project = (_user_override_focus if _user_override_focus else active_project) if _is_project_query else None
+    tracer._rag_ctx_len = len(rag_ctx) if rag_ctx else 0
+    tracer._rag_project = _rag_project
+    tracer._memory_records = len(mem_ctx.split("\n")) if mem_ctx else 0
+    tracer._web_search_performed = bool(web_ctx)
+    tracer._synaptiq_performed = bool(cg_ctx)
+    tracer._synaptiq_chars = len(cg_ctx) if cg_ctx else 0
+
+    # ════════════════════════════════════════════════════
+    # STEP 3: CAVEMAN COMPRESSION
+    # ════════════════════════════════════════════════════
+    tracer.start_step("caveman_compression")
+
+    MAX_BUDGET = _compute_max_budget()
+    (rag_final, tree_ctx, web_final, mem_final, tasks_final,
+     history_str, rag_context_for_compress, _raw_size) = _allocate_budget(
+        rag_ctx, web_ctx, mem_ctx, cg_ctx, active_project, MAX_BUDGET,
+        _recent_user_msgs, user_id,
+    )
+
+    # Calcola raw_size esatto (clean_msg not available in _allocate_budget)
+    raw_size = len(rag_context_for_compress) + len(history_str) + len(clean_msg)
+
+    compressed, _compression_is_raw = await _run_compression(
+        clean_msg, rag_context_for_compress, history_str, active_project,
+        mem_final, tasks_final, rag_final, web_final,
+    )
+
+    comp_details = {
+        "raw_size": raw_size,
+        "comp_size": len(compressed),
+        "is_raw_fallback": _compression_is_raw,
+        "budget": MAX_BUDGET,
+    }
+    tracer.end_step("caveman_compression", details=comp_details)
+    tracer._compression_raw_size = raw_size
+    tracer._compression_is_raw = _compression_is_raw
+
+    # ════════════════════════════════════════════════════
+    # STEP 4: BUILD GEMMA 4 PROMPT
+    # ════════════════════════════════════════════════════
+    tracer.start_step("build_prompt")
+    _build_final_prompt(compressed, _compression_is_raw, messages, _dt_now,
+                        mem_ctx, rag_final, web_ctx, cg_ctx, tracer)
+    tracer.end_step("build_prompt", details={
+        "system_prompt_len": len(CAVEMAN_GEMMA_SYSTEM) if not _compression_is_raw else 500,
+        "user_content_len": len(compressed),
+    })
 
     if finalize_trace:
         tracer.finish()
