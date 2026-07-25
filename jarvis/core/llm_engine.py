@@ -426,6 +426,15 @@ class LlamaEngine:
             _max_tokens_cap = LLM_MAX_TOKENS
             max_tokens = min(max_tokens, _max_tokens_cap)
 
+        # Convert string grammar to LlamaGrammar object (llama_cpp expects object, not str)
+        if isinstance(grammar, str):
+            try:
+                from llama_cpp import LlamaGrammar
+                grammar = LlamaGrammar.from_string(grammar, verbose=False)
+            except Exception as e:
+                logger.warning(f"Failed to parse GBNF grammar string: {e}")
+                grammar = None
+
         if stream:
             async def async_generator():
                 async with PriorityLockContextManager(lock, priority=0):
