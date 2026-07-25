@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from auth import require_admin
+from api.auth import require_admin
 
 router = APIRouter(prefix="/api/users", tags=["users"], dependencies=[Depends(require_admin)])
 
@@ -42,7 +42,7 @@ class TelegramLinkRequest(BaseModel):
 @router.get("")
 async def list_users(admin: dict = Depends(require_admin)):
     """List all users (no password_hash exposed)."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     return await um.list_users()
 
@@ -50,7 +50,7 @@ async def list_users(admin: dict = Depends(require_admin)):
 @router.post("")
 async def create_user(body: CreateUserRequest, admin: dict = Depends(require_admin)):
     """Create a new user with an initial API key."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     try:
         user_row, api_key = await um.create_user(
@@ -74,19 +74,19 @@ async def create_user(body: CreateUserRequest, admin: dict = Depends(require_adm
 @router.get("/{user_id}")
 async def get_user(user_id: str, admin: dict = Depends(require_admin)):
     """Get a single user."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     user = await um.get_user(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    from auth import _sanitize_user
+    from api.auth import _sanitize_user
     return _sanitize_user(user)
 
 
 @router.put("/{user_id}")
 async def update_user(user_id: str, body: UpdateUserRequest, admin: dict = Depends(require_admin)):
     """Update a user. Admin cannot demote themselves to user."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     # Prevent self-demotion
     if admin["id"] == user_id and body.role is not None and body.role != "admin":
@@ -112,14 +112,14 @@ async def update_user(user_id: str, body: UpdateUserRequest, admin: dict = Depen
     if not updated:
         raise HTTPException(status_code=404, detail="User not found")
 
-    from auth import _sanitize_user
+    from api.auth import _sanitize_user
     return _sanitize_user(updated)
 
 
 @router.delete("/{user_id}")
 async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
     """Delete a user. Cannot delete the last admin."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     if admin["id"] == user_id:
         raise HTTPException(status_code=400, detail="You cannot delete yourself")
@@ -138,7 +138,7 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
 @router.post("/{user_id}/telegram")
 async def set_user_telegram(user_id: str, body: TelegramLinkRequest, admin: dict = Depends(require_admin)):
     """Set or unset Telegram ID for a user."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     try:
         updated = await um.set_telegram_id(user_id, body.telegram_id)

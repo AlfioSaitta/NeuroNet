@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from auth import require_auth
+from api.auth import require_auth
 
 router = APIRouter(prefix="/api/auth", tags=["profile"], dependencies=[Depends(require_auth)])
 
@@ -39,7 +39,7 @@ async def change_password(body: ChangePasswordRequest, user: dict = Depends(requ
     if len(body.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
 
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     verified = await um.verify_password(user["username"], body.old_password)
     if not verified:
@@ -52,7 +52,7 @@ async def change_password(body: ChangePasswordRequest, user: dict = Depends(requ
 @router.get("/api-key")
 async def list_my_api_keys(user: dict = Depends(require_auth)):
     """List own API keys (prefix only, never full key or hash)."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     keys = await um.get_user_api_keys(user["id"])
     return {"keys": keys}
@@ -61,7 +61,7 @@ async def list_my_api_keys(user: dict = Depends(require_auth)):
 @router.post("/api-key")
 async def create_api_key(body: CreateApiKeyRequest, user: dict = Depends(require_auth)):
     """Generate a new API key. Optionally revoke all previous keys."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     full_key, key_obj = await um.generate_api_key(user["id"], name=body.name)
 
@@ -82,7 +82,7 @@ async def create_api_key(body: CreateApiKeyRequest, user: dict = Depends(require
 @router.post("/api-key/{key_id}/revoke")
 async def revoke_api_key(key_id: str, user: dict = Depends(require_auth)):
     """Revoke one of own API keys."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     keys = await um.get_user_api_keys(user["id"])
     if not any(k["id"] == key_id for k in keys):
@@ -99,7 +99,7 @@ async def reveal_api_key(key_id: str, user: dict = Depends(require_auth)):
     The full key is only stored temporarily in memory after generation.
     Once expired, it cannot be recovered — generate a new key instead.
     """
-    from user_manager import user_manager as um, _get_recent_key
+    from api.auth.user_manager import user_manager as um, _get_recent_key
 
     keys = await um.get_user_api_keys(user["id"])
     if not any(k["id"] == key_id for k in keys):
@@ -118,7 +118,7 @@ async def reveal_api_key(key_id: str, user: dict = Depends(require_auth)):
 @router.post("/telegram")
 async def set_telegram(body: TelegramLinkRequest, user: dict = Depends(require_auth)):
     """Link or unlink Telegram ID to own profile."""
-    from user_manager import user_manager as um
+    from api.auth.user_manager import user_manager as um
 
     if body.telegram_id is None or body.telegram_id == "":
         await um.update_user(user["id"], telegram_id=None)

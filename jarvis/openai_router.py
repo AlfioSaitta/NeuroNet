@@ -19,18 +19,18 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, ConfigDict
 
-from config import (
+from core.config import (
     logger, MODEL_ID, API_RATE_LIMIT_DEFAULT,
     API_RATE_LIMIT_HEAVY, API_RATE_LIMIT_EMBED,
 )
-from llm_engine import engine
-from prompt_builder import build_omniscient_prompt
-from memory import process_response_tags
-from tag_processor import strip_action_tags, TagSafeStream
-from agent_tools import execute_tool_call
-from confirmation_manager import ApiTokenProvider, ConfirmationManager
-from classificatore import classify_confirmation
-import state
+from core.llm_engine import engine
+from agent.prompt import build_omniscient_prompt
+from memory.engine import process_response_tags
+from agent.tags import strip_action_tags, TagSafeStream
+from agent.tools import execute_tool_call
+from agent.confirmation import ApiTokenProvider, ConfirmationManager
+from agent.classifier import classify_confirmation
+import core.state as state
 
 router = APIRouter(tags=["OpenAI API"])
 

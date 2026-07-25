@@ -7,14 +7,10 @@ import os
 import json
 import time
 import asyncio
-import io
-import tempfile
 import warnings
-import sys
 import traceback
 import threading
 import uuid
-from contextlib import asynccontextmanager, suppress
 
 _default_showwarning = warnings.showwarning
 
@@ -33,491 +29,30 @@ def _thread_excepthook(args):
     _default_thread_excepthook(args)
 threading.excepthook = _thread_excepthook
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse, Response
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import httpx
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import VectorParams, Distance
 
-from config import (
-    logger, MODEL_ID, QDRANT_HOST,
-    DOC_COLLECTION, DOC_DIR, HOST_FS_PREFIX,
-    TELEGRAM_TOKEN, ALLOWED_USERS, MEM0_CONFIG, STATE_FILE,
-    TELEGRAM_ENABLED, WATCHDOG_ENABLED, WATCHDOG_TIMEOUT, WATCHDOG_WATCH_MODE,
-    VECTOR_DB_VERSION,
-    API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, API_RATE_LIMIT_EMBED, EMBEDDING_DIMS, EXTERNAL_PROJECTS,
-    WORKSPACE_DIR, WORKSPACE_PROJECTS,
-    MCP_ENABLED, MCP_AUTO_INIT,
-    SYNAPTIQ_ENABLED, SYNAPTIQ_STORAGE_PATH, SYNAPTIQ_EMBEDDING_TIER,
-    DATA_DIR, parse_external_projects,
+from core.config import (
+    logger, MODEL_ID, DOC_COLLECTION, DOC_DIR, MEM0_CONFIG, STATE_FILE, VECTOR_DB_VERSION,
+    API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, API_RATE_LIMIT_EMBED,
+    SYNAPTIQ_ENABLED,
 )
-import state
-from rag import ingest_local_documents, rag_queue_worker, generate_project_tree, search_documents
-from rag_cache import semantic_cache_search, semantic_cache_store
-from memory import init_mem0_delayed, extract_memories, save_to_memory, process_response_tags, reindex_graph_connections
-from tag_processor import strip_action_tags, TagSafeStream
-from prompt_builder import build_omniscient_prompt
-from telemetry import PipelineTracer
-from llm_engine import engine, extract_content
-from agent_tools import TOOLS_SCHEMA, execute_tool_call
-from confirmation_manager import ApiTokenProvider, PendingConfirmation, ConfirmationManager
-from classificatore import is_internal_query, classify_confirmation
-from openai import router as openai_router, init_openai_routes
+import core.state as state
+from rag.engine import ingest_local_documents, search_documents
+from rag.cache import semantic_cache_search, semantic_cache_store
+from memory.engine import extract_memories, save_to_memory, process_response_tags, reindex_graph_connections
+from agent.tags import strip_action_tags, TagSafeStream
+from agent.prompt import build_omniscient_prompt
+from core.telemetry import PipelineTracer
+from core.llm_engine import engine, extract_content
+from agent.tools import execute_tool_call
+from agent.confirmation import ApiTokenProvider, ConfirmationManager
+from agent.classifier import is_internal_query, classify_confirmation
+from openai_api import router as openai_router, init_openai_routes
 init_openai_routes()  # populate the router with all endpoint sub-modules
 
-if WATCHDOG_ENABLED:
-    from watchdog.observers.polling import PollingObserver as Observer
-    from rag import DynamicRagEventHandler
-
-if TELEGRAM_ENABLED:
-    from telegram import BotCommand, Update
-    from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, TypeHandler
-    from telegram.request import BaseRequest, HTTPXRequest
-    from telegram_bot import telegram_start, handle_telegram_message, telegram_callback_handler, auth_middleware
-
-try:
-    from telegram_userbot_manager import auto_start_existing, stop_all_userbots
-except ImportError:
-    pass
-
-observer = None
-
-
-# ==============================================================================
-# LIFESPAN (Startup / Shutdown)
-# ==============================================================================
-
-import re
-
-async def cleanup_old_collections():
-    """Rimuove automaticamente le vecchie collezioni Qdrant non più utilizzate (migrazioni precedenti e legacy)."""
-    try:
-        cols_response = await state.qdrant.get_collections()
-        col_names = [c.name for c in cols_response.collections]
-        current_v = VECTOR_DB_VERSION.replace('v', '')
-        
-        legacy_exact = ["collateral_documents", "collateral_memories", "collateral_memories_entities", "semantic_cache"]
-        
-        for name in col_names:
-            delete_it = False
-            
-            # Match legacy esatti
-            if name in legacy_exact:
-                delete_it = True
-            
-            # Match regex per trovare versioni vecchie o legacy senza suffisso versione
-            elif name.startswith("collateral_docs_") or name.startswith("collateral_memories_") or name.startswith("semantic_cache_"):
-                # Cerca il suffisso "_vX" alla fine
-                match = re.search(r'_v(\d+)(_entities)?$', name)
-                if match:
-                    version = match.group(1)
-                    if version != current_v:
-                        delete_it = True
-                else:
-                    # Non ha il suffisso _vX alla fine, è una legacy
-                    if name != "collateral_memories_entities": # Già gestito in legacy_exact, ma per sicurezza
-                        delete_it = True
-            
-            if delete_it:
-                logger.info(f"🗑️ Eliminazione collezione obsoleta: {name}")
-                await state.qdrant.delete_collection(collection_name=name)
-                
-    except Exception as e:
-        logger.warning(f"Errore durante la pulizia delle vecchie collezioni: {e}")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global observer
-
-    logger.info("Avvio caricamento modelli Llama-cpp (Qwen + Nomic)...")
-    await asyncio.to_thread(engine.load_models)
-    logger.info("Modelli Llama caricati in locale (No Ollama).")
-
-    # Inizializzazione provider esterni (Gemini, ecc.) — sincrono, veloce
-    try:
-        router = engine.init_provider_router()
-        if router:
-            providers = router.get_available_providers()
-            if providers:
-                logger.info(f"☁️ Provider esterni disponibili: {', '.join(providers)}")
-            else:
-                logger.info("☁️ Nessun provider esterno configurato (GEMINI_API_KEY non impostata)")
-    except Exception as e:
-        logger.warning(f"ProviderRouter: errore inizializzazione: {e}")
-
-    # HTTP client — subito dopo, serve a molti moduli
-    state.http_client = httpx.AsyncClient(timeout=300.0)
-
-    # ────────────────────────────────────────────────────────────────────
-    # Blocchi async indipendenti: Qdrant, Telegram, MCP in parallelo
-    # ────────────────────────────────────────────────────────────────────
-
-    async def _init_qdrant():
-        """Inizializza Qdrant, crea collezioni, ripristina contesti."""
-        if QDRANT_HOST == "local":
-            state.qdrant = AsyncQdrantClient(path="./data/qdrant_local")
-            logger.info("[SYSTEM] Qdrant inizializzato in modalità LOCALE (in-process).")
-        else:
-            state.qdrant = AsyncQdrantClient(host=QDRANT_HOST, port=6333)
-            logger.info(f"[SYSTEM] Qdrant inizializzato in modalità HTTP (host: {QDRANT_HOST}).")
-        
-        await cleanup_old_collections()
-
-        try:
-            await state.qdrant.create_collection(
-                collection_name=f"semantic_cache_{VECTOR_DB_VERSION}",
-                vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
-            )
-            logger.info(f"[SYSTEM] Collezione semantic_cache_{VECTOR_DB_VERSION} creata con successo.")
-        except Exception as e:
-            if "already exists" not in str(e).lower() and "409" not in str(e):
-                logger.warning(f"Errore silenziato in create_collection: {e}")
-
-        try:
-            await state.qdrant.create_collection(
-                collection_name=state.APP_CONTEXT_COLLECTION,
-                vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
-            )
-            logger.info(f"[SYSTEM] Collezione {state.APP_CONTEXT_COLLECTION} creata con successo.")
-        except Exception as e:
-            if "already exists" not in str(e).lower() and "409" not in str(e):
-                logger.warning(f"Errore silenziato in create_collection app_context: {e}")
-
-        try:
-            await state.restore_project_contexts_from_qdrant()
-        except Exception as e:
-            logger.warning(f"Errore restore contesti progetto: {e}")
-
-        # Pulizia symlink DOC_DIR
-        if os.path.exists(DOC_DIR):
-            for item in os.listdir(DOC_DIR):
-                item_path = os.path.join(DOC_DIR, item)
-                if os.path.islink(item_path):
-                    os.remove(item_path)
-
-    async def _init_telegram():
-        """Inizializza bot Telegram (solo se configurato)."""
-        if not (TELEGRAM_ENABLED and TELEGRAM_TOKEN and ALLOWED_USERS):
-            logger.info("📱 Bot Telegram disabilitato (Manca Token o Utenti Autorizzati).")
-            return
-        try:
-            from telegram.error import BadRequest, NetworkError
-
-            class _RetryHTTPXRequest(HTTPXRequest):
-                """HTTPXRequest con retry 5x su errori di rete (DNS, timeout, OSError)."""
-                async def _request_wrapper(self, url, method, **kw):
-                    for _attempt in range(5):
-                        try:
-                            return await super()._request_wrapper(url, method, **kw)
-                        except (OSError, NetworkError) as _e:
-                            if isinstance(_e, BadRequest):
-                                raise
-                            if _attempt < 4:
-                                logger.warning(f"DNS/Network error su Telegram API, retry {_attempt+2}/5: {_e}")
-                                await asyncio.sleep(2 ** _attempt + 0.5 * _attempt)
-                            else:
-                                raise
-
-            _base_req = _RetryHTTPXRequest(
-                read_timeout=120.0, write_timeout=120.0, connect_timeout=60.0,
-                pool_timeout=60.0, connection_pool_size=50,
-            )
-            logger.info("📡 Telegram HTTP client con retry DNS (5 tentativi) attivo")
-
-            state.telegram_app = (
-                ApplicationBuilder()
-                .token(TELEGRAM_TOKEN)
-                .request(_base_req)
-                .build()
-            )
-            state.telegram_app.add_handler(TypeHandler(Update, auth_middleware), group=-1)
-            state.telegram_app.add_handler(CommandHandler("start", telegram_start))
-            state.telegram_app.add_handler(CallbackQueryHandler(telegram_callback_handler))
-            state.telegram_app.add_handler(MessageHandler(
-                (filters.TEXT | filters.VOICE | filters.AUDIO | filters.Document.ALL) & (~filters.COMMAND),
-                handle_telegram_message
-            ))
-
-            await state.telegram_app.initialize()
-            await state.telegram_app.bot.set_my_commands([
-                BotCommand("start", "Mostra il menu principale a pulsanti")
-            ])
-            await state.telegram_app.start()
-            await state.telegram_app.updater.start_polling(drop_pending_updates=True)
-            logger.info("📱 Bot Telegram avviato all'interno del Proxy.")
-        except Exception as e:
-            logger.error(f"⚠️ Impossibile avviare Telegram: {e}")
-
-    async def _init_mcp():
-        """Inizializza server MCP (solo se configurato)."""
-        if not (MCP_ENABLED and MCP_AUTO_INIT):
-            return
-        try:
-            from mcp_client import init_mcp_from_config, get_mcp_manager
-            total = await init_mcp_from_config()
-            if total > 0:
-                logger.info(f"🔌 MCP: {total} servers initialized from config files")
-
-                if MCP_ENABLED:
-                    try:
-                        from skills_manager import register_skill_mcp_servers
-                        reg_count = register_skill_mcp_servers()
-                        if reg_count > 0:
-                            logger.info(f"🔌 MCP: {reg_count} skill-embedded servers registered")
-                            await get_mcp_manager().initialize_all()
-                    except ImportError:
-                        pass
-
-                from agent_tools import refresh_mcp_tools_async
-                mcp_count = await refresh_mcp_tools_async()
-                if mcp_count > 0:
-                    logger.info(f"🔌 MCP: {mcp_count} tools injected into TOOLS_SCHEMA")
-
-                mgr = get_mcp_manager()
-                for srv_name in mgr.list_servers():
-                    logger.info(f"  ├─ MCP Server: {srv_name}")
-
-        except ImportError as e:
-            logger.debug(f"MCP client not available (non-critical): {e}")
-        except Exception as e:
-            logger.warning(f"MCP initialization: {e}")
-
-    # Esegui i 3 blocchi async in parallelo
-    await asyncio.gather(
-        _init_qdrant(),
-        _init_telegram(),
-        _init_mcp(),
-        return_exceptions=True,
-    )
-
-    # ── User Manager ──────────────────────────────────────────────────
-    # Inizializza DB utenti + API key e seed admin default se necessario
-    from user_manager import init_user_manager
-
-    db_path = os.path.join(DATA_DIR, "users.db")
-    logger.info("👤 Initializing User Manager at %s", db_path)
-    um = await init_user_manager(db_path)
-
-    # Auto-seed admin if no admin exists
-    try:
-        admins = await um.list_users(role="admin")
-        if not admins:
-            logger.warning("⚠️ No admin found — creating default admin...")
-            user, api_key = await um.create_user(
-                username="admin",
-                password="neuronet",
-                role="admin",
-                display_name="Default Admin",
-                allowed_projects=["*"],
-            )
-            logger.info("✅ Default admin created: username='admin', password='neuronet'")
-            logger.info("🔑 Initial API key: %s", api_key)
-            logger.warning("⚠️ CHANGE THE DEFAULT PASSWORD ON FIRST LOGIN!")
-    except Exception as exc:
-        logger.error("❌ Error seeding default admin: %s", exc)
-
-    # ────────────────────────────────────────────────────────────────────
-    # Passo 2: servizi che dipendono da Qdrant + fire-and-forget
-    # ────────────────────────────────────────────────────────────────────
-
-    # Avvio asincrono di Mem0 (con ritardo per il loopback proxy)
-    task_mem0 = asyncio.create_task(init_mem0_delayed())
-    state.background_tasks.add(task_mem0)
-    task_mem0.add_done_callback(state.background_tasks.discard)
-
-    # Ingestion iniziale documenti — ATTENDE il completamento del warmup Mem0
-    async def _ingest_after_mem0():
-        await task_mem0
-        await ingest_local_documents()
-
-    task_ingest = asyncio.create_task(_ingest_after_mem0())
-    state.background_tasks.add(task_ingest)
-    task_ingest.add_done_callback(state.background_tasks.discard)
-
-    # Watchdog filesystem (PollingObserver per compatibilità Docker bind mount / symlink)
-    if WATCHDOG_ENABLED:
-        worker_task = asyncio.create_task(rag_queue_worker())
-        state.background_tasks.add(worker_task)
-        observer = Observer(timeout=WATCHDOG_TIMEOUT)
-        
-        if os.path.isdir(DOC_DIR):
-            handler_doc = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, DOC_DIR)
-            observer.schedule(handler_doc, DOC_DIR, recursive=True)
-            logger.info(f"👀 Watchdog DOC_DIR: {DOC_DIR}")
-        else:
-            logger.warning(f"⚠️ DOC_DIR non trovato ({DOC_DIR}), watchdog su DOC_DIR saltato.")
-        
-        if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
-            if WATCHDOG_WATCH_MODE == "per_project":
-                for proj_dir in WORKSPACE_PROJECTS:
-                    if os.path.isdir(proj_dir):
-                        proj_handler = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, proj_dir)
-                        observer.schedule(proj_handler, proj_dir, recursive=True)
-                        proj_name = os.path.basename(proj_dir)
-                        logger.info(f"👀 Watchdog progetto: {proj_name} ({proj_dir})")
-            else:
-                handler_ws = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, WORKSPACE_DIR)
-                observer.schedule(handler_ws, WORKSPACE_DIR, recursive=True)
-                logger.info(f"👀 Watchdog WORKSPACE_DIR: {WORKSPACE_DIR}")
-                
-        observer.start()
-        logger.info(f"👀 Watchdog PollingObserver Partito (timeout={WATCHDOG_TIMEOUT}s, mode={WATCHDOG_WATCH_MODE}).")
-
-        async def watchdog_health():
-            global observer
-            while True:
-                await asyncio.sleep(60)
-                try:
-                    emitters = getattr(observer, '_emitters', [])
-                    emitter_alive = any(e.is_alive() for e in emitters)
-                    dispatch_alive = observer.is_alive()
-                    qsize = state.file_event_queue.qsize()
-                    if not emitter_alive or not dispatch_alive:
-                        logger.warning(f"Watchdog: emitter={emitter_alive} dispatch={dispatch_alive} coda={qsize} — riavvio...")
-                        observer.stop()
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(None, lambda: observer.join(timeout=5))
-                        observer = Observer(timeout=WATCHDOG_TIMEOUT)
-                        if os.path.isdir(DOC_DIR):
-                            new_handler_doc = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, DOC_DIR)
-                            observer.schedule(new_handler_doc, DOC_DIR, recursive=True)
-                        if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
-                            if WATCHDOG_WATCH_MODE == "per_project":
-                                for proj_dir in WORKSPACE_PROJECTS:
-                                    if os.path.isdir(proj_dir):
-                                        proj_handler = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, proj_dir)
-                                        observer.schedule(proj_handler, proj_dir, recursive=True)
-                            else:
-                                new_handler_ws = DynamicRagEventHandler(asyncio.get_running_loop(), state.file_event_queue, WORKSPACE_DIR)
-                                observer.schedule(new_handler_ws, WORKSPACE_DIR, recursive=True)
-                        observer.start()
-                        logger.info("Watchdog: nuovo Observer avviato dopo crash.")
-                    elif qsize > 100:
-                        logger.warning(f"Watchdog: coda eventi {qsize}, possibile blocco worker")
-                except Exception as e:
-                    logger.error(f"Watchdog health check error: {e}", exc_info=True)
-        health_task = asyncio.create_task(watchdog_health())
-        state.background_tasks.add(health_task)
-        health_task.add_done_callback(state.background_tasks.discard)
-
-    # Avvio Multi-Userbot MTProto
-    try:
-        task_userbots = asyncio.create_task(auto_start_existing())
-        state.background_tasks.add(task_userbots)
-        task_userbots.add_done_callback(state.background_tasks.discard)
-    except NameError:
-        pass
-
-    # Avvio Scheduler
-    try:
-        from cron_agent import init_scheduler
-        init_scheduler()
-    except Exception as e:
-        logger.error(f"Errore inizializzazione cron scheduler: {e}\n{traceback.format_exc()}")
-
-    # Avvio background collector telemetria (GPU, health, Qdrant ogni 5s)
-    try:
-        from dashboard import start_telemetry_collector
-        start_telemetry_collector(app)
-    except Exception as e:
-        logger.warning(f"Telemetry collector non avviato: {e}")
-
-    # Avvio Synaptiq Engine (grafo strutturale)
-    if SYNAPTIQ_ENABLED:
-        try:
-            from synaptiq_engine import synaptiq_engine
-            synaptiq_engine.storage_path = SYNAPTIQ_STORAGE_PATH
-            synaptiq_engine.embedding_tier = SYNAPTIQ_EMBEDDING_TIER
-            await synaptiq_engine.initialize()
-            logger.info(f"🧬 Synaptiq Engine avviato (storage={SYNAPTIQ_STORAGE_PATH})")
-
-            async def _synaptiq_initial_after_ingest():
-                try:
-                    await task_ingest
-                except Exception as e:
-                    logger.warning("RAG ingest fallito, Synaptiq initial analysis saltata: %s", e)
-                    return
-                projects = list(WORKSPACE_PROJECTS) + parse_external_projects()
-                await synaptiq_engine.run_initial_analysis(projects)
-
-            task_synaptiq = asyncio.create_task(_synaptiq_initial_after_ingest())
-            state.background_tasks.add(task_synaptiq)
-            task_synaptiq.add_done_callback(state.background_tasks.discard)
-        except Exception as e:
-            logger.warning(f"Synaptiq Engine non avviato: {e}")
-
-    yield
-
-    # Shutdown
-    # Arresto Synaptiq Engine
-    if SYNAPTIQ_ENABLED:
-        try:
-            from synaptiq_engine import synaptiq_engine
-            await synaptiq_engine.close()
-            logger.info("Synaptiq Engine fermato.")
-        except Exception as e:
-            logger.warning(f"Synaptiq Engine stop error: {e}")
-
-    if observer:
-        observer.stop()
-        with suppress(Exception):
-            observer.join(timeout=5)
-    tasks_to_stop = list(state.background_tasks)
-    for t in tasks_to_stop:
-        t.cancel()
-    if tasks_to_stop:
-        await asyncio.gather(*tasks_to_stop, return_exceptions=True)
-
-    if state.telegram_app:
-        await state.telegram_app.updater.stop()
-        await state.telegram_app.stop()
-        await state.telegram_app.shutdown()
-
-    try:
-        await stop_all_userbots()
-    except Exception as e:
-        logger.warning(f"Userbot shutdown error: {e}")
-
-    # MCP shutdown
-    if MCP_ENABLED:
-        try:
-            from mcp_client import get_mcp_manager
-            mgr = get_mcp_manager()
-            await mgr.close_all()
-            logger.info("🔌 MCP: all servers shut down")
-        except Exception as e:
-            logger.warning(f"MCP shutdown error: {e}")
-
-    # Salvataggio sessioni chat su disco
-    try:
-        if state.chat_session_store:
-            state.chat_session_store.persist("./data/sessions.json")
-    except Exception as e:
-        logger.warning(f"SessionStore persist error during shutdown: {e}")
-
-    # Close User Manager
-    try:
-        from user_manager import close_user_manager
-        await close_user_manager()
-    except Exception as e:
-        logger.warning(f"User manager close error: {e}")
-
-    # Chiudi Qdrant e HTTP client in parallelo (se uno fallisce, l'altro comunque esegue)
-    await asyncio.gather(
-        state.qdrant.close(),
-        state.http_client.aclose(),
-        return_exceptions=True,
-    )
-
-    # ThreadPoolExecutor shutdown
-    from concurrent.futures import ThreadPoolExecutor
-    for executor_name in ('executor',):
-        executor = getattr(engine, executor_name, None)
-        if isinstance(executor, ThreadPoolExecutor):
-            executor.shutdown(wait=False)
-    if hasattr(state, 'mem0_executor') and isinstance(state.mem0_executor, ThreadPoolExecutor):
-        state.mem0_executor.shutdown(wait=False)
+from core.lifecycle import lifespan
 
 
 # ==============================================================================
@@ -590,7 +125,7 @@ app.add_middleware(
 # Protects /api/dashboard/* and /admin/* routes with JWT auth.
 # Public paths are excluded. Admin-only paths checked for admin role.
 
-from auth import get_current_user
+from api.auth import get_current_user
 
 ADMIN_ONLY_PATHS = (
     "/api/dashboard/settings", "/api/dashboard/models",
@@ -604,7 +139,7 @@ PUBLIC_PATHS = (
     "/admin/login", "/admin/static/",
     "/api/chat",
     "/api/project-tree", "/api/webhook/git",
-    "/api/version", "/api/tags", "/api/ps", "/api/show",
+
     "/api/synaptiq/",
 )
 
@@ -701,7 +236,11 @@ async def openai_api_key_middleware(request: Request, call_next):
 
     if auth.startswith("Bearer sk-jarvis-"):
         raw_key = auth[7:].strip()
-        from user_manager import user_manager
+        # Internal service key bypass (Mem0, etc.) — skip DB lookup
+        if raw_key == os.environ.get("OPENAI_API_KEY", ""):
+            return await call_next(request)
+
+        from api.auth.user_manager import user_manager
 
         try:
             result = await user_manager.resolve_api_key(raw_key)
@@ -745,10 +284,10 @@ async def openai_api_key_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-from dashboard import dashboard_router
+from admin.dashboard import dashboard_router
 app.include_router(dashboard_router)
 
-from auth import router as auth_router
+from api.auth import router as auth_router
 app.include_router(auth_router)
 
 from routes.users import router as users_router
@@ -760,7 +299,7 @@ app.include_router(profile_router)
 from routes.projects import router as projects_router
 app.include_router(projects_router)
 
-from admin_panel import setup_admin_panel
+from admin.panel import setup_admin_panel
 setup_admin_panel(app)
 
 
@@ -856,7 +395,7 @@ async def graph_reindex(request: Request):
 @app.post("/api/webhook/git")
 async def git_webhook(request: Request):
     """Gestisce i webhook da GitHub/Gitea/GitLab per triggerare l'aggiornamento RAG via git pull."""
-    from config import GIT_WEBHOOK_SECRET
+    from core.config import GIT_WEBHOOK_SECRET
     
     # Sicurezza: Validazione secret token
     if GIT_WEBHOOK_SECRET:
@@ -920,7 +459,7 @@ async def git_webhook(request: Request):
 @app.get("/api/telemetry/traces")
 async def get_telemetry_traces(limit: int = 10):
     """Ultimi N pipeline trace completati."""
-    from telemetry import get_recent_traces
+    from core.telemetry import get_recent_traces
     traces = get_recent_traces(limit=limit)
     return JSONResponse({"traces": traces, "count": len(traces)})
 
@@ -935,7 +474,7 @@ async def get_telemetry_active_traces():
 @app.get("/api/telemetry/traces/{request_id}")
 async def get_telemetry_trace_by_id(request_id: str):
     """Cerca un trace completato per request_id."""
-    from telemetry import get_trace_by_id
+    from core.telemetry import get_trace_by_id
     trace = get_trace_by_id(request_id)
     if trace is None:
         return JSONResponse(status_code=404, content={"error": "Trace not found"})
@@ -978,7 +517,7 @@ async def get_telemetry_status():
 @app.get("/api/telemetry/model")
 async def get_telemetry_model():
     """Informazioni sul modello LLM caricato."""
-    from config import MODEL_ID as cfg_model_id
+    from core.config import MODEL_ID as cfg_model_id
     info = {
         "model_id": cfg_model_id,
         "model_path": None,
@@ -993,7 +532,7 @@ async def get_telemetry_model():
         "detected_family": "unknown",
     }
     try:
-        from config import (
+        from core.config import (
             LLAMA_MODEL_PATH, N_GPU_LAYERS, LLM_NUM_CTX,
             LLM_BATCH_SIZE, LLM_UBATCH_SIZE, LLM_FLASH_ATTN,
             LLM_THINKING_MODE, LLM_MAX_TOKENS,
@@ -1009,7 +548,7 @@ async def get_telemetry_model():
     except Exception:
         pass
     try:
-        from llm_engine import engine
+        from core.llm_engine import engine
         if engine.chat_model is not None:
             info["model_loaded"] = True
         if engine.gatekeeper_model is not None:
@@ -1017,7 +556,7 @@ async def get_telemetry_model():
     except Exception:
         info["model_loaded"] = False
     try:
-        from model_profiles import detect_model_family
+        from core.model_profiles import detect_model_family
         family = detect_model_family(cfg_model_id)
         info["detected_family"] = family.family if family else "unknown"
     except Exception:
@@ -1052,7 +591,7 @@ if not hasattr(state, '_start_time'):
     state._start_time = time.time()
 
 # Inizializzazione Chat Session Store per tracciamento sessioni complete
-from session_store import ChatSessionStore
+from session.store import ChatSessionStore
 if state.chat_session_store is None:
     state.chat_session_store = ChatSessionStore(max_sessions=500, max_turns_per_session=200)
     # Prova a caricare sessioni persistenti dal disco
@@ -1076,7 +615,7 @@ def _save_session_turn(tracer, role, content, user_id, conversation_id,
     if not content or not state.chat_session_store:
         return
     try:
-        from session_store import MessageTurn
+        from session.store import MessageTurn
         _project = None
         _gk_intent = None
         if tracer:
@@ -1119,9 +658,9 @@ def _save_session_turn(tracer, role, content, user_id, conversation_id,
 
 @app.post("/api/chat")
 @limiter.limit(API_RATE_LIMIT_DEFAULT)
-async def ollama_chat(payload: ChatRequest, request: Request):
+async def chat(payload: ChatRequest, request: Request):
     state.total_requests += 1
-    """Endpoint chat Ollama-nativa simulata con LlamaEngine in locale."""
+    """Endpoint chat Jarvis nativo con LlamaEngine in locale."""
     from datetime import datetime, UTC
     
     body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
@@ -1158,9 +697,15 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         resolved = ApiTokenProvider.resolve(confirmation_token, approved=True)
         if resolved:
             return JSONResponse(status_code=200, content={
-                "model": body["model"],
-                "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
-                "done": True
+                "id": f"chatcmpl-confirm",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": MODEL_ID,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
+                    "finish_reason": "stop"
+                }]
             })
     elif raw_messages:
         last_msg = raw_messages[-1] if isinstance(raw_messages[-1], dict) else {}
@@ -1172,15 +717,27 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                 api_resolved = ApiTokenProvider.resolve(token, approved=approved)
                 if api_resolved:
                     return JSONResponse(status_code=200, content={
-                        "model": body["model"],
-                        "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
-                        "done": True
+                        "id": f"chatcmpl-confirm",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": MODEL_ID,
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
+                            "finish_reason": "stop"
+                        }]
                     })
                 else:
                     return JSONResponse(status_code=200, content={
-                        "model": body["model"],
-                        "message": {"role": "assistant", "content": "⚠️ Token di conferma non valido o scaduto."},
-                        "done": True
+                        "id": f"chatcmpl-confirm",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": MODEL_ID,
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "⚠️ Token di conferma non valido o scaduto."},
+                            "finish_reason": "stop"
+                        }]
                     })
         # Lazy: ConfirmationManager creato solo quando servono tool calls
 
@@ -1221,7 +778,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         state.total_completion_tokens += usage.get("completion_tokens", 0)
         
         if tracer:
-            from telemetry import LlmCallRecord
+            from core.telemetry import LlmCallRecord
             tracer.add_llm_call(LlmCallRecord(
                 model="chat",
                 step="gemma_generation",
@@ -1235,27 +792,24 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                 "completion_tokens": usage.get("completion_tokens", 0),
             })
         
-        # Mappa formato OpenAI a Ollama
-        choice = response["choices"][0]["message"]
-        ollama_resp = {
-            "model": body["model"],
-            "created_at": datetime.now(UTC).isoformat() + "Z",
-            "message": {
-                "role": choice.get("role", "assistant"),
-                "content": choice.get("content", "")
-            },
-            "done": True
+        # Risposta in formato OpenAI
+        choice = response["choices"][0]
+        chat_resp = {
+            "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": MODEL_ID,
+            "choices": [choice],
+            "usage": response.get("usage", {}),
         }
-        if choice.get("tool_calls"):
-            ollama_resp["message"]["tool_calls"] = choice.get("tool_calls")
         
         # Gestione Agentica per intercettare i tools non stream (iterazione)
-        tool_calls = ollama_resp["message"].get("tool_calls", [])
+        tool_calls = choice["message"].get("tool_calls", [])
         if tool_calls:
             # Lazy init: confirmation_mgr solo se servono tool calls
             if confirmation_mgr is None:
                 confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
-            body["messages"].append(ollama_resp["message"])
+            body["messages"].append(choice["message"])
             for tc in tool_calls:
                 if tracer:
                     tracer.start_step("tool_execution")
@@ -1272,10 +826,11 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                 body["messages"], tools=body.get("tools"), options=body.get("options"),
                 stream=False, preferred_provider=provider
             )
-            choice = response["choices"][0]["message"]
-            ollama_resp["message"] = {"role": choice.get("role", "assistant"), "content": choice.get("content", "")}
+            final_choice = response["choices"][0]
+            chat_resp["choices"] = [final_choice]
+            chat_resp["usage"] = response.get("usage", {})
             if tracer:
-                tracer.set_llm_response(choice.get("content", ""))
+                tracer.set_llm_response(final_choice["message"].get("content", ""))
                 usage2 = response.get("usage", {})
                 tracer.add_llm_call(LlmCallRecord(
                     model="chat",
@@ -1286,7 +841,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                 ))
                 tracer.end_step("gemma_generation_tool_final")
         
-        content = ollama_resp["message"].get("content", "")
+        content = chat_resp["choices"][0]["message"].get("content", "")
         if tracer:
             tracer.set_llm_response(content)
             # Popola tracer con metadati risposta
@@ -1303,7 +858,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
         # Il processaggio completo dei tag (MEMORY, SCHEDULE, SSH, ecc.) va in background
         # per non bloccare la risposta (può impiegare 15s+ con loopback Mem0).
         clean_content = strip_action_tags(content) if content else ""
-        ollama_resp["message"]["content"] = clean_content or content
+        chat_resp["choices"][0]["message"]["content"] = clean_content or content
 
         # Processa i tag in BACKGROUND per effetti collaterali
         if content:
@@ -1333,7 +888,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                 user_id=current_user_id, conversation_id=str(conversation_id),
             )
 
-        return JSONResponse(status_code=200, content=ollama_resp)
+        return JSONResponse(status_code=200, content=chat_resp)
         
     else:
         # Streaming
@@ -1352,6 +907,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
 
             safe_stream = TagSafeStream()
             full_chunks = []
+            _role_sent_in_stream = False
             async for chunk in gen:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
                     delta = chunk["choices"][0].get("delta", {})
@@ -1367,16 +923,20 @@ async def ollama_chat(payload: ChatRequest, request: Request):
                     # Usa TagSafeStream per gestire tag spalmati su piu' chunk
                     cleaned_content = safe_stream.process(content) if content else ""
 
-                    ollama_chunk = {
-                        "model": body["model"],
-                        "created_at": datetime.now(UTC).isoformat() + "Z",
-                        "message": {
-                            "role": "assistant",
-                            "content": cleaned_content
-                        },
-                        "done": False
+                    delta_payload = {"role": "assistant", "content": cleaned_content} if not _role_sent_in_stream else {"content": cleaned_content}
+                    _role_sent_in_stream = True
+                    openai_chunk = {
+                        "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": MODEL_ID,
+                        "choices": [{
+                            "index": 0,
+                            "delta": delta_payload,
+                            "finish_reason": None
+                        }]
                     }
-                    yield json.dumps(ollama_chunk).encode() + b"\n"
+                    yield json.dumps(openai_chunk).encode() + b"\n"
 
             # Rilascia eventuale buffer safe (TagSafeStream anti-frammentazione)
             final_flush = safe_stream.flush()
@@ -1386,7 +946,7 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             full_text = "".join(full_chunks)
 
             if tracer:
-                from telemetry import LlmCallRecord
+                from core.telemetry import LlmCallRecord
                 tracer.add_llm_call(LlmCallRecord(
                     model="chat",
                     step="gemma_generation_stream",
@@ -1400,10 +960,15 @@ async def ollama_chat(payload: ChatRequest, request: Request):
             # per non bloccare il client con process_response_tags (che può impiegare 15s+).
             clean_text = strip_action_tags(full_text) if full_text else ""
             yield json.dumps({
-                "model": body["model"],
-                "created_at": datetime.now(UTC).isoformat() + "Z",
-                "message": {"role": "assistant", "content": clean_text or full_text},
-                "done": True
+                "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": MODEL_ID,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": clean_text or full_text},
+                    "finish_reason": "stop"
+                }]
             }).encode() + b"\n"
 
             # Processa i tag in BACKGROUND per effetti collaterali (MEMORY, SCHEDULE, SSH, ecc.)
@@ -1650,75 +1215,10 @@ async def ollama_embed_batch(request: Request):
     return JSONResponse(status_code=200, content={"embeddings": result})
 
 
-@app.get("/api/version")
-async def ollama_version():
-    return {"version": "0.1.27"}
-
 # ==============================================================================
 # OpenAI-compatible endpoints via APIRouter
 # ==============================================================================
 app.include_router(openai_router)
-@app.get("/api/tags")
-async def ollama_tags():
-    return {
-        "models": [
-            {
-                "name": MODEL_ID,
-                "model": MODEL_ID,
-                "details": {"families": ["gemma"]}
-            },
-            {
-                "name": "nomic-embed-text:latest",
-                "model": "nomic-embed-text:latest",
-                "details": {"families": ["nomic-embed-text"]}
-            },
-            {
-                "name": "qwen3-embedding-0.6b:latest",
-                "model": "qwen3-embedding-0.6b:latest",
-                "details": {"families": ["qwen3"]}
-            }
-        ]
-    }
-
-@app.get("/api/ps")
-async def ollama_ps():
-    return {
-        "models": [
-            {
-                "name": MODEL_ID,
-                "model": MODEL_ID,
-                "size": 2438740416,
-                "size_vram": 2438740416,
-                "details": {"families": ["gemma"]}
-            },
-            {
-                "name": "nomic-embed-text:latest",
-                "model": "nomic-embed-text:latest",
-                "size": 84106624,
-                "size_vram": 84106624,
-                "details": {"families": ["nomic-embed-text"]}
-            },
-            {
-                "name": "qwen3-embedding-0.6b:latest",
-                "model": "qwen3-embedding-0.6b:latest",
-                "size": 610000000,
-                "size_vram": 610000000,
-                "details": {"families": ["qwen3"]}
-            }
-        ]
-    }
-
-@app.post("/api/show")
-async def ollama_show():
-    return {
-        "license": "",
-        "modelfile": "",
-        "parameters": "",
-        "template": "",
-        "details": {"families": ["qwen2", "nomic"]}
-    }
-
-
 # ═══════════════════════════════════════════
 # MCP Server v2 — Streamable HTTP (route FastAPI diretta)
 # ═══════════════════════════════════════════
@@ -1730,7 +1230,7 @@ async def ollama_show():
 # ═══════════════════════════════════════════
 
 try:
-    from mcp_server_v2 import handle_mcp_post
+    from api.mcp.server_v2 import handle_mcp_post
 
     @app.post("/api/mcp/v2")
     async def mcp_v2(request: Request):
@@ -1760,7 +1260,7 @@ except Exception as exc:
 # ═══════════════════════════════════════════
 
 if SYNAPTIQ_ENABLED:
-    from synaptiq_engine import synaptiq_engine
+    from graph.synaptiq_engine import synaptiq_engine
 
     @app.get("/api/synaptiq/status")
     async def synaptiq_status():

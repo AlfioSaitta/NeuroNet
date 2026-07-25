@@ -16,15 +16,15 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
-from auth import require_auth, require_admin
-from config import WORKSPACE_PROJECTS, EXTERNAL_PROJECTS, HOST_FS_PREFIX, SYNAPTIQ_ENABLED, parse_external_projects
-from dashboard import _persist_env
-from rag import (
+from api.auth import require_auth, require_admin
+from core.config import WORKSPACE_PROJECTS, EXTERNAL_PROJECTS, HOST_FS_PREFIX, SYNAPTIQ_ENABLED, parse_external_projects
+from admin.dashboard import _persist_env
+from rag.engine import (
     list_rag_projects, get_project_col_name, get_project_path,
     get_project_last_indexed, ingest_local_documents, _registered_project_paths,
     _save_state_unsafe,
 )
-import state
+import core.state as state
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ async def list_projects(user: dict = Depends(require_auth)):
 @router.get("/available")
 async def available_projects(_: dict = Depends(require_admin)):
     """Scansiona WORKSPACE_DIR per progetti non ancora indicizzati."""
-    from config import WORKSPACE_DIR
+    from core.config import WORKSPACE_DIR
     candidates = []
 
     if WORKSPACE_DIR and os.path.isdir(WORKSPACE_DIR):
@@ -201,7 +201,7 @@ async def reindex_project(body: dict, _: dict = Depends(require_admin)):
     synaptiq_triggered = False
     if SYNAPTIQ_ENABLED:
         try:
-            from synaptiq_engine import synaptiq_engine
+            from graph.synaptiq_engine import synaptiq_engine
             if synaptiq_engine and synaptiq_engine.is_initialized:
                 # Analisi immediata (non debounced) — usa _analyze_one
                 # che aggiorna _last_project_path e serializza accessi
@@ -301,7 +301,7 @@ async def register_project(body: dict, _: dict = Depends(require_admin)):
         await state.qdrant.get_collection(col_name)
     except Exception:
         from qdrant_client.models import VectorParams, Distance
-        from config import EMBEDDING_DIMS
+        from core.config import EMBEDDING_DIMS
         await state.qdrant.create_collection(
             collection_name=col_name,
             vectors_config=VectorParams(size=EMBEDDING_DIMS, distance=Distance.COSINE)
@@ -339,7 +339,7 @@ async def get_synaptiq_project_graph(name: str, _: dict = Depends(require_admin)
         )
 
     try:
-        from synaptiq_engine import synaptiq_engine
+        from graph.synaptiq_engine import synaptiq_engine
     except ImportError:
         return JSONResponse(
             content={"error": "Synaptiq non installato", "nodes": [], "edges": []},

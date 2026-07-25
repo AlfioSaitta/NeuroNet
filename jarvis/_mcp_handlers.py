@@ -58,13 +58,13 @@ def handle_mcp_request(method: str, params: Optional[dict] = None) -> Any:
 
 def _import_state():
     """Import state in modo safe (modulo leggero)."""
-    import state as _s
+    import core.state as _s
     return _s
 
 
 def _import_telemetry():
     """Import telemetry in modo safe."""
-    from telemetry import PipelineTracer as _PT, get_recent_traces as _grt, get_trace_by_id as _gtbi
+    from core.telemetry import PipelineTracer as _PT, get_recent_traces as _grt, get_trace_by_id as _gtbi
     return _PT, _grt, _gtbi
 
 
@@ -84,7 +84,7 @@ def _get_status_dict() -> dict:
 
 
 def _get_model_info_dict() -> dict:
-    from config import MODEL_ID as cfg_model_id
+    from core.config import MODEL_ID as cfg_model_id
     info = {
         "model_id": cfg_model_id,
         "model_path": None,
@@ -99,7 +99,7 @@ def _get_model_info_dict() -> dict:
         "model_loaded": False,
     }
     try:
-        from config import (
+        from core.config import (
             LLAMA_MODEL_PATH, N_GPU_LAYERS, LLM_NUM_CTX,
             LLM_BATCH_SIZE, LLM_UBATCH_SIZE, LLM_FLASH_ATTN,
             LLM_THINKING_MODE, LLM_MAX_TOKENS,
@@ -115,7 +115,7 @@ def _get_model_info_dict() -> dict:
     except Exception:
         pass
     try:
-        from llm_engine import engine
+        from core.llm_engine import engine
         info["model_loaded"] = engine.chat_model is not None
         info["gatekeeper_model_loaded"] = engine.gatekeeper_model is not None
     except Exception:
