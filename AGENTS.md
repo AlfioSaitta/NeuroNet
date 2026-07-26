@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-07-21 (Synaptiq Graph Visualization — FA2 freeze fix, per-project graph, WORKSPACE_DIR prefix)
+> **Data ultimo aggiornamento:** 2026-07-26 (Gatekeeper ottimizzato — classificazione intenti con Gemma 4, compressione caveman con Qwen3.5 0.8B 4096ctx)
 
 ---
 
@@ -156,12 +156,12 @@ Master jarvis:8000
 |---|---|---|---|
 | `core/config.py` | **Unica fonte di verità per tutte le costanti.** Legge `.env` con `os.getenv()`. NON modificare valori hardcoded qui — usare `.env`. | `os`, `logging` |
 | `core/state.py` | Stato globale mutabile condiviso tra moduli (singleton). Popolato nel `lifespan` di main.py. Ring buffer `pipeline_traces` (500), gatekeeper stats, error counters. | — |
-| `core/llm_engine.py` | Carica i modelli GGUF, gestisce inferenza, thinking mode, offloading al Worker, decomposta in 6 helper per `load_models()` e `generate_chat()`. | `llama_cpp`, `httpx`, `config`, `state` |
+| `core/llm_engine.py` | Carica i modelli GGUF, gestisce inferenza, thinking mode, offloading al Worker, decomposta in 6 helper per `load_models()` e `generate_chat()`. **Classificazione intenti**: `classify_intent_with_gemma()` per gatekeeper via Gemma 4. **Compressione**: `compress_prompt()` via Qwen3.5 0.8B. | `llama_cpp`, `httpx`, `config`, `state` |
 | `core/lifecycle.py` | Lifecycle manager: avvio componenti, shutdown graceful, watchdog health. | `config`, `state` |
 | `core/model_profiles.py` | Auto-rilevamento famiglia modello GGUF (Qwen, Gemma, DeepSeek, QwQ, Llama, Mistral, Phi). | `config` |
 | `core/telemetry.py` | PipelineTracer per-request + GatekeeperStats cumulativi. Tracciamento step, LLM calls, tool calls. Campi prompt: system_prompt, rag_context, user_content, compressed_text, llm_response. | `state` |
 | `main.py` | Entry point FastAPI, lifespan, endpoint HTTP, integrazione componenti. | Tutti i moduli |
-| `agent/prompt.py` | Costruisce il super-prompt omnisciente con tag XML. LLM Gatekeeper. Rifattorizzato in 6 helper: 3 web search + 3 memoria. | `rag`, `memory`, `web_search` |
+| `agent/prompt.py` | Costruisce il super-prompt omnisciente con tag XML. LLM Gatekeeper. Rifattorizzato in 6 helper: 3 web search + 3 memoria. **Classificazione intenti**: `_run_gatekeeper()` ora chiama `classify_intent_with_gemma()` su Gemma 4 (0 VRAM extra) invece di Qwen3.5. Keyword bypass `_keyword_bypass()` per salti rapidi. | `rag`, `memory`, `web_search`, `llm_engine` |
 | `agent/tags.py` | Registro e processing 21 tag XML d'azione: `TagSafeStream` (stream-safe), `process_all_tags()` → `_execute_tag_handlers()` + `_apply_replacements()`, `register_tag()`. | `re`, `memory`, `cron_agent`, `task_manager` |
 | `agent/tools.py` | TOOLS_SCHEMA per tool-calling, dispatch table con 18 handler per esecuzione tool (file/shell/skills). | `config`, `state` |
 | `agent/skills.py` | Carica skill dinamiche da `jarvis/agent/skills/` a runtime. | — |
@@ -273,6 +273,23 @@ Il file `.env` è la **singola fonte di configurazione**. Non hardcodare mai val
 | `LLM_TEMPERATURE` | `1.0` (Gemma 4) | `0.7` (Qwen3.5) | `0.7` |
 | `LLM_THINKING_MODE` | `true` | `false` | `false` |
 
+### Gatekeeper LLM — Configurazione
+
+```env
+# Gatekeeper classification model (Gemma 4 E2B QAT — già in VRAM per chat, 0 VRAM extra)
+# La classificazione intenti è fatta da classify_intent_with_gemma() in llm_engine.py
+# Sempre via Gemma 4 (2.1B QAT), usa lo stesso modello del chat. Zero VRAM extra.
+
+# Gatekeeper compression model (Qwen3.5-0.8B-Instruct) per compressione caveman.
+# Default: CPU (n_gpu_layers=0). Imposta GATEKEEPER_N_GPU_LAYERS=-1 per GPU,
+# oppure un numero per offload parziale. Modello tiny (~0.8B) — n_ctx=4096.
+# 4096 ctx permette few-shot esempi nella classificazione e contesto RAG più
+# ricco nella compressione senza troncare a 1500 caratteri.
+GATEKEEPER_MODEL_PATH=./models/Qwen3.5-0.8B-Instruct-Q4_K_M.gguf
+GATEKEEPER_N_GPU_LAYERS=-1
+GATEKEEPER_N_CTX=4096
+```
+
 ### Variabili per il Funzionamento del Modello
 
 ```env
@@ -368,6 +385,7 @@ Jarvis usa **JWT** per l'autenticazione della dashboard admin:
 | **Qwen3-Embedding-0.6B** | `Qwen3-Embedding-0.6B-Q8_0.gguf` | ✅ IN USO | ~400 MiB (2/28 layer) | 768d MRL, 2 layer su GPU |
 | **Qwen3-Reranker-0.6B** | `models/Qwen3-Reranker-0.6B/` | ✅ IN USO | 0 VRAM (CPU fp16) | ~600 MB RAM, fallback FlashRank |
 | **Qwen3.5-4B** (backup) | `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ⏳ BACKUP | 1924MiB (15/32 layer) | Sostituito da Gemma 4 (86% VRAM in più) |
+| **Qwen3.5-0.8B Gatekeeper** (compression) | `Qwen3.5-0.8B-Instruct-Q4_K_M.gguf` | ✅ IN USO | ~553 MiB (GPU) | Compressione caveman, 4096 ctx, few-shot |
 | Gemma 4 E2B (Q4_K_M) | `gemma-4-E2B-it-Q4_K_M.gguf` | ➖ SCONSIGLIATO | 1118MiB (15/35 layer) | +8% VRAM, -38% tok/s vs QAT |
 
 ### Master VPS (CPU-only — 24GB RAM)
@@ -442,6 +460,9 @@ Benchmark aggiuntivo (prompt "Differenze ML/DL/AI"):
 | 18/07 | **Synaptiq Engine — Bug Fix Migration** | Risolti 6 bug nella migrazione da CodeGraph a Synaptiq v2.0.5: import crash (CRITICAL), KeyError (MEDIUM), extra brace dashboard (MEDIUM), badge OFF/IDLE (LOW), pathspec deprecation (LOW), label "CodeGraph" → "Code Context" (LOW) |
 | 18/07 | **Synaptiq — Watchdog Automation** | Implementata automazione completa: debounced per-project (30s) in `synaptiq_engine.py`, hook in `rag_queue_worker()`, initial analysis al boot in `main.py`. Helper `parse_external_projects()` in `config.py` per DRY |
 | 18/07 | **Synaptiq Review + Fixes** | Code review completa: `get_event_loop()` → `get_running_loop()`, try/except su `await task_ingest`, refactor parsing EXTERNAL_PROJECTS in funzione centralizzata |
+| 26/07 | **Gatekeeper OpB — Classificazione intenti con Gemma 4** | Nuovo `classify_intent_with_gemma()` in `llm_engine.py` — classifica intenti con Gemma 4 (1-5 token output, 0 VRAM extra). `_run_gatekeeper()` in `prompt.py` ora chiama Gemma 4 invece di Qwen3.5. Tracer model tag `"gemma"` |
+| 26/07 | **Gatekeeper OpA — Qwen3.5 0.8B 4096ctx + few-shot** | `GATEKEEPER_N_CTX=2048→4096`. `classify_intent()` prompt con 6 few-shot esempi per compressione più accurata. Compressione ora fallisce a compressione pass-through (no LLM call) se ratio negativo |
+| 26/07 | **Performance analysis report** | C1 (7 opzioni ottimizzazione gatekeeper, 4 safe, -43% LLM call stimate) + C3 (3 opzioni safe cron/NOTIFY, -87% latenza media) in `docs/plans/performance_analysis_report.md` |
 | 16/07 | **MCP Server v2 Streamable HTTP** | Nuovo endpoint `/api/mcp/v2` — 8 tool + 7 resources. Rimossi endpoint SSE legacy. Conforme MCP Streamable HTTP (RFC 2025-11-25) |
 | 16/07 | **`_strip_thinking()` + compressione ottimizzata** | Rimuove tag `<think>`, analisi strutturate e meta-ragionamenti dalle risposte del Gatekeeper Qwen3.5. Compressor prompt riscritto con esempio INPUT/OUTPUT concreto |
 | 16/07 | **Prompt format rules** | System prompt aggiornato con regole esplicite per tabelle Markdown, code block, grassetto. Sezione finale obbligatoria `---` con Riepilogo/Attenzione |
@@ -564,6 +585,12 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 | `jarvis/classificatore.py` | ✅ Nuovo | Classificatore intenti centralizzato (Intent enum, classify(), is_project_query()) |
 | `jarvis/confirmation_manager.py` | ✅ Nuovo | Gestione conferme utente per tool-calling con timeout e token |
 | `jarvis/core/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls, ring buffer 500 trace. Prompt fields: system_prompt, rag_context, user_content, compressed_text, llm_response |
+| `jarvis/core/llm_engine.py` (OpA) | ✅ **MIGLIORATO** | `GATEKEEPER_N_CTX=4096`, 6 few-shot esempi in `classify_intent()`, compressione con contesto RAG più ricco senza troncare a 1500 caratteri |
+| `jarvis/core/llm_engine.py` (OpB) | ✅ **NUOVO** | `classify_intent_with_gemma()` — classificazione intenti via Gemma 4 (2.1B QAT, 0 VRAM extra, 1-5 token output). Sostituisce Qwen3.5 per gatekeeper classification |
+| `jarvis/agent/prompt.py` | ✅ **MIGLIORATO** | `_run_gatekeeper()` ora chiama `classify_intent_with_gemma()` invece di Qwen3.5. `_keyword_bypass()` per bypass immediato. Tracer model tag `"gemma"` |
+| `jarvis/openai_api/chat.py` (C7 fix) | ✅ **FIXATO** | `is_internal_query()` detection con bypass di `build_omniscient_prompt()` e `process_response_tags()` — rompe loop Mem0→API→Mem0 |
+| `jarvis/core/llm_engine.py` (C6 fix) | ✅ **FIXATO** | `_GK_MAX_CHARS=1500` guard per prevenire ValueError su gatekeeper 2048-ctx overflow |
+| `docs/plans/performance_analysis_report.md` | ✅ **NUOVO** | C1 (7 opzioni, 4 safe, -43% LLM call stimate) + C3 (3 opzioni safe, -87% latenza media) analisi complete |
 | `jarvis/api/mcp/server.py` | ✅ Nuovo | Server MCP stdio: 9 tool + 7 resources per diagnostica AI esterna (legacy) |
 | `jarvis/api/mcp/server_v2.py` | ✅ **ATTIVO** | MCP v2 Streamable HTTP via `/api/mcp/v2` (protocollo MCP v2) |
 | `jarvis/graph/synaptiq_engine.py` | ✅ **ATTIVO** | Synaptiq v2.0.5 wrapper: async thread-safe, hybrid search, symbol context, BFS traversal, dead code, community detection. Watchdog automation: `notify_file_event()` con debounce 30s per-project. **Graph visualization**: `get_graph_data()` con KnowledgeGraph API, `_last_project_path` tracking, Counter-based project name inference |
@@ -629,6 +656,7 @@ ssh -i /home/alfio/.ssh/ovh_rsa debian@51.38.135.179
 - **Synaptiq — Dipendenza da `SYNAPTIQ_ENABLED`**: la variabile `SYNAPTIQ_ENABLED` in `config.py` determina se Synaptiq viene caricato. Il controllo è a 3 livelli: (1) tentativo di import, (2) `try/except ImportError`, (3) flag booleano. Tutti i moduli che usano Synaptiq DEVONO prima controllare `SYNAPTIQ_ENABLED`.
 - **Synaptiq — Watchdog Automation**: il watchdog RAG notifica Synaptiq via `synaptiq_engine.notify_file_event(project_root)` dopo ogni batch di eventi file. Synaptiq usa debounce per-project (30s). L'analisi iniziale parte in background dopo il completamento del RAG ingest.
 - **`codegraph_client.py` rinominato**: il vecchio file `codegraph_client.py` è stato rinominato `codegraph_client.py.disabled` e non deve essere riattivato. Tutta la funzionalità è migrata in `synaptiq_engine.py` + `synaptiq_bridge.py`.
+- **Gatekeeper — 3-tier decision flow**: (1) `_keyword_bypass()` evita completamente LLM per query semplici/saluti/ringraziamenti; (2) `classify_intent_with_gemma()` classifica intento con Gemma 4 (1-5 token, 0 VRAM extra); (3) `compress_prompt()` comprime contesto solo quando necessario con Qwen3.5 0.8B (4096 ctx, few-shot). La compressione è skippata per greeting/simple queries.
 
 ### 🟢 APPROCCIO CORRETTO
 
@@ -1141,6 +1169,35 @@ Ogni `memory.add()` triggera Mem0 a chiamare `http://127.0.0.1:8000/v1/chat/comp
 Stessa protezione aggiunta per il branch streaming (linea 279).
 
 **Impatto:** CRITICAL — interrompe loop infinito, risolve flooding richieste, elimina la causa primaria del context overflow della sessione.
+
+---
+
+### 🐛 Bug 20 (2026-07-26): Gatekeeper — Classificazione intenti ottimizzata con Gemma 4 ✅ FIXATO
+
+**Problema:** Il gatekeeper usava Qwen3.5-0.8B (o Qwen3.5-4B) per classificare l'intento della richiesta utente. Questo richiedeva ~553 MiB VRAM extra per il gatekeeper e causava ~2-4 secondi aggiuntivi di TTFT sulla classificazione. Inoltre, la finestra di contesto di 2048 token limitava il few-shot e causava troncature aggressive.
+
+**Soluzione (due ottimizzazioni parallele):**
+
+**OpA — Qwen3.5 0.8B 4096ctx + few-shot:**
+- `GATEKEEPER_N_CTX` aumentato da 2048 a 4096 (`config.py` e `.env`)
+- Prompt di `classify_intent()` arricchito con 6 few-shot esempi concreti
+- Compressione ora fallisce a pass-through (senza chiamata LLM) se il ratio di compressione è negativo
+- File: `jarvis/core/llm_engine.py` (funzione `classify_intent()`, righe ~516-580)
+
+**OpB — Classificazione intenti con Gemma 4 (0 VRAM extra):**
+- Nuova funzione `classify_intent_with_gemma()` in `llm_engine.py` che usa Gemma 4 E2B QAT (già in VRAM) per classificare intenti in 1-5 token
+- Nessuna grammatica GBNF — prompt ingegnerizzato per output token singolo (`greeting|simple|project|web|code|complex`)
+- `_run_gatekeeper()` in `prompt.py` ora chiama `classify_intent_with_gemma()` invece di `classify_intent()` su Qwen3.5
+- `_keyword_bypass()` per salti rapidi su query ovvie (saluti, ringraziamenti, simple yes/no)
+- Tracer model tag cambiato da `"qwen"` a `"gemma"`
+- Impatto: 0 VRAM extra, ~0.5-1s per richiesta risparmiati, classificazione più accurata
+
+**File modificati:**
+- `jarvis/core/llm_engine.py` (righe 516-633) — nuove funzioni, guard, few-shot
+- `jarvis/agent/prompt.py` (righe 163-610) — `_keyword_bypass()`, `_run_gatekeeper()` aggiornato, tracer tag
+- `jarvis/core/config.py` (riga 136) — `GATEKEEPER_N_CTX=4096` default
+
+**Impatto:** MEDIO — riduzione TTFT gatekeeper, eliminato VRAM extra per classificazione, compressione più accurata.
 
 ---
 

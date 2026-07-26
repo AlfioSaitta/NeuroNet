@@ -172,7 +172,8 @@ NeuroNet/
 - Warmup CUDA JIT per evitare delay di 30s+ sulla prima richiesta
 - MRL embedding troncamento (1024→768) per retrocompatibilità
 - `_strip_thinking()` — rimuove tag `<think>`, analisi strutturate e meta-ragionamenti dalle risposte LLM
-- `compress_prompt()` — compressione caveman con Qwen3.5 (CPU), raw fallback se ratio negativo
+- `compress_prompt()` — compressione caveman con Qwen3.5 0.8B (CPU/GPU via GATEKEEPER_N_GPU_LAYERS), raw fallback se ratio negativo
+- `classify_intent_with_gemma()` — classificazione intenti con Gemma 4 esistente (0 VRAM extra, 1-5 token output)
 - `Gatekeeper N_GPU_LAYERS` — supporto offload GPU opzionale per il Gatekeeper LLM
 
 ---

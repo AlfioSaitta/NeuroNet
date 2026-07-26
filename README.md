@@ -74,7 +74,8 @@ WATCHDOG_WATCH_MODE=per_project
 | Flash Attention | `llm_engine.py` | -30-50% VRAM |
 | GPU Offloading remoto | `llm_engine.py` | Worker remoto con failover 1.5s |
 | Thinking Mode | `llm_engine.py` | `<\|think\|>` per Gemma / DeepSeek / QwQ |
-| Compressione | `llm_engine.py` | Caveman mode con Qwen3.5 CPU |
+| Compressione | `llm_engine.py` | Caveman mode con Qwen3.5 0.8B (GPU/CPU) |
+| Gatekeeper classifier | `llm_engine.py` | Classificazione intenti con Gemma 4 (0 VRAM extra) |
 | Model Profiles | `model_profiles.py` | Auto-rilevamento famiglia GGUF (7 famiglie) |
 
 </details>
@@ -109,7 +110,7 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| LLM Gatekeeper | `agent/prompt.py` | Classifica intento (keyword+regex+LLM) |
+| LLM Gatekeeper | `agent/prompt.py` | 3-tier: keyword bypass + Gemma 4 classification (0 VRAM extra) + Qwen3.5 compression |
 | Budget Allocator | `agent/prompt.py` | 55% RAG / 20% web / 10% mem / 15% tree, max 15K char |
 | Super-prompt XML | `agent/prompt.py` | 7 tag contestuali |
 | 21 tag d'azione | `agent/tags.py` | MEMORY, SCHEDULE, SSH, TODO, WEB, FILE, EXEC, COMMIT... |
@@ -214,6 +215,7 @@ Backend API auth: `jarvis/routes/profile.py` (self-service: API key, password, T
 | Ruolo | Modello | Memoria | Velocità |
 |---|---|---|---|
 | **Chat (attivo)** | Gemma 4 E2B QAT (Q4_K_XL) | 1.036 MiB VRAM | ~6.88 tok/s |
+| **Gatekeeper/Compression** | Qwen3.5-0.8B (Q4_K_M) | ~553 MiB VRAM | — |
 | **Embedding** | Qwen3-Embedding-0.6B (Q8_0) | ~400 MiB VRAM | — |
 | **Reranker** | Qwen3-Reranker-0.6B (fp16 CPU) | ~600 MB RAM | — |
 | **Backup Chat** | Qwen3.5-4B (Q4_K_XL) | 1.924 MiB VRAM | ~6.24 tok/s |

@@ -108,8 +108,9 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo 
 ### Worker Locale (RTX 3050 Ti — 4GB VRAM)
 
 | Modello | Stato | VRAM | Note |
-|---|---|---|---|
+|---|---|---|---|---|
 | `gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf` | ✅ **IN USO** | 1036MiB (25%) | n_gpu_layers=15, flash_attn=true, 2.1B param QAT |
+| `Qwen3.5-0.8B-Instruct-Q4_K_M.gguf` | ✅ **IN USO** | ~553MiB (GPU) | Gatekeeper compression, 4096 ctx, few-shot |
 | `Qwen3-Embedding-0.6B-Q8_0.gguf` | ✅ IN USO | +400MiB (35% tot) | 768d MRL |
 | `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ⏳ Backup | 1924MiB (47%) | Sostituito da Gemma 4 (86% meno VRAM) |
 | `nomic-embed-text-v1.5.gguf` | ❌ Rimosso | CPU | Rimpiazzato da Qwen3 |
