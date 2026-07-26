@@ -2,11 +2,12 @@ import asyncio
 import os
 import re
 import json
+import time
 import subprocess
 import logging
-import httpx
 from concurrent.futures import ThreadPoolExecutor
 
+import core.state as state
 from core.config import LLM_THINKING_MODE, MODEL_PROFILE, EXTERNAL_GPU_URL, MODEL_ID, LLM_MAX_TOKENS, EMBEDDING_DIMS
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -373,42 +374,38 @@ class LlamaEngine:
         if model == "chat" and EXTERNAL_GPU_URL:
             try:
                 payload = self._build_external_payload(messages, tools, stream, opts)
+                client = state.http_client
+                if client is None:
+                    raise RuntimeError("http_client not initialized")
 
-                async with httpx.AsyncClient(timeout=1.5) as client:
-                    await client.get(f"{EXTERNAL_GPU_URL.rstrip('/')}/")
-                
-                logger.info(f"🚀 Nodo GPU Esterno Raggiungibile! Offloading inferenza a {EXTERNAL_GPU_URL}...")
-                
+                logger.info(f"🚀 Offloading inferenza a {EXTERNAL_GPU_URL}...")
+
                 if stream:
                     async def external_async_generator():
                         _role_sent = False
-                        async with httpx.AsyncClient(timeout=120.0) as client:
-                            async with client.stream("POST", f"{EXTERNAL_GPU_URL.rstrip('/')}/api/chat", json=payload) as response:
-                                response.raise_for_status()
-                                async for line in response.aiter_lines():
-                                    if line:
-                                        try:
-                                            data = json.loads(line)
-                                            choices = data.get("choices", [{}])
-                                            content = choices[0].get("delta", {}).get("content", "") if choices else ""
-                                            delta = {"role": "assistant", "content": content} if not _role_sent else {"content": content}
-                                            _role_sent = True
-                                            done = choices[0].get("finish_reason") == "stop" if choices else False
-                                            chunk = {"choices": [{"delta": delta, "finish_reason": "stop" if done else None}]}
-                                            yield chunk
-                                        except Exception:
-                                            pass
+                        async with client.stream("POST", f"{EXTERNAL_GPU_URL.rstrip('/')}/api/chat", json=payload) as response:
+                            response.raise_for_status()
+                            async for line in response.aiter_lines():
+                                if line:
+                                    try:
+                                        data = json.loads(line)
+                                        choices = data.get("choices", [{}])
+                                        content = choices[0].get("delta", {}).get("content", "") if choices else ""
+                                        delta = {"role": "assistant", "content": content} if not _role_sent else {"content": content}
+                                        _role_sent = True
+                                        done = choices[0].get("finish_reason") == "stop" if choices else False
+                                        chunk = {"choices": [{"delta": delta, "finish_reason": "stop" if done else None}]}
+                                        yield chunk
+                                    except Exception:
+                                        pass
                     return external_async_generator()
                 else:
-                    async def external_sync():
-                        async with httpx.AsyncClient(timeout=120.0) as client:
-                            response = await client.post(f"{EXTERNAL_GPU_URL.rstrip('/')}/api/chat", json=payload)
-                            response.raise_for_status()
-                            data = response.json()
-                            choices = data.get("choices", [{}])
-                            content = choices[0].get("message", {}).get("content", "") if choices else ""
-                            return {"choices": [{"message": {"role": "assistant", "content": content}}]}
-                    return await external_sync()
+                    response = await client.post(f"{EXTERNAL_GPU_URL.rstrip('/')}/api/chat", json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                    choices = data.get("choices", [{}])
+                    content = choices[0].get("message", {}).get("content", "") if choices else ""
+                    return {"choices": [{"message": {"role": "assistant", "content": content}}]}
 
             except Exception as e:
                 logger.warning(f"⚠️ Nodo GPU Esterno offline o irraggiungibile ({e}). Fallback su Motore C++ Locale (CPU)...")
@@ -427,6 +424,8 @@ class LlamaEngine:
         # The grammar parameter is left as None — do NOT build a custom GBNF string here.
 
         if stream:
+            _STREAM_TOTAL_TIMEOUT = 600  # max 10 min totali per streaming
+
             async def async_generator():
                 async with PriorityLockContextManager(lock, priority=0):
                     try:
@@ -451,7 +450,7 @@ class LlamaEngine:
                         timeout=300
                         )
                     except asyncio.TimeoutError:
-                        logger.error("LLM streaming timed out after 300s")
+                        logger.error("LLM streaming timed out after 300s (first chunk)")
                         yield {"error": "LLM inference timed out"}
                         return
                     def get_next(gen):
@@ -460,12 +459,24 @@ class LlamaEngine:
                         except StopIteration:
                             return None
                     
+                    _stream_deadline = time.monotonic() + _STREAM_TOTAL_TIMEOUT
                     while True:
+                        if time.monotonic() > _stream_deadline:
+                            logger.error(f"LLM streaming total timeout after {_STREAM_TOTAL_TIMEOUT}s")
+                            yield {"error": "LLM generation took too long"}
+                            break
                         try:
-                            chunk = await loop.run_in_executor(self.executor, lambda: get_next(generator))
+                            chunk = await asyncio.wait_for(
+                                loop.run_in_executor(self.executor, lambda: get_next(generator)),
+                                timeout=60.0,  # per-chunk timeout: 60s tra token consecutivi
+                            )
                             if chunk is None:
                                 break
                             yield chunk
+                        except asyncio.TimeoutError:
+                            logger.error("LLM streaming per-chunk timed out (60s stall)")
+                            yield {"error": "LLM generation stalled"}
+                            break
                         except Exception as e:
                             logger.error(f"Errore generatore stream: {e}")
                             break
@@ -612,6 +623,15 @@ digit ::= [0-9]'''
 
         raw_data = "\n\n".join(raw_parts)
 
+        # ── Token-aware context window guard ──
+        # Gatekeeper model has GATEKEEPER_N_CTX=2048. System prompt needs ~100-450
+        # tokens (CJK vs English), response needs ~50 tokens, overhead ~50 tokens.
+        # Conservative budget for raw_data: 1500 chars (safe for CJK at 1 char/token).
+        _GK_MAX_CHARS = 1500
+        if len(raw_data) > _GK_MAX_CHARS:
+            logger.info(f"🗜️ Compress input {len(raw_data)}ch > {_GK_MAX_CHARS}ch, truncating for gatekeeper 2048-ctx")
+            raw_data = raw_data[:_GK_MAX_CHARS]
+
         messages = [
             {"role": "system", "content": CAVEMAN_COMPRESSOR_SYSTEM_PROMPT},
             {"role": "user", "content": raw_data},
@@ -621,7 +641,7 @@ digit ::= [0-9]'''
             response = await self.generate_chat(
                 messages,
                 stream=False,
-                options={"temperature": 0.0, "num_predict": 2048},
+                options={"temperature": 0.0, "num_predict": 512},
                 model="gatekeeper",
             )
             if "error" in response:
