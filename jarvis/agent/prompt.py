@@ -12,6 +12,7 @@ import datetime
 import os
 import re
 import asyncio
+import time
 from functools import partial
 
 from core.config import logger, BOT_NAME, LLM_OPTIONS, MODEL_PROFILE, DOC_DIR
@@ -28,6 +29,26 @@ except ImportError:
     synaptiq_engine = None
 from core.telemetry import PipelineTracer, GatekeeperStats
 import core.state as state
+
+# ════════════════════════════════════════════════════════════════
+# CACHE RAG PROJECTS (TTL 60s — evita chiamate Qdrant per ogni richiesta)
+# ════════════════════════════════════════════════════════════════
+
+_RAG_PROJECTS_CACHE: dict[str, tuple[float, list[str]]] = {}
+_RAG_PROJECTS_CACHE_TTL = 60.0
+
+async def _get_cached_rag_projects(user=None) -> list[str]:
+    """Wrapper per list_rag_projects() con cache TTL 60s per utente."""
+    cache_key = user.get("username", "__anon__") if user else "__anon__"
+    now = time.monotonic()
+    if cache_key in _RAG_PROJECTS_CACHE:
+        ts, data = _RAG_PROJECTS_CACHE[cache_key]
+        if now - ts < _RAG_PROJECTS_CACHE_TTL:
+            return data
+    data = await list_rag_projects(user=user)
+    _RAG_PROJECTS_CACHE[cache_key] = (now, data)
+    return data
+
 
 # ════════════════════════════════════════════════════════════════
 # CONTESTO TEMPORALE
@@ -565,7 +586,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     # STEP 1 + 2: GATEKEEPER
     # ════════════════════════════════════════════════════
     _active_before = state.get_last_project(current_user_id, conversation_id)
-    _all_projects = await list_rag_projects(user=user)
+    _all_projects = await _get_cached_rag_projects(user=user)
     _recent_user_msgs = [m["content"] for m in messages if m["role"] == "user"][-3:]
 
     _gk_context = {
@@ -705,9 +726,9 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                                         full_files_content += f"\n\n📄 FILE COMPLETO RICHIESTO ({rp}):\n```\n{fc}\n```\n"
                                     except Exception:
                                         pass
-        if not _is_meta_query:
+        if _is_project_query and not _is_meta_query:
             _rag_project = _user_override_focus if _user_override_focus else active_project
-            rag_ctx_local = await search_documents(clean_msg, is_project_query=_is_project_query, project_name=_rag_project, user=user)
+            rag_ctx_local = await search_documents(clean_msg, is_project_query=True, project_name=_rag_project, user=user)
         else:
             rag_ctx_local = ""
         if full_files_content:
@@ -731,7 +752,21 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     mem_task = asyncio.create_task(_gather_memory())
     rag_task = asyncio.create_task(_gather_rag())
     synaptiq_task = asyncio.create_task(_gather_synaptiq())
-    mem_ctx, rag_ctx, cg_ctx = await asyncio.gather(mem_task, rag_task, synaptiq_task)
+    try:
+        mem_ctx, rag_ctx, cg_ctx = await asyncio.wait_for(
+            asyncio.gather(mem_task, rag_task, synaptiq_task),
+            timeout=60.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("⏱️ Context gather timed out (60s) — using partial results")
+        mem_ctx = mem_task.result() if mem_task.done() and not mem_task.cancelled() else ""
+        rag_ctx = rag_task.result() if rag_task.done() and not rag_task.cancelled() else ""
+        cg_ctx = synaptiq_task.result() if synaptiq_task.done() and not synaptiq_task.cancelled() else ""
+        # Cancel still-running tasks
+        for t in (mem_task, rag_task, synaptiq_task):
+            if not t.done():
+                t.cancel()
+    logger.info(f"📊 Context gathered: mem={len(mem_ctx or '')} rag={len(rag_ctx or '')} synaptiq={len(cg_ctx or '')} chars")
 
     # Auto web discovery (dipende da rag_ctx → non parallelizzabile)
     _is_short_greeting = len(clean_msg.strip()) < 20 and not _is_project_query
@@ -792,6 +827,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
 
     # Calcola raw_size esatto (clean_msg not available in _allocate_budget)
     raw_size = len(rag_context_for_compress) + len(history_str) + len(clean_msg)
+    logger.info(f"🗜️ Starting caveman compression: {raw_size} chars raw → budget={MAX_BUDGET}")
+    logger.info(f"   raw_size={raw_size} rag_alloc={len(rag_final or '')} web_alloc={len(web_final or '')} mem_alloc={len(mem_final or '')} synaptiq_alloc={len(cg_ctx or '')}")
 
     compressed, _compression_is_raw = await _run_compression(
         clean_msg, rag_context_for_compress, history_str, active_project,
@@ -807,6 +844,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     tracer.end_step("caveman_compression", details=comp_details)
     tracer._compression_raw_size = raw_size
     tracer._compression_is_raw = _compression_is_raw
+    logger.info(f"✅ Caveman compression {'raw-fallback' if _compression_is_raw else 'ok'}: {raw_size} → {len(compressed)} chars")
 
     # ════════════════════════════════════════════════════
     # STEP 4: BUILD GEMMA 4 PROMPT
@@ -818,7 +856,9 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         "system_prompt_len": len(CAVEMAN_GEMMA_SYSTEM) if not _compression_is_raw else 500,
         "user_content_len": len(compressed),
     })
+    logger.info(f"🧠 Final prompt built: system={len(CAVEMAN_GEMMA_SYSTEM) if not _compression_is_raw else 500} user={len(compressed)}")
 
     if finalize_trace:
         tracer.finish()
+        logger.info(f"🏁 build_omniscient_prompt complete — returning to main.py")
     return messages
