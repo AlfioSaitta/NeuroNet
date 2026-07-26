@@ -514,7 +514,10 @@ class LlamaEngine:
     # ════════════════════════════════════════════════════════════════
 
     async def classify_intent(self, user_message: str, context: dict) -> GatekeeperResult:
-        """Classifica intento utente in project/meta/general usando Qwen3.5.
+        """Classifica intento utente in project/meta/general usando Qwen3.5 (OpA).
+
+        Usa 6 few-shot esempi con LlamaGrammar per output JSON vincolato.
+        GATEKEEPER_N_CTX=4096 permette esempi + contesto senza troncare.
 
         Args:
             user_message: Query utente grezza.
@@ -533,7 +536,21 @@ class LlamaEngine:
 - Progetti disponibili: {projects_str}
 - Messaggi recenti: {recent_str}
 
-Richiesta: "{user_message[:800]}"
+Esempi:
+1. Richiesta: "aggiungi una funzione di login"
+   {{"intent":"project","project":"null","confidence":0.95}}
+2. Richiesta: "quali progetti hai in memoria?"
+   {{"intent":"meta","project":"null","confidence":0.98}}
+3. Richiesta: "ciao come stai?"
+   {{"intent":"general","project":"null","confidence":0.99}}
+4. Richiesta: "c'è un bug in auth.py"
+   {{"intent":"project","project":"null","confidence":0.90}}
+5. Richiesta: "raccontami una barzelletta"
+   {{"intent":"general","project":"null","confidence":0.95}}
+6. Richiesta: "cosa contiene il progetto Jarvis?"
+   {{"intent":"project","project":"Jarvis","confidence":0.92}}
+
+Richiesta: "{user_message[:1000]}"
 
 Classifica: project (codice/file/progetto), meta (lista/capacità/chi sei), general (conversazione).
 JSON esatto: {{"intent":"project|meta|general","project":"null|Nome","confidence":0.95}}
@@ -585,6 +602,90 @@ digit ::= [0-9]'''
             )
         except Exception as e:
             logger.warning(f"Gatekeeper: eccezione → fallback general ({repr(e)})")
+            return GatekeeperResult(intent="general", confidence=0.0)
+
+    # ════════════════════════════════════════════════════════════════
+    # GEMMA 4 INTENT CLASSIFIER (OpB — senza grammatica GBNF)
+    # ════════════════════════════════════════════════════════════════
+
+    async def classify_intent_with_gemma(self, user_message: str, context: dict) -> GatekeeperResult:
+        """Classifica intento usando Gemma 4 (modello chat già in VRAM).
+
+        Vantaggi rispetto a Qwen3.5:
+        - 0 VRAM extra (riusa modello già caricato su GPU)
+        - Qualità superiore (Gemma 4 2.1B vs Qwen3.5 0.8B)
+        - Generazione velocissima: 1-5 token di output
+        - Nessuna grammatica GBNF — parsing diretto della risposta
+
+        Lo svantaggio: condivide la coda del modello chat (PriorityLock). Ma
+        generando solo 1-5 token, il tempo di attesa è trascurabile anche
+        durante una generazione concorrente.
+
+        Args:
+            user_message: Query utente grezza.
+            context: Dict con active_project, projects_available, recent_messages.
+
+        Returns:
+            GatekeeperResult con intent, project (se project), confidence.
+        """
+        active_project = context.get("active_project") or "nessuno"
+        projects_str = ", ".join(context.get("projects_available", [])) or "nessuno"
+
+        prompt = f"""Contesto:
+- Progetto attivo: {active_project}
+- Progetti disponibili: {projects_str}
+
+Richiesta: "{user_message[:800]}"
+
+Classifica in UNA SOLA parola: project (codice/file/progetto), meta (lista/capacità/chi sei), general (conversazione).
+project|meta|general:"""
+
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            response = await self.generate_chat(
+                messages, stream=False,
+                options={"temperature": 0.0, "num_predict": 5, "max_tokens": 10, "stop": ["\n", "|"]},
+                model="chat",
+            )
+            if "error" in response:
+                logger.warning(f"Gemma Gatekeeper: errore → fallback general ({response['error']})")
+                return GatekeeperResult(intent="general", confidence=0.0)
+
+            content = (extract_content(response) or "").strip().lower()
+
+            # Parsing diretto: cerca la parola chiave nella risposta
+            if "project" in content:
+                intent = "project"
+                confidence = 0.95
+            elif "meta" in content:
+                intent = "meta"
+                confidence = 0.95
+            else:
+                intent = "general"
+                confidence = 0.80
+
+            # Se è project, prova a estrarre il nome progetto dal messaggio
+            project = None
+            if intent == "project":
+                available = context.get("projects_available", [])
+                msg_lower = user_message.lower()
+                for proj in available:
+                    for variant in (proj.lower(), proj.lower().replace('_', '-'), proj.lower().replace('_', ' ')):
+                        if variant in msg_lower:
+                            project = proj
+                            confidence = min(confidence + 0.03, 0.99)
+                            break
+                    if project:
+                        break
+
+            logger.info(f"🧠 Gatekeeper Gemma 4: {intent} | project={project} | conf={confidence:.2f}")
+            return GatekeeperResult(
+                intent=intent,
+                project=project if intent == "project" else None,
+                confidence=confidence,
+            )
+        except Exception as e:
+            logger.warning(f"Gemma Gatekeeper: eccezione → fallback general ({repr(e)})")
             return GatekeeperResult(intent="general", confidence=0.0)
 
     # ════════════════════════════════════════════════════════════════

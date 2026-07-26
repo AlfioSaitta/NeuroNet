@@ -130,10 +130,12 @@ LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 # ==============================================================================
 # Classificazione intenti + compressione prompt in stile Caveman.
 # Default: CPU (n_gpu_layers=0). Imposta GATEKEEPER_N_GPU_LAYERS=-1 per GPU,
-# oppure un numero per offload parziale. Modello tiny (~0.8B) — n_ctx=2048.
+# oppure un numero per offload parziale. Modello tiny (~0.8B) — n_ctx=4096.
+# 4096 ctx permette few-shot esempi nella classificazione e contesto RAG più
+# ricco nella compressione senza troncare a 1500 caratteri.
 GATEKEEPER_MODEL_PATH = os.getenv("GATEKEEPER_MODEL_PATH", "")
 GATEKEEPER_N_GPU_LAYERS = int(os.getenv("GATEKEEPER_N_GPU_LAYERS", "0"))
-GATEKEEPER_N_CTX = int(os.getenv("GATEKEEPER_N_CTX", "2048"))
+GATEKEEPER_N_CTX = int(os.getenv("GATEKEEPER_N_CTX", "4096"))
 GATEKEEPER_N_THREADS = int(os.getenv("GATEKEEPER_N_THREADS", "4"))
 
 # ==============================================================================

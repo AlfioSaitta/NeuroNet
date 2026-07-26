@@ -197,11 +197,13 @@ async def _keyword_bypass(user_message: str, context: dict) -> GatekeeperResult 
 
 
 async def _run_gatekeeper(user_message: str, context: dict) -> GatekeeperResult:
-    """STEP 2: Qwen3.5 Gatekeeper — classificazione intento con grammar.
+    """STEP 2: Gemma 4 Gatekeeper — classificazione intento su GPU.
 
-    Usa engine.classify_intent() che invoca Qwen3.5 su CPU.
+    Usa engine.classify_intent_with_gemma() che invoca Gemma 4 (modello chat
+    già caricato su GPU, 0 VRAM extra). Genera solo 1-5 token per la
+    classificazione, poi parsing diretto della parola chiave.
     """
-    return await engine.classify_intent(user_message, context)
+    return await engine.classify_intent_with_gemma(user_message, context)
 
 
 def _record_gatekeeper_stats(intent: str, confidence: float, bypassed: bool, project: str | None = None):
@@ -605,7 +607,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         tracer.end_step("gatekeeper_llm", details={"intent": gk.intent, "project": gk.project, "confidence": gk.confidence})
 
     tracer.set_gatekeeper(intent=gk.intent, project=gk.project, confidence=gk.confidence, bypassed=_bypassed)
-    tracer._gatekeeper_model = "bypass" if _bypassed else "qwen"
+    tracer._gatekeeper_model = "bypass" if _bypassed else "gemma"
     _record_gatekeeper_stats(gk.intent, gk.confidence, _bypassed, gk.project)
 
     # ════════════════════════════════════════════════════
