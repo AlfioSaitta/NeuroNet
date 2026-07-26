@@ -191,9 +191,23 @@ async def stop_all_userbots():
             await client.disconnect()
     active_clients.clear()
 
+async def _cleanup_userbot_sessions():
+    """Background task: pulisce le sessioni scadute ogni 5 minuti."""
+    while True:
+        await asyncio.sleep(300)
+        now = time.time()
+        expired = [k for k, v in list(userbot_sessions.items())
+                   if now - v["last_active"] > SESSION_TTL]
+        for k in expired:
+            del userbot_sessions[k]
+        if expired:
+            logger.info(f"🧹 Pulite {len(expired)} sessioni userbot scadute")
+
+
 async def auto_start_existing():
     """Avvia al boot tutti i client che hanno un .session esistente."""
     if not USERBOT_ENABLED: return
+    asyncio.create_task(_cleanup_userbot_sessions())
     for f in os.listdir(USERBOTS_DIR):
         if f.startswith("userbot_") and f.endswith(".session"):
             uid_str = f.replace("userbot_", "").replace(".session", "")

@@ -6,7 +6,6 @@ ricerca vettoriale, watchdog real-time e generazione project tree.
 import os
 import json
 import hashlib
-import uuid
 import re
 import asyncio
 import shutil
@@ -798,8 +797,9 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
                             payload["parent_chunk_id"] = chunk["parent_chunk_id"]
                             payload["chunk_index"] = chunk.get("chunk_index", 0)
                             payload["chunk_count"] = chunk.get("chunk_count", 1)
+                        chunk_id = hashlib.md5(f"{rel_path}:{chunk.get('chunk_index', 0)}".encode()).hexdigest()
                         points.append(PointStruct(
-                            id=str(uuid.uuid4()),
+                            id=chunk_id,
                             vector=vector,
                             payload=payload
                         ))
@@ -808,20 +808,8 @@ async def process_single_file(rel_path, filepath, semaphore, content_bytes=None,
                 for p in points:
                     p.payload["model_family"] = MODEL_PROFILE.family
                     p.payload["model_variant"] = MODEL_PROFILE.variant
-                # Salva vecchi ID prima dell'upsert per delete atomica
-                old_scroll = await state.qdrant.scroll(
-                    collection_name=col_name,
-                    scroll_filter=Filter(must=[FieldCondition(key="filename", match=MatchValue(value=rel_path))]),
-                    with_payload=False,
-                    limit=1000
-                )
-                old_ids = [p.id for p in old_scroll[0]]
+                # Upsert con ID deterministico = sovrascrittura automatica per hash
                 await state.qdrant.upsert(collection_name=col_name, points=points)
-                if old_ids:
-                    await state.qdrant.delete(
-                        collection_name=col_name,
-                        points_selector=old_ids
-                    )
 
                 # ── File-level co-embedding ──────────────────────────────────
                 valid_vectors = [v for v in vectors if v and len(v) == EMBEDDING_DIMS]
