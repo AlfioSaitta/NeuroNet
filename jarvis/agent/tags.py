@@ -578,13 +578,13 @@ def get_tag(name: str) -> Optional[TagDef]:
     return _TAG_REGISTRY.get(name.upper())
 
 
-def strip_all_tags(text: str) -> str:
+def strip_all_tags(text: str, model_family: str = "all") -> str:
     """Rimuove dal testo tutti i tag con visibility=hidden/action (incluso il contenuto)."""
-    text = strip_thinking_blocks(text, model_family="all")
+    text = strip_thinking_blocks(text, model_family=model_family)
     return _STRIP_ALL_RE.sub("", text).strip()
 
 
-def strip_action_tags(text: str) -> str:
+def strip_action_tags(text: str, model_family: str = "all") -> str:
     """
     Come strip_all_tags ma SENZA .strip() — preserva spazi e whitespace.
     Utile nello streaming dove un chunk può essere solo " " (spazio tra parole).
@@ -592,7 +592,7 @@ def strip_action_tags(text: str) -> str:
     Strippa anche i blocchi di thinking/reasoning (<|think|>, [THINK], ecc.)
     per evitare che leakino nelle risposte visibili all'utente.
     """
-    text = strip_thinking_blocks(text, model_family="all")
+    text = strip_thinking_blocks(text, model_family=model_family)
     return _STRIP_ALL_RE.sub("", text)
 
 
@@ -622,7 +622,7 @@ class TagSafeStream:
             yield finale
     """
 
-    def __init__(self):
+    def __init__(self, model_family: str = "all"):
         self._buffer = ""
         # Stato per tag con coppia apertura/chiusura: in attesa di </TAG>
         self._in_tag: bool = False
@@ -645,23 +645,25 @@ class TagSafeStream:
                 else:
                     self._closings[name] = f"</{name}>".upper()
 
-        # Thinking block tracking: <|think|>...<|end|> (Gemma 4 style)
-        # Non sono in TAG_REGISTRY ma vanno tracciati per non leakare in streaming
-        self._openings.append(("<|THINK|>", "__THINK__", False))
-        # UPPERCASE per matchare buf_upper (come self._closings per registry tag)
-        self._think_closings: list[tuple[str, int]] = [
-            ("<|END|>", 8), ("</END>", 6), ("</END|>", 7),
-        ]
+        # Thinking block tracking: <|think|>...<|end|> (Gemma 4 / DeepSeek style)
+        # Applicato solo se model_family è "all", "gemma" o "deepseek"
+        self._think_closings: list[tuple[str, int]] = []
+        if model_family in ("all", "gemma", "deepseek"):
+            self._openings.append(("<|THINK|>", "__THINK__", False))
+            # UPPERCASE per matchare buf_upper (come self._closings per registry tag)
+            self._think_closings = [
+                ("<|END|>", 8), ("</END>", 6), ("</END|>", 7),
+            ]
 
         # Gemma chat format residual tags: <start_of_turn> e <end_of_turn>
-        # Sono self-closing nel senso TagSafeStream: non hanno contenuto da preservare,
-        # vanno semplicemente rimossi dal flusso come se non esistessero.
-        self._openings.append(("<START_OF_TURN>", "__START_OF_TURN__", True))
-        self._openings.append(("<END_OF_TURN>", "__END_OF_TURN__", True))
-        self._openings.append(("</START_OF_TURN>", "__CLOSE_START_OF_TURN__", True))
-        self._sc_patterns["__START_OF_TURN__"] = re.compile(r'<start_of_turn>\s*', re.IGNORECASE)
-        self._sc_patterns["__END_OF_TURN__"] = re.compile(r'<end_of_turn>\s*', re.IGNORECASE)
-        self._sc_patterns["__CLOSE_START_OF_TURN__"] = re.compile(r'</start_of_turn>\s*', re.IGNORECASE)
+        # Solo per famiglia gemma (o all per backward compat)
+        if model_family in ("all", "gemma"):
+            self._openings.append(("<START_OF_TURN>", "__START_OF_TURN__", True))
+            self._openings.append(("<END_OF_TURN>", "__END_OF_TURN__", True))
+            self._openings.append(("</START_OF_TURN>", "__CLOSE_START_OF_TURN__", True))
+            self._sc_patterns["__START_OF_TURN__"] = re.compile(r'<start_of_turn>\s*', re.IGNORECASE)
+            self._sc_patterns["__END_OF_TURN__"] = re.compile(r'<end_of_turn>\s*', re.IGNORECASE)
+            self._sc_patterns["__CLOSE_START_OF_TURN__"] = re.compile(r'</start_of_turn>\s*', re.IGNORECASE)
 
         # Set di tutti i nomi tag tracciati per la generica detection anti-leak
         # I tag interni (__NAME__) hanno un prefisso __ che non esiste nel testo,

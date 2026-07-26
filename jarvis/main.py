@@ -34,7 +34,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import (
-    logger, MODEL_ID, DOC_COLLECTION, DOC_DIR, MEM0_CONFIG, STATE_FILE, VECTOR_DB_VERSION,
+    logger, MODEL_ID, MODEL_PROFILE, DOC_COLLECTION, DOC_DIR, MEM0_CONFIG, STATE_FILE, VECTOR_DB_VERSION,
     API_RATE_LIMIT_DEFAULT, API_RATE_LIMIT_HEAVY, API_RATE_LIMIT_EMBED,
     SYNAPTIQ_ENABLED,
 )
@@ -747,14 +747,35 @@ async def chat(payload: ChatRequest, request: Request):
     if tracer:
         tracer._conversation_id = str(conversation_id)
 
+    # ── Global request timeout ──
+    _PROMPT_TIMEOUT = 120   # max 2 min per contesto + compressione
+    _LLM_TIMEOUT    = 300   # max 5 min per generazione LLM
+
     if not is_internal:
         tracer.start_step("build_omniscient_prompt")
-        body["messages"] = await build_omniscient_prompt(
-            raw_messages, user_id=current_user_id,
-            conversation_id=str(conversation_id), concise=concise,
-            request_id=tracer.request_id,
-            user=jwt_user,
-        )
+        try:
+            body["messages"] = await asyncio.wait_for(
+                build_omniscient_prompt(
+                    raw_messages, user_id=current_user_id,
+                    conversation_id=str(conversation_id), concise=concise,
+                    request_id=tracer.request_id,
+                    user=jwt_user,
+                ),
+                timeout=_PROMPT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"⏱️ build_omniscient_prompt timed out after {_PROMPT_TIMEOUT}s")
+            if tracer:
+                tracer.set_error("prompt_builder_timeout")
+                tracer.finish()
+            fallback_msg = "Mi dispiace, la preparazione del contesto ha richiesto troppo tempo. Prova con una domanda più specifica."
+            return JSONResponse(status_code=200, content={
+                "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": MODEL_ID,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": fallback_msg}, "finish_reason": "stop"}],
+            })
         tracer.end_step("build_omniscient_prompt")
     
     is_stream = body.get("stream", True)
@@ -763,10 +784,27 @@ async def chat(payload: ChatRequest, request: Request):
         # Non-stream
         if tracer:
             tracer.start_step("gemma_generation")
-        response = await engine.generate_chat_with_router(
-            body["messages"], tools=body.get("tools"), options=body.get("options"),
-            stream=False, preferred_provider=provider
-        )
+        try:
+            response = await asyncio.wait_for(
+                engine.generate_chat_with_router(
+                    body["messages"], tools=body.get("tools"), options=body.get("options"),
+                    stream=False, preferred_provider=provider
+                ),
+                timeout=_LLM_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"⏱️ generate_chat timed out after {_LLM_TIMEOUT}s")
+            if tracer:
+                tracer.set_error("llm_timeout")
+                tracer.finish()
+            fallback_msg = "Mi dispiace, la generazione della risposta ha richiesto troppo tempo. Prova con una domanda più specifica."
+            return JSONResponse(status_code=200, content={
+                "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": MODEL_ID,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": fallback_msg}, "finish_reason": "stop"}],
+            })
         if "error" in response:
             if tracer:
                 tracer.set_error(response["error"])
@@ -857,7 +895,7 @@ async def chat(payload: ChatRequest, request: Request):
         # Strip tag veloce (regex, senza handler) per la risposta immediata.
         # Il processaggio completo dei tag (MEMORY, SCHEDULE, SSH, ecc.) va in background
         # per non bloccare la risposta (può impiegare 15s+ con loopback Mem0).
-        clean_content = strip_action_tags(content) if content else ""
+        clean_content = strip_action_tags(content, model_family=MODEL_PROFILE.family) if content else ""
         chat_resp["choices"][0]["message"]["content"] = clean_content or content
 
         # Processa i tag in BACKGROUND per effetti collaterali
@@ -905,7 +943,7 @@ async def chat(payload: ChatRequest, request: Request):
                 yield json.dumps({"error": gen["error"]}).encode() + b"\n"
                 return
 
-            safe_stream = TagSafeStream()
+            safe_stream = TagSafeStream(model_family=MODEL_PROFILE.family)
             full_chunks = []
             _role_sent_in_stream = False
             async for chunk in gen:
@@ -958,7 +996,7 @@ async def chat(payload: ChatRequest, request: Request):
 
             # Invia SUBITO il messaggio done (con strip veloce regex, senza handler)
             # per non bloccare il client con process_response_tags (che può impiegare 15s+).
-            clean_text = strip_action_tags(full_text) if full_text else ""
+            clean_text = strip_action_tags(full_text, model_family=MODEL_PROFILE.family) if full_text else ""
             yield json.dumps({
                 "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
                 "object": "chat.completion.chunk",
@@ -1069,7 +1107,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
         content = extract_content(response)
         
         # Strip tag veloce (regex, senza handler) per risposta immediata
-        clean_resp = strip_action_tags(content) if content else ""
+        clean_resp = strip_action_tags(content, model_family=MODEL_PROFILE.family) if content else ""
 
         # Processa i tag in BACKGROUND per effetti collaterali
         if content:
@@ -1105,7 +1143,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
     else:
         async def stream_gen():
             full_resp = []
-            safe_stream = TagSafeStream()
+            safe_stream = TagSafeStream(model_family=MODEL_PROFILE.family)
             gen = await engine.generate_chat(messages, stream=True)
             async for chunk in gen:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
@@ -1139,7 +1177,7 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
                 logger.warning(f"⚠️ Background save_to_memory error: {e}")
 
             # Strip tag veloce (regex, senza handler) per risposta immediata
-            clean_resp = strip_action_tags(final_content) if final_content else ""
+            clean_resp = strip_action_tags(final_content, model_family=MODEL_PROFILE.family) if final_content else ""
 
             yield json.dumps({
                 "model": body["model"],
