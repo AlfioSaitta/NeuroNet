@@ -1119,6 +1119,51 @@ async def get_db() -> OpenAIDatabase:
 
 ---
 
+### 🐛 Bug 18 (2026-07-26): Phantom Request Loop — Mem0 → API → Mem0 Auto-Alimentante ✅ FIXATO
+
+**Problema:** Richieste automatiche ogni ~2-5 secondi con messaggi in formato `## Summary...## Last k Messages...` da `user='alfio_dev'`. Ogni richiesta passava per l'intera pipeline (`build_omniscient_prompt` + `process_response_tags`), creando nuove memorie che triggeravano altre estrazioni Mem0 → loop infinito. Auto-amplificante: ogni giro aggiungeva storia alla sessione → contesto più grande → crash.
+
+**Diagnosi:** Mem0 è configurato in `core/config.py:372-374` per usare Jarvis stesso come backend LLM:
+```python
+"llm": {
+    "provider": "openai",
+    "config": {"model": MODEL_ID, "temperature": 0.0,
+               "openai_base_url": "http://127.0.0.1:8000/v1"}
+}
+```
+Ogni `memory.add()` triggera Mem0 a chiamare `http://127.0.0.1:8000/v1/chat/completions` per entity extraction. La richiesta finiva in `openai_api/chat.py` → `build_omniscient_prompt()` (aggiungeva RAG/memoria circolare) → LLM → `process_response_tags()` (creava ALTRE memorie) → loop. Il `/v1/chat/completions` NON aveva il filtro `is_internal_query()` che invece esisteva nel nativo `/api/chat` (`main.py:674-682`).
+
+**Soluzione:** 3 modifiche in `openai_api/chat.py`:
+1. **Linea 17**: Aggiunto import `is_internal_query` da `agent.classifier`
+2. **Linee 123-139**: Rilevamento richieste interne (`## Summary` prefix) → bypass `build_omniscient_prompt()`, usa messaggi raw direttamente
+3. **Linee 177-194**: Skip `process_response_tags()` per richieste interne → la risposta LLM non genera nuove memorie
+
+Stessa protezione aggiunta per il branch streaming (linea 279).
+
+**Impatto:** CRITICAL — interrompe loop infinito, risolve flooding richieste, elimina la causa primaria del context overflow della sessione.
+
+---
+
+### 🐛 Bug 19 (2026-07-26): Compress ValueError — Gatekeeper 2048-ctx Overflow ✅ FIXATO
+
+**Problema:** `ValueError('Requested tokens (X) exceed context window of 2048')` in `compress_prompt()` quando il contesto superava i 2048 token del gatekeeper Qwen3.5.
+
+**Diagnosi:** `compress_prompt()` in `core/llm_engine.py:614-624` assemblava `raw_data` da history (1500 char) + rag_context (3000 char) + user_query senza limite sul totale. Con testo CJK (~1 char/token) o dopo che il phantom loop aveva riempito la history, il totale superava 2048 token e `llm.create_chat_completion()` lanciava ValueError.
+
+**Soluzione:** Aggiunto limite `_GK_MAX_CHARS = 1500` in `core/llm_engine.py:626-633` che tronca `raw_data` a 1500 caratteri prima di inviarlo al gatekeeper. Budget stimato: system prompt ~100-450 token + risposta ~50 token + overhead ~50 token = ~200-550 overhead, lasciando ~1500 token per raw_data (safe per CJK).
+
+```python
+_GK_MAX_CHARS = 1500
+if len(raw_data) > _GK_MAX_CHARS:
+    logger.info(f"🗜️ Compress input {len(raw_data)}ch > {_GK_MAX_CHARS}ch, truncating for gatekeeper 2048-ctx")
+    raw_data = raw_data[:_GK_MAX_CHARS]
+```
+
+**Impatto:** ALTO — elimina ValueError su richieste con contesto grande, previene crash della pipeline.
+
+---
+
+
 ## 📚 Documenti Correlati
 
 - **Piano completo di deployment:** `docs/plans/master_worker_implementation.md`
