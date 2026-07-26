@@ -7,14 +7,14 @@ from datetime import datetime, UTC
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from core.config import logger, MODEL_ID
+from core.config import logger, MODEL_ID, MODEL_PROFILE
 from core.llm_engine import engine
 from agent.prompt import build_omniscient_prompt
 from memory.engine import process_response_tags
 from agent.tags import strip_action_tags, TagSafeStream
 from agent.tools import execute_tool_call
 from agent.confirmation import ApiTokenProvider, ConfirmationManager
-from agent.classifier import classify_confirmation
+from agent.classifier import classify_confirmation, is_internal_query
 from .models import ChatCompletionRequestOpenAI
 import core.state as state
 
@@ -120,10 +120,24 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                         "usage": {}
                     }
 
-    enriched = await build_omniscient_prompt(
-        ollama_messages, user_id=current_user_id,
-        conversation_id=str(conversation_id), concise=concise
-    )
+    # ── Detect internal Mem0 extraction queries (## Summary prefix) ──
+    # These come from Mem0's own LLM calls during memory.add() — they need raw
+    # generation (no RAG/memory pipeline) to avoid infinite recursive loops.
+    _is_internal = False
+    if ollama_messages and isinstance(ollama_messages[-1], dict) and ollama_messages[-1].get("role") == "user":
+        last_text = str(ollama_messages[-1].get("content", ""))
+        if is_internal_query(last_text):
+            _is_internal = True
+
+    if _is_internal:
+        # Bypass build_omniscient_prompt (no RAG, no memory context — circular!)
+        enriched = ollama_messages
+    else:
+        enriched = await build_omniscient_prompt(
+            ollama_messages, user_id=current_user_id,
+            conversation_id=str(conversation_id), concise=concise
+        )
+
     tools = body.get("tools")
     if not is_stream:
         response = await engine.generate_chat_with_router(
@@ -159,19 +173,25 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             choice = response["choices"][0]["message"]
 
         content = choice.get("content", "")
-        try:
-            cleaned = await asyncio.wait_for(
-                process_response_tags(content, user_id=current_user_id),
-                timeout=15.0
-            )
-        except asyncio.TimeoutError:
-            logger.warning("⏱️ process_response_tags timed out (15s) — returning raw text")
+
+        # Skip process_response_tags for internal Mem0 queries to avoid
+        # recursive memory storage → more Mem0 extractions → infinite loop
+        if _is_internal:
             cleaned = content
-        except Exception as e:
-            logger.warning(f"⚠️ process_response_tags error: {e}")
-            cleaned = content
-        if not cleaned and content:
-            cleaned = content
+        else:
+            try:
+                cleaned = await asyncio.wait_for(
+                    process_response_tags(content, user_id=current_user_id),
+                    timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("⏱️ process_response_tags timed out (15s) — returning raw text")
+                cleaned = content
+            except Exception as e:
+                logger.warning(f"⚠️ process_response_tags error: {e}")
+                cleaned = content
+            if not cleaned and content:
+                cleaned = content
 
         # Build response choices (n >= 1)
         choices = []
@@ -212,7 +232,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
             response_created = int(datetime.now(UTC).timestamp())
 
-            safe_stream = TagSafeStream()
+            safe_stream = TagSafeStream(model_family=MODEL_PROFILE.family)
             full_chunks = []
             role_sent = False
             async for chunk in gen:
@@ -255,7 +275,8 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             yield "data: [DONE]\n\n"
 
             # Processa i tag in BACKGROUND per effetti collaterali (MEMORY, SCHEDULE, SSH, ecc.)
-            if full_text:
+            # Skip for internal Mem0 queries to avoid recursive memory loops
+            if full_text and not _is_internal:
                 try:
                     bg_task = asyncio.create_task(
                         process_response_tags(full_text, user_id=current_user_id)
