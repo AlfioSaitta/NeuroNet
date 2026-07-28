@@ -686,7 +686,9 @@ async def chat(payload: ChatRequest, request: Request):
     jwt_user = await get_current_user(request)
     jwt_user_id = jwt_user["id"] if jwt_user else None
     current_user_id = jwt_user_id or body.get("user_id") or (options.get("user_id") if isinstance(options, dict) else None) or "alfio_dev"
-    conversation_id = body.get("conversation_id") or request.headers.get("X-Conversation-Id", "default")
+    conversation_id = body.get("conversation_id") or request.headers.get("X-Conversation-Id")
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4())
     concise = isinstance(options, dict) and options.get("concise") is True
     provider = body.get("provider") or payload.provider
 
@@ -701,6 +703,7 @@ async def chat(payload: ChatRequest, request: Request):
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": MODEL_ID,
+                "conversation_id": str(conversation_id),
                 "choices": [{
                     "index": 0,
                     "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
@@ -721,6 +724,7 @@ async def chat(payload: ChatRequest, request: Request):
                         "object": "chat.completion",
                         "created": int(time.time()),
                         "model": MODEL_ID,
+                        "conversation_id": str(conversation_id),
                         "choices": [{
                             "index": 0,
                             "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
@@ -733,6 +737,7 @@ async def chat(payload: ChatRequest, request: Request):
                         "object": "chat.completion",
                         "created": int(time.time()),
                         "model": MODEL_ID,
+                        "conversation_id": str(conversation_id),
                         "choices": [{
                             "index": 0,
                             "message": {"role": "assistant", "content": "⚠️ Token di conferma non valido o scaduto."},
@@ -774,6 +779,7 @@ async def chat(payload: ChatRequest, request: Request):
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": MODEL_ID,
+                "conversation_id": str(conversation_id),
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": fallback_msg}, "finish_reason": "stop"}],
             })
         tracer.end_step("build_omniscient_prompt")
@@ -803,6 +809,7 @@ async def chat(payload: ChatRequest, request: Request):
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": MODEL_ID,
+                "conversation_id": str(conversation_id),
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": fallback_msg}, "finish_reason": "stop"}],
             })
         if "error" in response:
@@ -837,6 +844,7 @@ async def chat(payload: ChatRequest, request: Request):
             "object": "chat.completion",
             "created": int(time.time()),
             "model": MODEL_ID,
+            "conversation_id": str(conversation_id),
             "choices": [choice],
             "usage": response.get("usage", {}),
         }
@@ -968,6 +976,7 @@ async def chat(payload: ChatRequest, request: Request):
                         "object": "chat.completion.chunk",
                         "created": int(time.time()),
                         "model": MODEL_ID,
+                        "conversation_id": str(conversation_id),
                         "choices": [{
                             "index": 0,
                             "delta": delta_payload,
@@ -1002,6 +1011,7 @@ async def chat(payload: ChatRequest, request: Request):
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": MODEL_ID,
+                "conversation_id": str(conversation_id),
                 "choices": [{
                     "index": 0,
                     "delta": {"content": clean_text or full_text},
