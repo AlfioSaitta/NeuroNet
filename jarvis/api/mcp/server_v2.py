@@ -284,6 +284,151 @@ async def code_intelligence(query: str, project: str = "") -> str:
         return _json_text({"error": str(e)})
 
 
+# ════════════════════════════════════════════════════════════════
+# BENCHMARK TOOLS — Raw LLM vs Full Pipeline
+# ════════════════════════════════════════════════════════════════
+
+
+@mcp.tool(name="benchmark_raw", description="Test raw LLM speed: prompt diretto SENZA pipeline (no RAG, no thinking). Misura TTFT, tok/s.")
+async def benchmark_raw(prompt: str = "Dammi data e ora attuale", max_tokens: int = 100) -> str:
+    """
+    Invia un prompt GREZZO direttamente al LLM, bypassando TUTTA la pipeline Jarvis
+    (no gatekeeper, no RAG, no compressione, no thinking mode injection).
+    
+    Misurazioni:
+    - ttft_ms:       tempo fino al primo token
+    - total_ms:      tempo totale
+    - tok_s:         token al secondo (da conteggio chunk streaming)
+    - prompt_tok:    token di input (da usage)
+    - completion_tok: token di output (da usage)
+    
+    Usalo per confrontare con benchmark_pipeline() e isolare il costo della pipeline.
+    """
+    try:
+        from core.llm_engine import engine as _eng
+
+        messages = [{"role": "user", "content": prompt}]
+        total_start = time.monotonic()
+
+        generator = await _eng.generate_chat(
+            messages, stream=True,
+            options={"temperature": 0.0, "num_predict": max_tokens},
+            model="chat",
+        )
+
+        ttft = None
+        chunk_count = 0
+        full_text = ""
+        async for chunk in generator:
+            if ttft is None:
+                ttft = time.monotonic() - total_start
+            delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+            if delta:
+                chunk_count += 1
+                full_text += delta
+
+        total = time.monotonic() - total_start
+        tok_s = chunk_count / total if total > 0 else 0
+
+        return _json_text({
+            "mode": "RAW — no pipeline, no thinking",
+            "prompt": prompt[:100],
+            "ttft_ms": round(ttft * 1000) if ttft else None,
+            "total_duration_ms": round(total * 1000),
+            "chunks_received": chunk_count,
+            "tokens_per_second": round(tok_s, 2),
+            "response_chars": len(full_text),
+            "response_preview": full_text[:300],
+            "note": "tok_s basato su chunk streaming, non token reali. completion_tok reali da usage non disponibili in streaming.",
+        })
+    except Exception as e:
+        logger.exception("benchmark_raw error")
+        return _json_text({"error": str(e)})
+
+
+@mcp.tool(name="benchmark_pipeline", description="Test LLM via pipeline completa: gatekeeper + RAG + compressione + thinking. Misura overhead pipeline.")
+async def benchmark_pipeline(prompt: str = "Dammi data e ora attuale", max_tokens: int = 100) -> str:
+    """
+    Invia un prompt ATTRAVERSO l'INTERA pipeline Jarvis:
+    gatekeeper (keyword_bypass + Gemma 4), RAG, compressione, thinking mode.
+    
+    Misurazioni identiche a benchmark_raw() per confronto diretto.
+    La differenza tra i due test rivela l'overhead della pipeline.
+    
+    Per vedere i dettagli intermedi, usa il trace_id restituito con get_trace_full().
+    """
+    try:
+        from core.telemetry import PipelineTracer as _PT
+        from agent.prompt import build_omniscient_prompt as _bop
+        from core.llm_engine import engine as _eng
+
+        tracer = _PT.begin(user_message=prompt[:200], user_id="benchmark_mcp")
+        raw_messages = [{"role": "user", "content": prompt}]
+
+        total_start = time.monotonic()
+
+        enriched = await _bop(
+            raw_messages, user_id="benchmark_mcp",
+            conversation_id="benchmark", concise=False,
+            request_id=tracer.request_id, finalize_trace=False,
+        )
+
+        tracer.start_step("gemma_generation")
+        response = await _eng.generate_chat_with_router(
+            enriched, tools=None,
+            options={"temperature": 0.0, "num_predict": max_tokens},
+            stream=False,
+        )
+
+        if "error" in response:
+            total = time.monotonic() - total_start
+            return _json_text({"error": response["error"], "total_duration_ms": round(total * 1000)})
+
+        usage = response.get("usage", {})
+        from core.telemetry import LlmCallRecord as _LCR
+        tracer.add_llm_call(_LCR(
+            model="chat", step="gemma_generation", duration_ms=0,
+            tokens_prompt=usage.get("prompt_tokens", 0),
+            tokens_completion=usage.get("completion_tokens", 0),
+            temperature=0.0,
+        ))
+
+        choice = response["choices"][0]["message"]
+        content = choice.get("content", "")
+        tracer.set_llm_response(content)
+        tracer.end_step("gemma_generation", details={
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "char_count": len(content),
+        })
+        tracer.finish()
+
+        total = time.monotonic() - total_start
+        p_tok = usage.get("prompt_tokens", 0)
+        c_tok = usage.get("completion_tokens", 0)
+        tok_s = c_tok / total if total > 0 else 0
+
+        return _json_text({
+            "mode": "FULL PIPELINE — gatekeeper + RAG + thinking",
+            "prompt": prompt[:100],
+            "total_duration_ms": round(total * 1000),
+            "prompt_tokens": p_tok,
+            "completion_tokens": c_tok,
+            "tokens_per_second": round(tok_s, 2),
+            "pipeline_overhead_pct": None,  # Calcolato dal confronto con benchmark_raw
+            "trace_id": tracer.request_id,
+            "response_preview": content[:300],
+            "gatekeeper": {
+                "intent": tracer.gatekeeper_intent,
+                "bypassed": tracer.gatekeeper_bypassed,
+                "model": tracer.gatekeeper_model,
+            } if hasattr(tracer, 'gatekeeper_intent') else None,
+        })
+    except Exception as e:
+        logger.exception("benchmark_pipeline error")
+        return _json_text({"error": str(e)})
+
+
 # ──────────────────────────────────────────────
 # Resources (registrati su FastMCP)
 # ──────────────────────────────────────────────
