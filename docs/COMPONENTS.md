@@ -69,7 +69,7 @@ NeuroNet/
     │   ├── users.py                 # Admin CRUD utenti (151 righe)
     │   └── projects.py              # Gestione progetti RAG + Synaptiq graph (391 righe)
     ├── admin/
-    │   ├── dashboard.py             # SETTINGS_META (73 env var) + _persist_env (2406 righe)
+    │   ├── dashboard.py             # SETTINGS_META (73 env var) + _persist_env (1566 righe)
     │   └── panel/
     │       ├── __init__.py          # Router FastAPI + mount static files (91 righe)
     │       ├── templates/
@@ -99,7 +99,7 @@ NeuroNet/
     │   └── tasks.py                 # ToDo persistenti con priorità/scadenze (73 righe)
     ├── session/
     │   └── store.py                 # ChatSessionStore SQLite persistente (404 righe)
-    ├── openai_api/                  # Sotto-pacchetto OpenAI API (modulare)
+    ├── openai/                      # Sotto-pacchetto OpenAI API (modulare)
     │   ├── __init__.py              # Factory init_openai_routes() con lazy import (38 righe)
     │   ├── state.py                 # OpenAIDatabase SQLite singleton + asyncio lock (715 righe)
     │   ├── models.py                # Pydantic models + /v1/models endpoint (151 righe)
@@ -133,16 +133,16 @@ NeuroNet/
 │                                                             │
 │  ThreadPoolExecutor (8 workers) ─── operazioni CPU-bound    │
 │                                                             │
-│  ┌────────────────────────┐  ┌────────────────────────┐    │
-│  │ chat_model (GGUF)      │  │ embed_model (GGUF)     │    │
-│  │ Gemma 4 E2B QAT        │  │ Qwen3-Embedding-0.6B   │    │
-│  │ n_gpu_layers=15        │  │ n_gpu_layers=2         │    │
-│  │ flash_attn=true        │  │ n_ctx=8192, pooling=2  │    │
-│  │                        │  │ MRL: 1024→768 dims     │    │
-│  └────────┬───────────────┘  └────────┬────────────────┘    │
-│           │                           │                     │
-│  PriorityLock(0)              PriorityLock(10)              │
-│  (chat: priorità alta)        (embed: priorità bassa)       │
+ │  ┌────────────────────────┐  ┌──────────────────────────┐  │
+│  │ chat_model (GGUF)      │  │ embed_model (FastEmbed)  │  │
+│  │ Qwen3.5-4B             │  │ BAAI/bge-base-en-v1.5    │  │
+│  │ n_gpu_layers=-1 (full) │  │ ONNX CPU, 0 VRAM         │  │
+│  │ flash_attn=true        │  │ 768 dims                 │  │
+│  │                        │  │ (nessuna contenzione GPU) │  │
+│  └────────┬───────────────┘  └──────────────────────────┘  │
+│           │                                                  │
+│  PriorityLock(0)                                             │
+│  (chat: priorità)                                            │
 └──────────┼──────────────────────────────────────────────────┘
            │
            ▼
@@ -155,7 +155,7 @@ NeuroNet/
 
 **Decomposizione `load_models()`** (875 righe → 25 righe orchestrazione + 3 helper):
 - `_load_single_model(path, params)` — carica un singolo GGUF con parametri
-- `_load_embedding_model()` — wrapper per embedding GGUF
+- `_load_embedding_model()` — inizializza FastEmbed ONNX CPU (BAAI/bge-base-en-v1.5, 0 VRAM)
 - `_verify_gpu_layers(model_name, n_gpu_layers)` — verifica layer GPU allocati
 
 **Decomposizione `generate_chat()`** (~110 righe orchestrazione + 3 helper statici):
@@ -166,15 +166,15 @@ NeuroNet/
 **Thinking Mode:** Supporto nativo per modelli con `<|think|>` (Gemma, DeepSeek, QwQ). Inietta automaticamente il tag nel system prompt.
 
 **Feature evidenziate:**
-- PriorityLock con coda prioritaria (chat priority 0 > embedding priority 10)
+- PriorityLock con coda (chat priority 0)
 - Flash Attention riduce VRAM del 30-50%
 - Offloading GPU con failover automatico (1.5s ping)
 - Warmup CUDA JIT per evitare delay di 30s+ sulla prima richiesta
-- MRL embedding troncamento (1024→768) per retrocompatibilità
+- Hardware Profile Auto-Detection: rilevamento famiglia GGUF via header binario, applica parametri ottimali (n_gpu_layers, flash_attn, n_ubatch)
+- FastEmbed ONNX CPU: embedding a 0 VRAM, nessuna contenzione GPU
 - `_strip_thinking()` — rimuove tag `<think>`, analisi strutturate e meta-ragionamenti dalle risposte LLM
-- `compress_prompt()` — compressione caveman con Qwen3.5 0.8B (CPU/GPU via GATEKEEPER_N_GPU_LAYERS), raw fallback se ratio negativo
-- `classify_intent_with_gemma()` — classificazione intenti con Gemma 4 esistente (0 VRAM extra, 1-5 token output)
-- `Gatekeeper N_GPU_LAYERS` — supporto offload GPU opzionale per il Gatekeeper LLM
+- `compress_prompt()` — compressione caveman con Qwen3.5 0.8B (CPU, GATEKEEPER_N_CTX=4096, 6 few-shot), raw fallback se ratio negativo
+- `classify_intent_with_gemma()` — classificazione intenti via Gemma 4 (0 VRAM extra, 1-5 token output) — parte del 3-tier gatekeeper
 
 ---
 
@@ -208,7 +208,7 @@ Il componente più complesso. Pipeline completa di Retrieval-Augmented Generatio
                                │
                     ┌──────────▼───────────┐
                     │  Embedding + Storage │
-                    │  - Qwen3-Embedding   │
+                    │  - FastEmbed ONNX CPU│
                     │  - Qdrant vector DB  │
                     │  - Batch processing  │
                     └──────────┬───────────┘
@@ -243,7 +243,7 @@ Il componente più complesso. Pipeline completa di Retrieval-Augmented Generatio
 - **Reranker duale:** Qwen3-Reranker (primario, multilingua, MTEB-Code 73.42) → FlashRank (fallback ONNX) — modulare in `jarvis/rag/reranker.py`
 - **Gitignore-aware:** rispetta .gitignore nei progetti monitorati tramite pathspec
 - **Watchdog real-time:** PollingObserver per Docker compatibilità, ri-embedding automatico al salvataggio. Timeout e modalità watch configurabili via `.env` per bilanciare CPU/latenza
-- **Semantic Cache:** cache risposte per query simili (soglia cosine 0.88) — modulare in `jarvis/rag/cache.py`
+- **Semantic Cache:** cache risposte per query simili (soglia cosine 0.96) — modulare in `jarvis/rag/cache.py`
 - **Cross-collection fallback:** se il progetto specifico non ha risultati, cerca in tutte le collezioni
 - **Web Knowledge Cache:** memorizza risultati di ricerche web per reuse
 - **Web Search integrato:** SearXNG + Crawl4AI in `jarvis/rag/web_search.py`
@@ -295,9 +295,9 @@ Messaggio utente
        │
        ▼
 ┌─────────────────────┐
-│  LLM Gatekeeper     │──► Classifica intento
-│  (keyword + regex    │    True = progetto/codice
-│   + LLM grammar)    │    False = conversazione
+│  LLM Gatekeeper     │──► 3-tier: keyword bypass + main
+│  (3-tier)           │    model classification (0 VRAM)
+│                     │    + Qwen3.5 0.8B compression (CPU)
 └─────────┬───────────┘
           │
           ▼
@@ -572,8 +572,8 @@ Rilevamento automatico della famiglia modello dal nome file GGUF:
 
 | Famiglia | Thinking | Unsloth | Max CTX | Note |
 |---|---|---|---|---|
-| Qwen | ❌ | ✅ | 131072 | Embedding + backup chat |
-| Gemma | ✅ | ✅ | 32768 | **Gemma 4 E2B QAT attivo** |
+| Qwen | ❌ | ✅ | 131072 | **Qwen3.5-4B attivo** — chat model primario |
+| Gemma | ✅ | ✅ | 32768 | Gemma 4 E2B QAT (backup, 15/35 layer GPU) |
 | DeepSeek | ✅ | ❌ | 16384 | DeepSeek Coder V2 |
 | QwQ | ✅ | ❌ | 32768 | QwQ-32B-Preview |
 | Llama | ❌ | ✅ | 131072 | Llama 3.x |

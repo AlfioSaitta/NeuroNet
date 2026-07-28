@@ -8,7 +8,7 @@
 |---|---|---|
 | `/api/chat` | POST | Chat con memoria + RAG + tool-calling |
 | `/api/generate` | POST | Generate + cache semantica |
-| `/api/embed` / `/api/embeddings` | POST | Embeddings (legacy) |
+| `/api/embed` / `/api/embeddings` | POST | Embeddings (via FastEmbed ONNX CPU) |
 | `/api/tags`, `/api/ps`, `/api/show`, `/api/version` | GET/POST | Stub compatibilità Ollama |
 | `/api/project-tree` | GET | Albero del progetto indicizzato |
 | `/api/webhook/git` | POST | Git webhook → pull → re-ingestion |
@@ -90,7 +90,7 @@
 |---|---|---|
 | `/v1/chat/completions` | POST | Chat completion (streaming SSE, tool-calling, confirmation tokens) |
 | `/v1/completions` | POST | Text completion legacy (streaming SSE, echo) |
-| `/v1/embeddings` | POST | Embeddings (float/base64 encoding) |
+| `/v1/embeddings` | POST | Embeddings (float/base64 encoding, FastEmbed ONNX CPU) |
 | `/v1/models` | GET | Lista modelli |
 | `/v1/models/{model_name}` | GET | Dettaglio modello |
 | `/v1/moderations` | POST | Moderazione contenuti (LLM-based + keyword fallback) |

@@ -18,8 +18,8 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │  │  ├── POST /api/generate      → handle_generate()                        ││
 │  │  ├── POST /api/embed         → handle_embed()                           ││
 │  │  ├── POST /api/mcp/v2        → mcp_v2.handle_mcp_request()              ││
-│  │  ├── POST /v1/chat/*         → openai_api.chat.chat_completions()       ││
-│  │  ├── POST /v1/completions    → openai_api.completions.completions()     ││
+│  │  ├── POST /v1/chat/*         → openai.chat.chat_completions()            ││
+│  │  ├── POST /v1/completions    → openai.completions.completions()          ││
 │  │  ├── POST /api/auth/*        → auth.require_auth + endpoints            ││
 │  │  ├── POST /api/dashboard/*   → dashboard.settings_router                ││
 │  │  ├── GET/POST /api/projects/* → routes.projects_router                  ││
@@ -40,17 +40,24 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  3. GATEKEEPER (jarvis/agent/prompt.py)                                      │
+│  3. GATEKEEPER (jarvis/agent/prompt.py) — 3-tier classification             │
 │                                                                              │
 │  build_omniscient_prompt(user_message)                                       │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │ LLM Gatekeeper — Classifica intento:                                    ││
-│  │  ├── Keyword/Regex bypass (cache hit, comandi rapidi)                    ││
-│  │  └── LLM grammar classification:                                        ││
-│  │        ├── "progetto/codice"  → RAG + memoria + web                    ││
-│  │        ├── "conversazione"    → solo memoria                            ││
-│  │        └── "comando rapido"   → azione diretta                          ││
+│  │ Tier 1 — Keyword/Regex bypass:                                          ││
+│  │  ├── Cache hit, comandi rapidi, "/" prefix                              ││
+│  │  └── Bypassa interamente il Gatekeeper LLM                              ││
+│  │                                                                         ││
+│  │ Tier 2 — Qwen3.5-0.8B classification (CPU, 4096 ctx):                  ││
+│  │  ├── Classifica intento in: progetto/codice / conversazione / comando   ││
+│  │  │   rapido                                                              ││
+│  │  └── 6 few-shot esempi per accuracy                                     ││
+│  │                                                                         ││
+│  │ Tier 3 — Qwen3.5-0.8B compression:                                     ││
+│  │  ├── Se progetto/codice → compressa prompt lungo in formato caveman     ││
+│  │  ├── GATEKEEPER_MAX_CHARS=1500 guard per overflow                       ││
+│  │  └── Pass-through se ratio compressione negativo                        ││
 │  └─────────────────────────────────────────────────────────────────────────┘│
 │                                                                              │
 │  → GatekeeperStats.record(intent, confidence, bypassed)                     │
@@ -78,17 +85,18 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │  │  │  headless)   │ │  │ │ extract_     │ │                              │
 │  │  └──────────────┘ │  │ │ memories()   │ │                              │
 │  │                    │  │ └──────────────┘ │                              │
-│  └────────┬───────────┘  └────────┬─────────┘  └──────────┬───────────────┘   │
-│           │                      │                       │                    │
-│           ▼                      ▼                       ▼                    │
+│  └────────┬───────────┘  └────────┬─────────┘  └──────────┬───────────────┘│
+│           │                      │                       │                 │
+│           ▼                      ▼                       ▼                 │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
 │  │ RAG DOCUMENTALE (se gatekeeper=True)                                    ││
 │  │                                                                         ││
+│  │  → FastEmbed ONNX CPU embedding (BAAI/bge-base-en-v1.5, 768 dims)      ││
 │  │  → Qdrant search (collezione progetto attivo)                           ││
 │  │  → Reranker duale: Qwen3-Reranker → FlashRank (fallback)                ││
 │  │  → Synaptiq Engine: hybrid search (vettori + grafo strutturale)         ││
 │  │  → Cross-collection fallback se progetto specifico fallisce             ││
-│  │  → Semantic Cache check (soglia cosine 0.88)                           ││
+│  │  → Semantic Cache check (soglia cosine 0.96)                           ││
 │  │  → File matching: include chunk con file path nel prompt                ││
 │  └─────────────────────────────────────────────────────────────────────────┘│
 │                                                                              │
@@ -127,15 +135,16 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │  LlamaEngine.generate_chat()                                                 │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │ ROUTING INFERENZA:                                                      ││
-│  │  ▸ Locale (llama-cpp-python) ← PRIORITARIO                             ││
-│  │  ▸ EXTERNAL_GPU_URL configurato? → ping Worker (1.5s timeout)          ││
-│  │      ├── OK → offload GPU via HTTP POST con meta nel body               ││
-│  │      └── FAIL → fallback CPU locale                                     ││
+│  │ HARDWARE PROFILE AUTO-DETECTION:                                        ││
+│  │  ▸ detect_model_family() → legge header GGUF (qwen/gemma/deepseek/...)  ││
+│  │  ▸ _family_hardware_defaults() → parametri ottimali per famiglia        ││
+│  │  ▸ n_gpu_layers, flash_attn, n_ubatch risolti con priorità:             ││
+│  │      1. .env esplicito  2. default per famiglia  3. fallback globale    ││
 │  └─────────────────────────────────────────────────────────────────────────┘│
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │ PRE-PROCESSING:                                                         ││
+│  │ INFERENZA LOCALE (llama-cpp-python):                                    ││
+│  │  ├── Qwen3.5-4B (full GPU, -1 layer, flash_attn=true, ~35-40 tok/s)   ││
 │  │  ├── Thinking Mode: inject <|think|> nel system prompt se supportato    ││
 │  │  ├── PriorityLock.acquire(priority=0) → attesa se embedding in corso    ││
 │  │  └── Model.generate() → streaming o full response                       ││
@@ -149,7 +158,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │  7. STREAMING + TAG PROCESSING (jarvis/agent/tags.py)                       │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │ TagSafeStream — Anti-leak tag XML in streaming                         ││
+│  │ TagSafeStream — Anti-leak tag XML in streaming                          ││
 │  │                                                                         ││
 │  │  Ogni chunk LLM:                                                        ││
 │  │  ├── TagSafeStream.process(chunk)                                       ││
@@ -199,7 +208,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │  │  ├── run_shell_command(cmd)       → bash (60s timeout) 🛡️ conferma     ││
 │  │  └── skill_* (dinamici da YAML)   → skill personalizzata 🛡️ conferma  ││
 │  │                                                                         ││
-│  │  Ogni tool 🛡️ → Telegram conferma utente (timeout 5 min)               ││
+│  │  Ogni tool 🛡️ → Telegram/HTTP conferma utente (timeout 5 min)          ││
 │  └─────────────────────────────────────────────────────────────────────────┘│
 │                                                                              │
 │  → Risultato tool reiniettato → nuovo giro LLM                              │
