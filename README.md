@@ -21,7 +21,10 @@
 ## 📦 Quick Start
 
 ```bash
-# Build e avvio Worker GPU
+# Avvio Worker GPU (Docker compose per Qdrant/SearXNG/Crawl4AI)
+docker compose -f docker-compose.worker.yml up -d qdrant searxng crawl4ai
+
+# Avvio Jarvis (esecuzione HOST diretta)
 ./start_worker.sh
 
 # Test rapido
@@ -45,16 +48,19 @@ QDRANT_HOST=localhost
 EXTERNAL_GPU_URL=
 
 # Modello LLM
-LLAMA_MODEL_PATH=./models/NomeModello.gguf
-N_GPU_LAYERS=15
-LLM_FLASH_ATTN=true
+LLAMA_MODEL_PATH=./models/Qwen3.5-4B-UD-Q4_K_XL.gguf
+# N_GPU_LAYERS, LLM_FLASH_ATTN, LLM_UBATCH_SIZE sono AUTO-DETECTATI
+# dal profilo famiglia GGUF. Non impostarli manualmente.
+
+# Embedding
+# FastEmbed ONNX CPU (BAAI/bge-base-en-v1.5) — 0 VRAM, caricato automaticamente
 
 # RAG
-MAIN_PROJECT_PATH=/host_fs/home/alfio/Projects
+MAIN_PROJECT_PATH=/home/alfio/Projects/NeuroNet
 EMBEDDING_DIMS=768
 
 # Watchdog
-WATCHDOG_ENABLED=true
+WATCHDOG_ENABLED=false
 WATCHDOG_TIMEOUT=5
 WATCHDOG_WATCH_MODE=per_project
 ```
@@ -70,13 +76,13 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| LlamaEngine singleton | `llm_engine.py` | Modelli GGUF in VRAM, PriorityLock chat > embedding |
-| Flash Attention | `llm_engine.py` | -30-50% VRAM |
-| GPU Offloading remoto | `llm_engine.py` | Worker remoto con failover 1.5s |
-| Thinking Mode | `llm_engine.py` | `<\|think\|>` per Gemma / DeepSeek / QwQ |
-| Compressione | `llm_engine.py` | Caveman mode con Qwen3.5 0.8B (GPU/CPU) |
-| Gatekeeper classifier | `llm_engine.py` | Classificazione intenti con Gemma 4 (0 VRAM extra) |
-| Model Profiles | `model_profiles.py` | Auto-rilevamento famiglia GGUF (7 famiglie) |
+| LlamaEngine singleton | `core/llm_engine.py` | Modelli GGUF in VRAM, PriorityLock |
+| Flash Attention | `core/llm_engine.py` | Auto-detectato per famiglia modello |
+| Hardware Profile Auto-Detection | `core/model_profiles.py` | Rilevamento famiglia GGUF (7+ famiglie) via header binario. Applica n_gpu_layers/flash_attn/n_ubatch ottimali |
+| Thinking Mode | `core/llm_engine.py` | `<\|think\|>` per Gemma / DeepSeek / QwQ |
+| Compressione Gatekeeper | `core/llm_engine.py` | Qwen3.5 0.8B CPU (0 VRAM), 4096 ctx, 6 few-shot |
+| Classificazione intenti | `core/llm_engine.py` | Con main model (0 VRAM extra), 1-5 token, ~0.3-0.8s |
+| Embedding | FastEmbed ONNX CPU | BAAI/bge-base-en-v1.5, 0 VRAM, 768 dims |
 
 </details>
 
@@ -86,10 +92,11 @@ WATCHDOG_WATCH_MODE=per_project
 | Feature | File | Dettaglio |
 |---|---|---|
 | AST Chunking semantico | `rag/engine.py` | Tree-sitter per 9 linguaggi |
-| Reranker duale | `rag_reranker.py` | Qwen3-Reranker + FlashRank fallback |
+| Reranker duale | `rag/reranker.py` | Qwen3-Reranker + FlashRank fallback |
 | Watchdog real-time | `rag/engine.py` | PollingObserver, re-embedding automatico |
-| Cache semantica | `rag_cache.py` | Soglia cosine 0.88 |
+| Cache semantica | `rag/cache.py` | Soglia cosine 0.96 |
 | Synaptiq Engine | `graph/synaptiq_engine.py` | Grafo strutturale, hybrid search, dead code, impact, **graph visualization con Sigma.js** |
+| FastEmbed ONNX CPU | `core/lifecycle.py` | Embedding vettoriale CPU, 0 VRAM, nessuna contenzione GPU |
 
 </details>
 
@@ -98,8 +105,8 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| Memoria episodica | `memory.py` | Mem0 + Qdrant, metadati progetto |
-| Ricerca filtrata | `memory.py` | Per `user_id` + `project` |
+| Memoria episodica | `memory/engine.py` | Mem0 + Qdrant, metadati progetto |
+| Ricerca filtrata | `memory/engine.py` | Per `user_id` + `project` |
 | Tag `<MEMORY>` | `agent/tags.py` | Salvataggio esplicito da risposta LLM |
 | Consolidamento notturno | `memory/reflection.py` | Episodica → profilo sintetico (3:00 UTC) |
 
@@ -110,7 +117,7 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| LLM Gatekeeper | `agent/prompt.py` | 3-tier: keyword bypass + Gemma 4 classification (0 VRAM extra) + Qwen3.5 compression |
+| LLM Gatekeeper | `agent/prompt.py` | 3-tier: keyword bypass + main model classification (0 VRAM extra) + Qwen3.5 0.8B compression (CPU) |
 | Budget Allocator | `agent/prompt.py` | 55% RAG / 20% web / 10% mem / 15% tree, max 15K char |
 | Super-prompt XML | `agent/prompt.py` | 7 tag contestuali |
 | 21 tag d'azione | `agent/tags.py` | MEMORY, SCHEDULE, SSH, TODO, WEB, FILE, EXEC, COMMIT... |
@@ -134,9 +141,9 @@ WATCHDOG_WATCH_MODE=per_project
 | Feature | File | Dettaglio |
 |---|---|---|
 | Tool-calling nativo | `agent/tools.py` | 5 built-in tool + skill dinamiche |
-| Conferma utente | `agent/tools.py` | Timeout 5 min per op. distruttive |
+| Conferma utente | `agent/confirmation.py` | Timeout 5 min per op. distruttive |
 | APScheduler | `scheduler/cron.py` | CronTrigger, DateTrigger, timer relativi |
-| Task Manager | `task_manager.py` | Task persistenti con priorità e scadenze |
+| Task Manager | `scheduler/tasks.py` | Task persistenti con priorità e scadenze |
 
 </details>
 
@@ -146,10 +153,10 @@ WATCHDOG_WATCH_MODE=per_project
 | Feature | File | Dettaglio |
 |---|---|---|
 | CUDA 13.0 Overlay | `Dockerfile` | Base 12.2 + overlay 13.0 per driver 580.x |
-| Dashboard web | `dashboard.py` | GPU / System / RAG metrics + **Settings panel (73 env var)** |
+| Dashboard web | `admin/dashboard.py` | GPU / System / RAG metrics + **Settings panel (73 env var)** |
 | OpenAI API | `openai/` | 25 endpoint: Chat, Audio, Assistants API |
-| MCP Server v2 | `mcp_server_v2.py` | Streamable HTTP, 8 tool + 7 resources |
-| Intent Classifier | `classificatore.py` | Classificazione intenti centralizzata |
+| MCP Server v2 | `api/mcp/server_v2.py` | Streamable HTTP, 8 tool + 7 resources |
+| Intent Classifier | `agent/classifier.py` | Classificazione intenti centralizzata |
 
 </details>
 
@@ -158,9 +165,9 @@ WATCHDOG_WATCH_MODE=per_project
 ## 🔄 Pipeline
 
 ```
-Input → Routing → PipelineTracer → Gatekeeper (intento?)
-       → Context Gathering [Web | Memoria | RAG | Synaptiq]
-       → Super-prompt XML → LLM Generation
+Input → Routing → PipelineTracer → Gatekeeper (3-tier: keyword bypass + main model classification + compression)
+       → Context Gathering [FastEmbed ONNX CPU | Memoria | RAG | Synaptiq]
+       → Super-prompt XML → LLM Generation (Qwen3.5-4B GPU, 35-40 tok/s)
        → TagSafeStream → Tool-calling Loop → Output
 ```
 
@@ -206,7 +213,7 @@ jarvis/admin_panel/
         └── utils.js      # fetchWithTimeout, showToast, escapeHtml
 ```
 
-Backend API auth: `jarvis/routes/profile.py` (self-service: API key, password, Telegram), `jarvis/routes/users.py` (admin CRUD utenti), `jarvis/auth.py` (JWT login/logout/me). Backend settings: `jarvis/dashboard.py` — API Router FastAPI con `SETTINGS_META` (73 voci, metadati estesi) e `_persist_env()` (scrittura atomica `.env`).
+Backend API auth: `jarvis/routes/profile.py` (self-service: API key, password, Telegram), `jarvis/routes/users.py` (admin CRUD utenti), `jarvis/auth.py` (JWT login/logout/me). Backend settings: `jarvis/admin/dashboard.py` — API Router FastAPI con `SETTINGS_META` (73 voci, metadati estesi) e `_persist_env()` (scrittura atomica `.env`).
 
 ---
 
@@ -214,14 +221,19 @@ Backend API auth: `jarvis/routes/profile.py` (self-service: API key, password, T
 
 | Ruolo | Modello | Memoria | Velocità |
 |---|---|---|---|
-| **Chat (attivo)** | Gemma 4 E2B QAT (Q4_K_XL) | 1.036 MiB VRAM | ~6.88 tok/s |
-| **Gatekeeper/Compression** | Qwen3.5-0.8B (Q4_K_M) | ~553 MiB VRAM | — |
-| **Embedding** | Qwen3-Embedding-0.6B (Q8_0) | ~400 MiB VRAM | — |
+| **Chat (attivo)** | Qwen3.5-4B (Q4_K_XL) | ~3334 MiB VRAM (full GPU) | **~35-40 tok/s** |
+| **Gatekeeper/Compression** | Qwen3.5-0.8B (Q4_K_M) | **0 VRAM (CPU)** | — |
+| **Embedding** | FastEmbed ONNX (BAAI/bge-base-en-v1.5) | **0 VRAM (CPU)** | — |
 | **Reranker** | Qwen3-Reranker-0.6B (fp16 CPU) | ~600 MB RAM | — |
-| **Backup Chat** | Qwen3.5-4B (Q4_K_XL) | 1.924 MiB VRAM | ~6.24 tok/s |
+| **Backup Chat** | Gemma 4 E2B QAT (Q4_K_XL) | 1036 MiB VRAM (15/35 layer) | ~5.7 tok/s |
 | **Master (futuro)** | Gemma 4 26B A4B (Q4_K_XL) | ~14.2 GB RAM | ~8-12 tok/s |
 
 Jarvis usa **solo `llama-cpp-python`** con file GGUF. Nessun Ollama.
+
+### Hardware Profile Auto-Detection
+
+N_GPU_LAYERS, LLM_FLASH_ATTN e LLM_UBATCH_SIZE sono auto-detectati dal profilo famiglia del modello GGUF.
+Per switchare modello: basta cambiare `LLAMA_MODEL_PATH` nel `.env` — nessun altro parametro da modificare.
 
 ---
 
@@ -244,8 +256,8 @@ Jarvis usa **solo `llama-cpp-python`** con file GGUF. Nessun Ollama.
 | File | Contenuto |
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | **Guida per agenti AI** (leggi PRIMA di lavorare sul codice) |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Topologia Master/Worker, flusso inferenza |
-| [`docs/COMPONENTS.md`](docs/COMPONENTS.md) | Analisi completa 14 componenti con diagrammi |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Topologia e flusso inferenza |
+| [`docs/COMPONENTS.md`](docs/COMPONENTS.md) | Analisi completa componenti e moduli |
 | [`docs/PIPELINE.md`](docs/PIPELINE.md) | Flusso end-to-end Input → Response |
 | [`docs/SETUP.md`](docs/SETUP.md) | Installazione, configurazione, modelli, manutenzione |
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Tutti gli endpoint API |
