@@ -233,6 +233,9 @@ async def lifespan(app: FastAPI):
 
     async def _ingest_after_mem0():
         await task_mem0
+        if not WATCHDOG_ENABLED:
+            logger.info("⏭️ RAG ingestion iniziale saltata (WATCHDOG_ENABLED=false). Usa Re-index dalla dashboard o API.")
+            return
         await ingest_local_documents()
 
     task_ingest = asyncio.create_task(_ingest_after_mem0())
@@ -427,6 +430,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"User manager close error: {e}")
 
+    # Embed worker deprecato: il chat model (embedding=True) fa anche embedding.
+    # Non c'è più un subprocess separato da fermare.
     await asyncio.gather(
         state.qdrant.close(),
         state.http_client.aclose(),

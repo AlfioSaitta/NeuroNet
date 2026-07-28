@@ -375,6 +375,32 @@ def family_to_chat_format(family: str, variant: str = "") -> Optional[str]:
     return fmt_map.get(family)
 
 
+def _family_hardware_defaults(family: str) -> dict:
+    """Restituisce parametri hardware di default per famiglia modello.
+    
+    CRITICO: N_GPU_LAYERS errato causa segfault immediato (es. Gemma4 con -1).
+    Flash Attention errato causa crash silenzioso (es. Gemma4 con true).
+    Questi default sono ottimizzati per RTX 3050 Ti 4GB.
+    
+    Gerarchia di risoluzione (in _load_chat_model):
+    1. .env esplicito → priorità massima
+    2. Default per famiglia → usato se .env non imposta il valore
+    3. Default globale hardcoded → fallback estremo
+    """
+    hw_defaults = {
+        "qwen":      {"n_gpu_layers": -1, "flash_attn": True,  "n_ubatch": 128},
+        "qwq":       {"n_gpu_layers": 0,  "flash_attn": False, "n_ubatch": 512},
+        "gemma":     {"n_gpu_layers": 15, "flash_attn": False, "n_ubatch": 512},
+        "deepseek":  {"n_gpu_layers": -1, "flash_attn": True,  "n_ubatch": 128},
+        "llama":     {"n_gpu_layers": -1, "flash_attn": True,  "n_ubatch": 128},
+        "mistral":   {"n_gpu_layers": -1, "flash_attn": True,  "n_ubatch": 128},
+        "mixtral":   {"n_gpu_layers": -1, "flash_attn": True,  "n_ubatch": 128},
+        "phi":       {"n_gpu_layers": -1, "flash_attn": True,  "n_ubatch": 128},
+        "command-r": {"n_gpu_layers": -1, "flash_attn": True,  "n_ubatch": 128},
+    }
+    return hw_defaults.get(family, {"n_gpu_layers": 0, "flash_attn": False, "n_ubatch": 512})
+
+
 def _family_ctx_defaults(family: str) -> dict:
     """Restituisce parametri di default per una famiglia."""
     defaults = {

@@ -6,6 +6,7 @@ import time
 import subprocess
 import logging
 from concurrent.futures import ThreadPoolExecutor
+import numpy as np
 
 import core.state as state
 from core.config import LLM_THINKING_MODE, MODEL_PROFILE, EXTERNAL_GPU_URL, MODEL_ID, LLM_MAX_TOKENS, EMBEDDING_DIMS
@@ -133,40 +134,88 @@ class LlamaEngine:
         if self.initialized:
             return
             
-        self.chat_model = None       # Gemma 4 su GPU (main_brain)
-        self.embed_model = None      # Qwen3-Embedding su CPU
+        self.chat_model = None       # Qwen3.5-4B su GPU (main_brain)
+        self.fastembed_model = None  # FastEmbed (ONNX CPU) per embedding
         self.gatekeeper_model = None # Qwen3.5-0.8B (classify + compress, CPU default)
         # Thread pool per non bloccare l'event loop di FastAPI (concurrency safe)
         self.executor = ThreadPoolExecutor(max_workers=8)
         # Lock separati: ogni modello Llama è indipendente, non devono bloccarsi
         self.chat_lock = PriorityLock()
-        self.embed_lock = PriorityLock()
         self.gatekeeper_lock = PriorityLock()
         self.initialized = True
 
     # ── Helper di caricamento modelli ────────────────────────────────
 
     def _load_chat_model(self, path: str) -> None:
-        """Carica il modello chat principale (Gemma 4) su GPU."""
+        """Carica il modello chat principale con parametri auto-adattati alla famiglia.
+        
+        Gerarchia parametri (priorità decrescente):
+        1. Valore esplicito in .env (es. N_GPU_LAYERS=15) 
+        2. Default per famiglia modello (da _family_hardware_defaults)
+        3. Default globale hardcoded (fallback estremo)
+        
+        CRITICO: N_GPU_LAYERS e flash_attn errati causano segfault o crash.
+        """
+        import os as _os
+        
+        # ── Step 1: Rileva famiglia modello PRIMA del caricamento ──
+        from core.model_profiles import detect_model_family, _family_hardware_defaults
+        _detected = detect_model_family(path)
+        _hw_def = _family_hardware_defaults(_detected.family)
+        
+        # ── Step 2: Leggi ctx/batch da config (sempre da .env) ──
         from core.config import (
-            N_GPU_LAYERS as _cfg_gpu, LLM_NUM_CTX as _cfg_ctx,
-            LLM_BATCH_SIZE as _cfg_batch, LLM_UBATCH_SIZE as _cfg_ubatch,
-            LLM_FLASH_ATTN as _cfg_flash, MODEL_PROFILE as _init_profile,
+            LLM_NUM_CTX as _cfg_ctx,
+            LLM_BATCH_SIZE as _cfg_batch,
+            MODEL_PROFILE as _init_profile,
         )
-        n_gpu_layers, n_ctx, n_batch = _cfg_gpu, _cfg_ctx, _cfg_batch
-        n_ubatch, flash_attn = _cfg_ubatch, _cfg_flash
+        n_ctx = _cfg_ctx
+        n_batch = _cfg_batch
         _chat_format = _init_profile.chat_format
+        
+        # ── Step 3: Risolvi parametri GPU con fallback gerarchico ──
+        # Per ogni parametro: se esplicitamente impostato in .env → usalo,
+        # altrimenti usa il default della famiglia modello.
+        _env_n_gpu = _os.environ.get("N_GPU_LAYERS", "")
+        _env_flash = _os.environ.get("LLM_FLASH_ATTN", "")
+        _env_ubatch = _os.environ.get("LLM_UBATCH_SIZE", "")
+        
+        if _env_n_gpu.strip():
+            n_gpu_layers = int(_env_n_gpu)
+            _src_gpu = f".env={_env_n_gpu}"
+        else:
+            n_gpu_layers = _hw_def["n_gpu_layers"]
+            _src_gpu = f"profilo {_detected.family}={_hw_def['n_gpu_layers']}"
+        
+        if _env_flash.strip():
+            flash_attn = _env_flash.lower() == "true"
+            _src_flash = f".env={_env_flash}"
+        else:
+            flash_attn = _hw_def["flash_attn"]
+            _src_flash = f"profilo {_detected.family}={_hw_def['flash_attn']}"
+        
+        if _env_ubatch.strip():
+            n_ubatch = int(_env_ubatch)
+            _src_ubatch = f".env={_env_ubatch}"
+        else:
+            n_ubatch = _hw_def["n_ubatch"]
+            _src_ubatch = f"profilo {_detected.family}={_hw_def['n_ubatch']}"
+        
         logger.info(f"Caricamento Chat Model (MAIN BRAIN): {path}")
-        logger.info(f"⚙️ n_gpu_layers={n_gpu_layers} n_ctx={n_ctx} "
-                    f"n_batch={n_batch} n_ubatch={n_ubatch} flash_attn={flash_attn}")
-        logger.info(f"⚙️ chat_format={_chat_format} (family={_init_profile.family})")
-
+        logger.info(f"⚙️ [rilevato: {_detected.family}/{_detected.variant}] "
+                    f"n_gpu_layers={n_gpu_layers} ({_src_gpu})")
+        logger.info(f"⚙️ flash_attn={flash_attn} ({_src_flash}) "
+                    f"n_ubatch={n_ubatch} ({_src_ubatch}) n_ctx={n_ctx}")
+        logger.info(f"⚙️ chat_format={_chat_format}")
+        
         self.chat_model = Llama(
             model_path=path,
             n_gpu_layers=n_gpu_layers, n_ctx=n_ctx,
             n_batch=n_batch, n_ubatch=n_ubatch,
-            n_threads=6, flash_attn=flash_attn,
+            n_threads=4, flash_attn=flash_attn,
             use_mmap=True, chat_format=_chat_format, verbose=False,
+            # embedding=True disabilitato: causa crash con n_gpu_layers=-1
+            # su questo GGUF (fused_gated_delta_net). Usiamo fastembed invece.
         )
         log_vram_usage("Dopo caricamento Chat Model (Gemma 4)")
 
@@ -195,24 +244,6 @@ class LlamaEngine:
         except Exception as _meta_err:
             logger.warning(f"⚠️ Estrazione metadati modello fallita: {_meta_err}")
 
-    def _load_embed_model(self, path: str) -> None:
-        """Carica il modello embedding (Qwen3-Embedding) su CPU."""
-        from core.config import EMBED_N_GPU_LAYERS as _cfg_embed_gpu
-        logger.info(f"Caricamento Embed Model (CPU): {path}")
-        logger.info(f"⚙️ n_gpu_layers={_cfg_embed_gpu} (CPU), n_ctx=8192, pooling=2")
-        self.embed_model = Llama(
-            model_path=path, embedding=True,
-            n_gpu_layers=_cfg_embed_gpu, n_ctx=8192,
-            n_batch=256, n_threads=4, verbose=False, pooling=2,
-        )
-        log_vram_usage("Dopo caricamento Embed Model (dovrebbe essere 0 incremento)")
-        try:
-            logger.info("🔄 Warmup Embed Model (CPU first-call)...")
-            self.embed_model.create_embedding(["warmup"])
-            logger.info("✅ Embed Model warmup completato")
-        except Exception as e:
-            logger.warning(f"⚠️ Embed Model warmup fallito (non critico): {e}")
-
     def _load_gatekeeper_model(self, path: str) -> None:
         """Carica il modello gatekeeper (Qwen3.5) per intent classification + compressione."""
         from core.config import (
@@ -226,8 +257,8 @@ class LlamaEngine:
         self.gatekeeper_model = Llama(
             model_path=path,
             n_gpu_layers=_gk_gpu, n_ctx=_gk_ctx,
-            n_batch=128, n_ubatch=128, n_threads=_gk_threads,
-            flash_attn=False, use_mmap=True, chat_format="chatml", verbose=False,
+            n_batch=512, n_ubatch=512, n_threads=_gk_threads,
+            flash_attn=True, use_mmap=True, chat_format="chatml", verbose=False,
         )
         logger.info(f"✅ Gatekeeper Model caricato ({_dev})")
         try:
@@ -240,29 +271,51 @@ class LlamaEngine:
     # ── Caricamento orchestrato ──────────────────────────────────────
 
     def load_models(self):
-        """Carica tutti i modelli LLM: chat, embedding, gatekeeper."""
+        """Carica tutti i modelli: embed (subprocess CPU), chat (GPU), gatekeeper (CPU).
+
+        STRATEGIA:
+        1. FastEmbed (ONNX CPU) per embedding → zero VRAM, zero subprocess.
+           Modello: intfloat/multilingual-e5-base (768d, multilingua).
+        2. Chat model (Qwen3.5-4B) → full GPU offload (N_GPU_LAYERS=-1).
+        3. Gatekeeper model (Qwen3.5-0.8B) → CPU, nessuna competizione VRAM.
+        """
         if Llama is None:
             logger.error("Impossibile caricare i modelli: llama-cpp-python mancante.")
             return
 
         from core.config import (
             LLAMA_MODEL_PATH as _cfg_model_path,
-            LLAMA_EMBED_MODEL_PATH as _cfg_embed_path,
             GATEKEEPER_MODEL_PATH as _cfg_gk_path,
         )
 
+        # 1. FastEmbed (ONNX CPU) per embedding — zero VRAM, zero subprocess
+        try:
+            from fastembed import TextEmbedding
+            logger.info("📦 Caricamento FastEmbed (bge-base-en-v1.5, 768d)...")
+            self.fastembed_model = TextEmbedding(
+                model_name="BAAI/bge-base-en-v1.5",
+                max_length=512,
+                cache_dir="./models/fastembed_cache",
+            )
+            # Warmup: embed una frase breve
+            _ = list(self.fastembed_model.embed(["warmup"]))
+            logger.info("✅ FastEmbed pronto")
+        except Exception as _fe_err:
+            logger.warning(f"⚠️ FastEmbed non caricato (embedding non disponibile): {_fe_err}")
+            self.fastembed_model = None
+
+        # 2. Chat model su GPU (full offload)
         if os.path.exists(_cfg_model_path):
             self._load_chat_model(_cfg_model_path)
         else:
             logger.warning(f"File chat model {_cfg_model_path} non trovato!")
 
-        if os.path.exists(_cfg_embed_path):
-            self._load_embed_model(_cfg_embed_path)
-        else:
-            logger.warning(f"File embed model {_cfg_embed_path} non trovato!")
-
+        # 3. Gatekeeper model su CPU — NON critico, graceful failure
         if os.path.exists(_cfg_gk_path):
-            self._load_gatekeeper_model(_cfg_gk_path)
+            try:
+                self._load_gatekeeper_model(_cfg_gk_path)
+            except Exception as _gk_err:
+                logger.warning(f"⚠️ Gatekeeper model non caricato (non critico): {_gk_err}")
         else:
             logger.warning(
                 f"File gatekeeper model {_cfg_gk_path} non trovato! "
@@ -339,7 +392,7 @@ class LlamaEngine:
             payload["tools"] = tools
         return payload
 
-    async def generate_chat(self, messages, tools=None, options=None, stream=False, grammar=None, model="chat"):
+    async def generate_chat(self, messages, tools=None, options=None, stream=False, grammar=None, model="chat", priority=0):
         """Genera rispresa da un modello Llama.
 
         Args:
@@ -349,6 +402,7 @@ class LlamaEngine:
             stream: Se True, restituisce un generatore asincrono.
             grammar: Grammatica GBNF per output strutturato.
             model: "chat" (Gemma 4 GPU) o "gatekeeper" (Qwen3.5 CPU).
+            priority: Priorità lock (0=più alta, default). Gatekeeper usa 1.
         """
         try:
             llm = self._resolve_model(model)
@@ -427,7 +481,7 @@ class LlamaEngine:
             _STREAM_TOTAL_TIMEOUT = 600  # max 10 min totali per streaming
 
             async def async_generator():
-                async with PriorityLockContextManager(lock, priority=0):
+                async with PriorityLockContextManager(lock, priority=priority):
                     try:
                         generator = await asyncio.wait_for(
                             loop.run_in_executor(
@@ -482,7 +536,7 @@ class LlamaEngine:
                             break
             return async_generator()
         else:
-            async with PriorityLockContextManager(lock, priority=0):
+            async with PriorityLockContextManager(lock, priority=priority):
                 try:
                     response = await asyncio.wait_for(
                         loop.run_in_executor(
@@ -637,15 +691,22 @@ digit ::= [0-9]'''
 
 Richiesta: "{user_message[:800]}"
 
-Classifica in UNA SOLA parola: project (codice/file/progetto), meta (lista/capacità/chi sei), general (conversazione).
+Classifica in UNA SOLA parola (project|meta|general):
+- project: richiede contesto progetto (codice, file, bug, API, deployment)
+- meta: richiede lista progetti, capacità, help su Jarvis
+- general: conversazione generica (saluti, data/ora, meteo, barzellette, definizioni, posizione)
+
 project|meta|general:"""
 
         try:
             messages = [{"role": "user", "content": prompt}]
-            response = await self.generate_chat(
-                messages, stream=False,
-                options={"temperature": 0.0, "num_predict": 5, "max_tokens": 10, "stop": ["\n", "|"]},
-                model="chat",
+            response = await asyncio.wait_for(
+                self.generate_chat(
+                    messages, stream=False,
+                    options={"temperature": 0.0, "num_predict": 5, "max_tokens": 10, "stop": ["\n", "|"]},
+                    model="chat", priority=1,
+                ),
+                timeout=15.0,  # gatekeeper: max 15s per classification
             )
             if "error" in response:
                 logger.warning(f"Gemma Gatekeeper: errore → fallback general ({response['error']})")
@@ -725,12 +786,12 @@ project|meta|general:"""
         raw_data = "\n\n".join(raw_parts)
 
         # ── Token-aware context window guard ──
-        # Gatekeeper model has GATEKEEPER_N_CTX=2048. System prompt needs ~100-450
-        # tokens (CJK vs English), response needs ~50 tokens, overhead ~50 tokens.
-        # Conservative budget for raw_data: 1500 chars (safe for CJK at 1 char/token).
-        _GK_MAX_CHARS = 1500
+        # Gatekeeper model has GATEKEEPER_N_CTX (default 4096, configurabile).
+        # System prompt ~100-450 token, response ~50 token, overhead ~50 token.
+        # Budget for raw_data: 2000 chars (safe for CJK at 1 char/token).
+        _GK_MAX_CHARS = 2000
         if len(raw_data) > _GK_MAX_CHARS:
-            logger.info(f"🗜️ Compress input {len(raw_data)}ch > {_GK_MAX_CHARS}ch, truncating for gatekeeper 2048-ctx")
+            logger.info(f"🗜️ Compress input {len(raw_data)}ch > {_GK_MAX_CHARS}ch, truncating for gatekeeper context window")
             raw_data = raw_data[:_GK_MAX_CHARS]
 
         messages = [
@@ -742,7 +803,7 @@ project|meta|general:"""
             response = await self.generate_chat(
                 messages,
                 stream=False,
-                options={"temperature": 0.0, "num_predict": 512},
+                options={"temperature": 0.0, "num_predict": 128},
                 model="gatekeeper",
             )
             if "error" in response:
@@ -776,30 +837,34 @@ project|meta|general:"""
             return raw_data[:4096]
 
     async def get_embeddings(self, texts, priority=10):
-        if not self.embed_model:
-            return {"error": "Modello embedding non caricato"}
-        
-        async with PriorityLockContextManager(self.embed_lock, priority=priority):
-            loop = asyncio.get_running_loop()
-            
-            # Se text è una singola stringa, lo incapsuliamo
-            if isinstance(texts, str):
-                texts = [texts]
-                
-            # llama-cpp-python processa array nativamente
-            embeddings = await loop.run_in_executor(
-                self.executor,
-                lambda: self.embed_model.create_embedding(texts)
-            )
-            
-            # MRL (Matryoshka): tronca a EMBEDDING_DIMS dim per retrocompatibilità con le collection Qdrant esistenti
-            if "data" in embeddings:
-                for item in embeddings["data"]:
-                    emb = item.get("embedding", [])
-                    if len(emb) > EMBEDDING_DIMS:
-                        item["embedding"] = emb[:EMBEDDING_DIMS]
-            
-            return embeddings
+        """Genera embedding via FastEmbed (ONNX CPU, multilingual-e5-base).
+
+        Output format: {"data": [{"embedding": [float,...], "index": int}, ...]}
+        768d nativi (nessuna truncation necessaria).
+        """
+        if isinstance(texts, str):
+            texts = [texts]
+
+        if not self.fastembed_model:
+            return {"error": "FastEmbed non disponibile", "data": []}
+
+        def _do_fastembed(texts):
+            # fastembed restituisce generator di numpy array
+            embeddings_np = list(self.fastembed_model.embed(texts))
+            data = []
+            for i, emb in enumerate(embeddings_np):
+                # Convert numpy array to list
+                emb_list = emb.tolist() if hasattr(emb, 'tolist') else list(emb)
+                data.append({"embedding": emb_list, "index": i})
+            return {"data": data, "object": "list"}
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            self.executor,
+            lambda: _do_fastembed(texts)
+        )
+
+        return result
 
     # ==========================================================================
     # PROVIDER ROUTER INTEGRATION

@@ -283,12 +283,12 @@ async def get_stats():
             details.append({"label": "flash_attn", "value": str(fa)})
         else:
             details.append({"label": "Status", "value": "Not loaded"})
-        if engine and engine.embed_model:
-            mp = getattr(engine.embed_model, 'model_path', '') or ''
-            embed_model_name = mp.split('/')[-1] if mp else "Loaded"
+        # FastEmbed (ONNX CPU)
+        if engine and engine.fastembed_model:
+            embed_model_name = "FastEmbed (bge-base-en-v1.5)"
         models = {"chat_model": chat_model_name, "embed_model": embed_model_name, "details": details}
     except Exception as e:
-        models = {"chat_model": "Error", "embed_model": "Error", "details": [{"label": "error", "value": str(e)}]}
+        models = {"chat_model": "Error", "embed_model": "Error (chat model)", "details": [{"label": "error", "value": str(e)}]}
 
     # ── Service health dal cache ──
     searxng_up = bool(health and health.get("searxng"))
@@ -326,7 +326,7 @@ async def get_stats():
 
     features = {
         "llm": bool(engine and engine.chat_model),
-        "embeddings": bool(engine and engine.embed_model),
+        "embeddings": bool(engine and engine.fastembed_model),  # FastEmbed ONNX CPU
         "rag": qdrant_up,
         "memory": bool(state.memory),
         "ast_parser": True,

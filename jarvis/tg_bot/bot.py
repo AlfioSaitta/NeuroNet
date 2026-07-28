@@ -270,12 +270,11 @@ if TELEGRAM_ENABLED:
                 pass
 
             chat_status = "✅ Caricato" if engine.chat_model else "❌ Non caricato"
-            embed_status = "✅ Caricato" if engine.embed_model else "❌ Non caricato"
-            from core.config import LLAMA_MODEL_PATH as _cfg_model, LLAMA_EMBED_MODEL_PATH as _cfg_embed
+            embed_status = "✅ FastEmbed" if engine.fastembed_model else "❌ Non caricato"
+            from core.config import LLAMA_MODEL_PATH as _cfg_model
             chat_name = os.path.basename(_cfg_model) if _cfg_model else "?"
-            embed_name = os.path.basename(_cfg_embed) if _cfg_embed else "?"
             models_str_parts.append(f"• Chat: `{chat_name}` — {chat_status}")
-            models_str_parts.append(f"• Embed: `{embed_name}` — {embed_status}")
+            models_str_parts.append(f"• Embed: FastEmbed (bge-base-en-v1.5) — {embed_status}")
             models_str = "\n".join(models_str_parts)
             
             msg = (
