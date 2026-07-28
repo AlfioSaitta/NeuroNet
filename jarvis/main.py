@@ -43,7 +43,7 @@ from rag.engine import ingest_local_documents, search_documents
 from rag.cache import semantic_cache_search, semantic_cache_store
 from memory.engine import extract_memories, save_to_memory, process_response_tags, reindex_graph_connections
 from agent.tags import strip_action_tags, TagSafeStream
-from agent.prompt import build_omniscient_prompt
+from agent.prompt import build_omniscient_prompt, PURE_GREETING
 from core.telemetry import PipelineTracer
 from core.llm_engine import engine, extract_content
 from agent.tools import execute_tool_call
@@ -751,6 +751,32 @@ async def chat(payload: ChatRequest, request: Request):
     tracer = PipelineTracer.begin(user_message=raw_messages[-1]["content"][:200] if raw_messages else "", user_id=current_user_id) if not is_internal else None
     if tracer:
         tracer._conversation_id = str(conversation_id)
+
+    # ── Short-circuit per saluti puri — non serve chiamare Qwen per un "ciao" ──
+    _greeting_text = raw_messages[-1].get("content", "").strip().lower() if raw_messages else ""
+    if not is_internal and _greeting_text and PURE_GREETING.match(_greeting_text):
+        logger.info("🗣️ Saluto puro: risposta immediata — 0 token LLM")
+        if tracer:
+            tracer.step("greeting_shortcut", status="ok", details={"reason": "pure_greeting"})
+            tracer.finish()
+        _greeting_msg = "Ciao! 👋 Come posso aiutarti oggi?"
+        _quick_base = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "created": int(time.time()),
+            "model": MODEL_ID,
+            "conversation_id": str(conversation_id),
+        }
+        if body.get("stream", True):
+            async def _quick_greet():
+                yield json.dumps({**_quick_base, "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": _greeting_msg}, "finish_reason": None}]}).encode() + b"\n"
+                yield json.dumps({**_quick_base, "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}).encode() + b"\n"
+            return StreamingResponse(_quick_greet(), media_type="application/x-ndjson")
+        return JSONResponse(status_code=200, content={**_quick_base, "object": "chat.completion",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": _greeting_msg}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        })
 
     # ── Global request timeout ──
     _PROMPT_TIMEOUT = 120   # max 2 min per contesto + compressione
