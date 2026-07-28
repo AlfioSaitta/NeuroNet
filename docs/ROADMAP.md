@@ -26,12 +26,12 @@ pie title Copertura per area funzionale
 | **Moduli Python** | 48 | 🟡 Tanti per singolo developer |
 | **Test** | 5 file · ~0% coverage | 🔴 **Critico** |
 | **RAG chunk size** | 512 tok · 0 overlap | 🟡 Da rivalutare |
-| **Modello principale** | Gemma 4 E2B QAT (2.1B) | 🟢 Valido per coding |
-| **Embedding** | Qwen3-Embedding-0.6B 768d Q8_0 | 🟢 Adeguato |
+| **Modello principale** | Qwen3.5-4B (full GPU) | 🟢 35-40 tok/s |
+| **Embedding** | FastEmbed ONNX CPU (BAAI/bge-base-en-v1.5) | 🟢 0 VRAM |
 | **Reranker** | Qwen3-Reranker-0.6B (CPU) | 🟢 Attivo |
 | **Mem0 persistenza** | Qdrant vettoriale | 🟢 Funzionante |
 | **LLM engine** | llama-cpp-python in-process | 🟢 Performante |
-| **VRAM totale** | Chat ~1036MiB + Embed ~400MiB | 🟢 Leggero |
+| **VRAM totale** | Chat ~3334MiB (Embed 0 MiB su CPU) | 🟢 Ottimizzato |
 
 ---
 

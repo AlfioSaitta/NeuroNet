@@ -4,6 +4,14 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 
 ---
 
+### v9.9.0 (2026-07-27) — Hardware Profile Auto-Detection, FastEmbed, conversation_id fix
+
+- **Hardware Profile Auto-Detection:** `model_profiles.py` nuova `_family_hardware_defaults()` mappa ogni famiglia GGUF (qwen/gemma/deepseek/llama/...) ai parametri GPU ottimali. `llm_engine.py`: `_load_chat_model()` rileva famiglia modello dall'header binario GGUF PRIMA del caricamento e applica `n_gpu_layers`, `flash_attn`, `n_ubatch` per famiglia. Per switchare modello basta cambiare `LLAMA_MODEL_PATH` — `N_GPU_LAYERS`/`flash_attn`/`n_ubatch` auto-detectati con priorità: .env > famiglia > fallback globale
+- **FastEmbed ONNX CPU:** Sostituito subprocess `sentence-transformers` con FastEmbed nativo (`BAAI/bge-base-en-v1.5`). Zero VRAM consumata per embedding. Risolto crash `fused_gated_delta_net`
+- **conversation_id fix (T4b):** `main.py` genera UUID se `conversation_id` non fornito nella request. Restituito in tutte le risposte (non-stream, streaming, timeout, confirm). Multi-turn ora funzionante tra richieste HTTP separate senza richiedere conversation_id manuale
+- **AGENTS.md riscritto:** Nuova sezione §6 Hardware Profile Auto-Detection. Documentazione allineata a stato attuale. `.env` pulito dai vecchi override
+- **Documentazione completa:** README.md, docs/ARCHITECTURE.md, docs/COMPONENTS.md, docs/PIPELINE.md, docs/SETUP.md, docs/API_REFERENCE.md, docs/CHANGELOG.md, docs/STRATEGY.md allineati al codice reale
+
 ### v9.8.1 (2026-07-20) — Light-Mode CSS, API Key UX, Auth Fixes
 
 - **refactor(admin): theme-aware CSS with light-mode color variables:** 60+ hardcoded rgba values replaced with CSS custom properties for full light/dark theme support. Added `--primary-rgb`, `--secondary-rgb`, `--danger-rgb`, `--warning-rgb`, `--accent-rgb`, `--text-main-rgb`, `--text-muted-rgb` for rgba() usage. Added missing variables: `--card-bg`, `--input-bg`, `--surface-subtle`, `--border-subtle`, `--bg-elevated`. Chat, Settings, Graph, Management tables, Badges, Forms, Session sidebar, Buttons all converted to `rgba(var(--xxx-rgb), ...)` pattern
@@ -73,7 +81,7 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 ### v9.3.0 (2026-06-28) — OpenAI API completa + codebase cleanup
 - **OpenAI API:** Implementati 6 nuovi endpoint: `/v1/completions`, `/v1/embeddings`, `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/models/{model_name}`, `/v1/moderations`
 - **main.py:** Da 967 a 1497 righe (+55%) — nuovi Pydantic models, streaming SSE, faster-whisper, gTTS
-- **Codebase cleanup:** Rimossi `scratch/` (script orfani), `__pycache__/` dalla sorgente, symlink rotti in `documents/`
+- **Codebase cleanup:** Rimossi `scratch/` (script orfani), `__pycache__` dalla sorgente, symlink rotti in `documents/`
 - **Documentazione:** README e AGENTS.md aggiornati con nuovi endpoint e struttura file attuale
 - **docker-compose.yml:** Rimosso (superseduto dalla split vps.yml + worker.yml); deploy_vps.sh aggiornato a vps.yml
 
@@ -96,4 +104,4 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 - **llm_engine.py:** chat_format=None, n_gpu_layers e n_ctx da .env
 - **Dockerfile:** Build llama-cpp-python da master GitHub per Gemma 4
 
-(End of file - total 97 lines)
+(End of file - total 99 lines)
