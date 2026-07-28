@@ -2,10 +2,11 @@
 Prompt Builder — Pipeline di generazione prompt a 4 step con Caveman Compression.
 
 FLUSSO:
-  STEP 1: Keyword Bypass (regex, 0 LLM)
-  STEP 2: Qwen3.5 Gatekeeper (classificazione intento con grammar)
-  STEP 3: Qwen3.5 Caveman Prompt Architect (compressione 40-60%)
-  STEP 4: Gemma 4 su GPU → risposta in stile caveman
+  STEP 1: Keyword Bypass (regex, 0 LLM) + Simple Query bypass
+  STEP 2: Qwen3.5-4B Gatekeeper (main model su GPU, 0 VRAM extra, 1-5 token output)
+  STEP 3: Qwen3.5 Caveman Prompt Architect (CPU, compressione 40-60%)
+          Skip automatico se contesto < 1000 chars (Op1/Op8)
+  STEP 4: Qwen3.5-4B su GPU → risposta
 """
 
 import datetime
@@ -94,6 +95,30 @@ META_PHRASES = re.compile(
     re.IGNORECASE
 )
 
+# Query fattuali semplici che NON richiedono contesto progetto (bypass→general)
+SIMPLE_QUERIES = re.compile(
+    # ITALIANO: data, ora, tempo, posizione
+    r'(che\s+ora\s+)?(è|sono)\??$'
+    r'|(che\s+)?ore\s+sono\??$'
+    r'|che\s+(giorno|data)\s+(è|siamo)\??$'
+    r'|dammi\s+(la\s+)?(data|ora|data\s+e\s+ora)(\s+attuale)?\??$'
+    r'|che\s+tempo\s+(fa|farà)\??$'
+    r'|com\'è\s+il\s+tempo\??$'
+    r'|dove\s+mi\s+trovo\??$'
+    r'|dove\s+sono\??$'
+    r'|posizione\s+(attuale|corrente)\??$'
+    r'|racconta\s+una\s+barzelletta'
+    r'|definizione\s+di\s+\w+'
+    # INGLESE: date, time, weather, location
+    r'|what\s+(time|date|day)\s+is\s+it\??$'
+    r'|current\s+(date|time|date\s+and\s+time)\??$'
+    r'|tell\s+me\s+(the\s+)?(date|time|date\s+and\s+time)\??$'
+    r'|what.s\s+the\s+weather(\s+like)?\??$'
+    r'|where\s+am\s+i\??$'
+    r'|tell\s+me\s+a\s+joke',
+    re.IGNORECASE
+)
+
 PURE_GREETING = re.compile(
     r'^(ciao|hello|hi|hey|buongiorno|buonasera|buonpomeriggio|salve|'
     r'grazie|thanks|ok|okay|sì|si|no|'
@@ -169,6 +194,15 @@ async def _keyword_bypass(user_message: str, context: dict) -> GatekeeperResult 
     if len(msg_lower) < 3:
         return GatekeeperResult(intent="general", confidence=1.0)
 
+    # ── Cherry Studio / client JSON conversation dump detection ──
+    # I client a volte inviano la cronologia chat come JSON array.
+    # Es: '[{"role":"user","mainText":"Salve"},{"role":"assistant","mainText":"Ciao"}]'
+    # Non è una vera richiesta utente → bypass→general immediato.
+    _stripped = user_message.strip()
+    if (_stripped.startswith('[') and '{"role"' in _stripped) or _stripped.startswith('[{"role"'):
+        logger.info(f"🧠 Bypass: GENERAL (JSON conversation dump, {len(_stripped)}ch)")
+        return GatekeeperResult(intent="general", confidence=1.0)
+
     projects = context.get("projects_available", [])
     for proj in projects:
         proj_lower = proj.lower()
@@ -185,6 +219,11 @@ async def _keyword_bypass(user_message: str, context: dict) -> GatekeeperResult 
         logger.info("🧠 Bypass: GENERAL (saluto puro)")
         return GatekeeperResult(intent="general", confidence=1.0)
 
+    # Simple factual queries (data, ora, meteo, posizione) — bypass→general
+    if SIMPLE_QUERIES.match(msg_lower):
+        logger.info(f"🧠 Bypass: GENERAL (query fattuale semplice: '{msg_lower[:50]}')")
+        return GatekeeperResult(intent="general", confidence=1.0)
+
     words = set(re.findall(r'\b\w+\b', msg_lower))
     if words.intersection(PROJECT_KEYWORDS):
         logger.info("🧠 Bypass: PROJECT (keyword match)")
@@ -197,11 +236,15 @@ async def _keyword_bypass(user_message: str, context: dict) -> GatekeeperResult 
 
 
 async def _run_gatekeeper(user_message: str, context: dict) -> GatekeeperResult:
-    """STEP 2: Gemma 4 Gatekeeper — classificazione intento su GPU.
+    """STEP 2: Classificazione intento via main model (Qwen3.5-4B su GPU).
 
-    Usa engine.classify_intent_with_gemma() che invoca Gemma 4 (modello chat
-    già caricato su GPU, 0 VRAM extra). Genera solo 1-5 token per la
-    classificazione, poi parsing diretto della parola chiave.
+    Usa engine.classify_intent_with_gemma() che invoca il MAIN CHAT MODEL
+    (Qwen3.5-4B, full GPU, N_GPU_LAYERS=-1). 0 VRAM extra — riusa il modello
+    già caricato. Genera solo 1-5 token di output → ~ms su GPU.
+    Nessuna grammatica GBNF — parsing diretto della risposta.
+
+    La compressione caveman (se necessaria) è gestita separatamente da
+    _run_compression() con Qwen3.5 0.8B su CPU.
     """
     return await engine.classify_intent_with_gemma(user_message, context)
 
@@ -378,8 +421,32 @@ async def _run_compression(
 ) -> tuple[str, bool]:
     """Compress context via Qwen3.5 caveman, fall back to raw labels on failure.
 
+    Salta completamente la compressione LLM se il contesto è trascurabile
+    (< 1000 chars totali tra RAG, history e web). Questa è l'ottimizzazione
+    principale per query semplici (data, ora, meteo, etc.) dove non c'è nulla
+    da comprimere — risparmia 10-50s per richiesta.
+
     Returns (compressed_text, is_raw_fallback).
     """
+    # ── Skip compressor se contesto trascurabile (Op1/Op8) ──
+    total_context = len(rag_context_for_compress or '') + len(history_str or '') + len(web_final or '')
+    COMPRESSOR_MIN_CHARS = 1000
+    if total_context < COMPRESSOR_MIN_CHARS and not rag_final and not active_project:
+        logger.info(f"🗜️ Skip compressor: contesto trascurabile ({total_context}ch < {COMPRESSOR_MIN_CHARS}ch), raw fallback")
+        is_raw = True
+        fallback_parts = []
+        if mem_final:
+            fallback_parts.append(f"Memory: {mem_final[:500]}")
+        if tasks_final:
+            fallback_parts.append(f"Tasks: {tasks_final[:300]}")
+        if active_project:
+            fallback_parts.append(f"Project: {active_project}")
+        if web_final:
+            fallback_parts.append(f"Web: {web_final[:500]}")
+        fallback_parts.append(f"Query: {clean_msg}")
+        compressed = "\n".join(fallback_parts)[:4096]
+        return compressed, True
+
     compressed = await engine.compress_prompt(
         user_query=clean_msg,
         rag_context=rag_context_for_compress,
@@ -483,9 +550,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     Pipeline di arricchimento a 4 step con Caveman Compression.
 
     FLUSSO:
-      STEP 1: Keyword Bypass (regex, 0 LLM)
-      STEP 2: Qwen3.5 Gatekeeper (CPU, classificazione intento)
-      STEP 3: Qwen3.5 Caveman Compression (CPU, comprime RAG+history+query)
+      STEP 1: Keyword Bypass (regex, 0 LLM) + Simple Query bypass
+      STEP 2: Gemma 4 Gatekeeper (GPU, classificazione intento, 0 VRAM extra)
+      STEP 3: Qwen3.5 Caveman Compression (GPU, comprime RAG+history+query)
+              Skip automatico se contesto < 1000 chars (Op1/Op8)
       STEP 4: Gemma 4 (GPU) → risposta caveman
 
     Se concise=True, salta RAG/memoria/web e usa compressed prompt minimo.
