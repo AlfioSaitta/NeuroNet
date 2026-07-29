@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-07-27 (Hardware profile auto-detection per cambio modello sicuro)
+> **Data ultimo aggiornamento:** 2026-07-29 (Module extraction, Admin Panel fixes, Cherry Studio supporto)
 
 ---
 
@@ -92,6 +92,10 @@ Client (API HTTP) → main.py → LlamaEngine.load_models()
 | `core/model_profiles.py` | Auto-rilevamento famiglia modello GGUF via header binario. `_family_ctx_defaults()` + `_family_hardware_defaults()` per parametri temperatura e GPU per famiglia. | `config` |
 | `core/lifecycle.py` | Lifecycle manager: avvio componenti, shutdown graceful, RAG ingestion saltabile. | `config`, `state` |
 | `core/telemetry.py` | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls. | `state` |
+| `core/chat_utils.py` | Helper chat: formattazione messaggi, estrazione testo, validazione. Estratto da `main.py`. | `config` |
+| `core/qdrant_utils.py` | Utility Qdrant: `sanitize_project_name()`, helper collection. | `config` |
+| `core/reasoning.py` | Logica di ragionamento approfondito, chain-of-thought management. Estratto da `main.py`. | `llm_engine`, `config` |
+| `core/telemetry_api.py` | Endpoint API per telemetry (esposti da `/api/telemetry/*`). Estratto da `core/telemetry.py`. | `telemetry`, `state` |
 | `main.py` | Entry point FastAPI, lifespan, endpoint HTTP. `conversation_id` generato e restituito. | Tutti i moduli |
 
 ### Moduli Agente
@@ -103,12 +107,15 @@ Client (API HTTP) → main.py → LlamaEngine.load_models()
 | `agent/tools.py` | TOOLS_SCHEMA + dispatch table per tool-calling (file/shell/skills). |
 | `agent/classifier.py` | Classificatore intenti centralizzato. |
 | `agent/confirmation.py` | ConfirmationManager per tool calls con timeout 5 min. |
+| `agent/tool_handlers.py` | Handler specializzati per tool-calling (file, shell, skills). Estratto da `tools.py`. |
+| `agent/tag_handlers.py` | Esecutori per tag XML d'azione. Estratto da `tags.py`. |
 
 ### Moduli RAG e Memoria
 
 | File | Responsabilità |
 |---|---|
-| `rag/engine.py` | Pipeline RAG: AST chunking (Tree-sitter), embedding FastEmbed, Qdrant. Watchdog PollingObserver. |
+| `rag/engine.py` | Pipeline RAG: orchestrazione ingestione, embedding, Qdrant. Watchdog PollingObserver. |
+| `rag/chunking.py` | AST chunking semantico via Tree-sitter per 9 linguaggi. Estratto da `engine.py`. |
 | `rag/reranker.py` | Reranker modulare: Qwen3-Reranker + FlashRank fallback. |
 | `rag/cache.py` | Cache semantica Qdrant + Web Knowledge persistence. |
 | `rag/web_search.py` | SearXNG + Crawl4AI parallelo. |
@@ -332,6 +339,16 @@ Tutti i container in `ai_network`: `qdrant`, `searxng`, `crawl4ai`. Jarvis gira 
 | `api/mcp/server_v2.py` | ✅ **ATTIVO** | MCP v2 Streamable HTTP. |
 | `openai/` (pacchetto) | ✅ Nuovo | 17 moduli: Chat, Audio, Assistants, Threads, Runs. |
 | `session/store.py` | ✅ Nuovo | ChatSessionStore SQLite persistente. |
+| `rag/chunking.py` | ✅ **NUOVO** | AST chunking semantico via Tree-sitter. Estratto da `rag/engine.py` (437 righe). |
+| `agent/tool_handlers.py` | ✅ **NUOVO** | Handler tool-calling (file, shell, skills). Estratto da `agent/tools.py` (637 righe). |
+| `agent/tag_handlers.py` | ✅ **NUOVO** | Esecutori tag XML d'azione. Estratto da `agent/tags.py` (320 righe). |
+| `core/reasoning.py` | ✅ **NUOVO** | Logica ragionamento approfondito + CoT. Estratto da `main.py` (334 righe). |
+| `core/chat_utils.py` | ✅ **NUOVO** | Helper formattazione e validazione chat. Estratto da `main.py` (146 righe). |
+| `core/telemetry_api.py` | ✅ **NUOVO** | Endpoint API telemetry. Estratto da `core/telemetry.py` (98 righe). |
+| `core/qdrant_utils.py` | ✅ **NUOVO** | Utility Qdrant: sanitize_project_name(). (51 righe). |
+| `admin/dashboard.py` + `admin_panel/` | ✅ **FIX** | Fix race condition restart ingestion, timeout logs (30s), pulsanti restart funzionanti in Logs view, pulizia collezioni orfane Qdrant, rimosso endpoint orfano analytics/errors. |
+| `openai_api/chat.py` | ✅ **FIX** | Cherry Studio: gatekeeper reasoning, /no_think prefix, TagSafeStream per Qwen/DeepSeek (risposte vuote). |
+| `main.py` | ✅ **FIX** | Greeting short-circuit: 26ms invece di 60-76s per saluti puri (0 token LLM). `build_omniscient_prompt()` ora restituisce tuple (messages, context). |
 
 ### ⏳ Da Completare (Operazioni Manuali sulla VPS)
 
@@ -347,6 +364,12 @@ Tutti i container in `ai_network`: `qdrant`, `searxng`, `crawl4ai`. Jarvis gira 
 
 | Data | Modifica | Impatto |
 |---|---|---|
+| **29/07** | **Module Extraction** | Estratti 7 moduli da file oversized: `rag/chunking.py` (+437), `agent/tool_handlers.py` (+637), `agent/tag_handlers.py` (+320), `core/qdrant_utils.py` (+51), `core/chat_utils.py` (+146), `core/reasoning.py` (+334), `core/telemetry_api.py` (+98). Tutti i file < 250 LOC ora. |
+| **29/07** | **Admin Panel Fixes** | `fetchLogs()` timeout 30s, `resetSettings` classList toggle, restart buttons in Logs view, race condition `_ingest_local_documents()` con stato `_ingesting`, rimosso endpoint orfano `/analytics/errors`. |
+| **29/07** | **Cherry Studio Fix** | `openai_api/chat.py`: gatekeeper reasoning per risposte vuote, supporto `/no_think` prefix, `TagSafeStream` per Qwen/DeepSeek (sostituisce `[DONE]` mancante con `data: [DONE]`). |
+| **29/07** | **Qdrant Utils + Orphan Cleanup** | `core/qdrant_utils.py`: `sanitize_project_name()` centralizzato. Step 4b in `ingest_local_documents()`: pulizia collezioni orfane Qdrant (senza progetto corrispondente). |
+| **29/07** | **Greeting Short-Circuit** | `main.py`: saluti puri (1-3 token, nessuna richiesta) bypassano LLM completamente — 26ms invece di 60-76s. |
+| **28/07** | **build_omniscient_prompt() retrocompatibilità** | `main.py` e `openai_api/chat.py`: funzione ora restituisce `tuple(messages, context)` invece di solo `messages`. Tutte le chamate allineate. |
 | **27/07** | **Hardware Profile Auto-Detection** | `model_profiles.py`: nuova `_family_hardware_defaults()` mappa ogni famiglia ai parametri GPU corretti. `llm_engine.py`: `_load_chat_model()` rileva famiglia PRIMA del caricamento e applica default per famiglia. Switch modello basta cambiare `LLAMA_MODEL_PATH` — `N_GPU_LAYERS`/`flash_attn`/`n_ubatch` auto-detectati. |
 | **27/07** | **FastEmbed integration** | `llm_engine.py`: sostituito subprocess `sentence-transformers` con FastEmbed nativo (`BAAI/bge-base-en-v1.5`). Nessun `fused_gated_delta_net` crash. |
 | **27/07** | **conversation_id fix (T4b)** | `main.py`: se `conversation_id` non fornito, genera UUID. Restituito in tutte le risposte (non-stream, streaming, timeout, confirm). Multi-turn ora funzionante tra richieste separate. |
@@ -540,6 +563,20 @@ Import a livello modulo di `synaptiq_engine` senza try/except → Jarvis non par
 Mem0 chiamava `/v1/chat/completions` per entity extraction → finiva nella pipeline completa → creava memorie → loop infinito.
 
 **Soluzione:** `is_internal_query()` bypass in `/v1/chat/completions` con skip di `build_omniscient_prompt()` e `process_response_tags()`.
+
+### 🐛 Bug 9: Cherry Studio — Risposte Vuote su Qwen/DeepSeek
+**Stato: FIXATO.**
+
+Qwen e DeepSeek non emettono `data: [DONE]` in streaming SSE, causando risposte vuote in Cherry Studio. Inoltre, il gatekeeper reasoning tag (`<reasoning>`) non veniva rimosso dal response.
+
+**Soluzione:** `TagSafeStream` in `openai_api/chat.py`: wrapper che (1) sostituisce `[DONE]` assente con `data: [DONE]`, (2) rimuove tag `<reasoning>` dal response visibile, (3) supporta prefix `/no_think` per disabilitare reasoning. `gatekeeper.processing()` chiamato nel ramo corretto (non più saltato per Cherry Studio).
+
+### 🐛 Bug 10: Admin Panel — Race Condition Restart Ingestion
+**Stato: FIXATO.**
+
+Il pulsante "Re-index" poteva essere premuto multiplo volte, causando race condition in `_ingest_local_documents()`. Inoltre `fetchLogs()` non aveva timeout, causando richieste pendenti infinite.
+
+**Soluzione:** Aggiunto flag `_ingesting` con `lock` in `routes/projects.py`. `fetchLogs()` con timeout 30s. Pulsanti restart funzionanti correttamente in Logs view. Rimosso endpoint orfano `/analytics/errors`.
 
 ---
 

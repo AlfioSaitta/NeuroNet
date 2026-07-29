@@ -76,6 +76,7 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
+| Greeting Short-Circuit | `main.py` | Saluti puri bypassano LLM — 26ms invece di 60-76s (0 token) |
 | LlamaEngine singleton | `core/llm_engine.py` | Modelli GGUF in VRAM, PriorityLock |
 | Flash Attention | `core/llm_engine.py` | Auto-detectato per famiglia modello |
 | Hardware Profile Auto-Detection | `core/model_profiles.py` | Rilevamento famiglia GGUF (7+ famiglie) via header binario. Applica n_gpu_layers/flash_attn/n_ubatch ottimali |
@@ -91,9 +92,10 @@ WATCHDOG_WATCH_MODE=per_project
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| AST Chunking semantico | `rag/engine.py` | Tree-sitter per 9 linguaggi |
+| AST Chunking semantico | `rag/chunking.py` | Tree-sitter per 9 linguaggi, estratto da `rag/engine.py` (437 LOC) |
 | Reranker duale | `rag/reranker.py` | Qwen3-Reranker + FlashRank fallback |
 | Watchdog real-time | `rag/engine.py` | PollingObserver, re-embedding automatico |
+| Web intelligence | `rag/web_search.py` | SearXNG + Crawl4AI paralleli |
 | Cache semantica | `rag/cache.py` | Soglia cosine 0.96 |
 | Synaptiq Engine | `graph/synaptiq_engine.py` | Grafo strutturale, hybrid search, dead code, impact, **graph visualization con Sigma.js** |
 | FastEmbed ONNX CPU | `core/lifecycle.py` | Embedding vettoriale CPU, 0 VRAM, nessuna contenzione GPU |
