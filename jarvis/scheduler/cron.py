@@ -48,7 +48,7 @@ async def execute_cron_job(job_id, prompt, chat_id):
     messages = [{"role": "user", "content": cron_instruction}]
     
     try:
-        enriched_messages = await build_omniscient_prompt(messages)
+        enriched_messages, _ = await build_omniscient_prompt(messages)
         response = await engine.generate_chat(
             enriched_messages,
             tools=None,

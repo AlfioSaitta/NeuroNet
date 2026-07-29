@@ -1048,7 +1048,7 @@ if TELEGRAM_ENABLED:
             from agent.tools import TOOLS_SCHEMA, execute_tool_call
             from memory.engine import save_to_memory
             
-            enriched_messages = await build_omniscient_prompt(
+            enriched_messages, _ = await build_omniscient_prompt(
                 list(session["messages"]), user_id,
                 conversation_id=str(update.effective_chat.id),
                 user=db_user,
