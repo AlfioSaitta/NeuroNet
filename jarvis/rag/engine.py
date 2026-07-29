@@ -9,15 +9,9 @@ import hashlib
 import re
 import asyncio
 import shutil
-import sys
-
-# Alza il limite di ricorsione per tree-sitter: file con AST profondi
-# (es. classi annidate, decoratori multipli, lambda chain) sforano il default di 1000.
-sys.setrecursionlimit(5000)
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText, PointStruct, VectorParams, Distance
 from pathlib import Path
 from datetime import datetime
-import tiktoken
 
 import sqlite3
 from collections import defaultdict
@@ -25,12 +19,11 @@ from collections import defaultdict
 from core.llm_engine import engine
 
 from core.config import (
-    logger, MODEL_ID, DOC_DIR, AST_ENABLED,
-    STATE_FILE, CHUNK_SIZE, CHUNK_OVERLAP, MAX_CONCURRENT_EMBEDDINGS,
-    RAG_CONFIG, AST_ENABLED, GO, PY, JS, TSX,
+    logger, MODEL_ID, DOC_DIR,
+    STATE_FILE, MAX_CONCURRENT_EMBEDDINGS,
+    RAG_CONFIG,
     VECTOR_DB_VERSION,
     WATCHDOG_BATCH_DELAY,
-    C, CPP, JAVA, RUST, SQL, YAML,
     PATHSPEC_ENABLED, WATCHDOG_ENABLED, EMBEDDING_DIMS,
     EXTERNAL_PROJECTS, WORKSPACE_DIR, WORKSPACE_PROJECTS,
     DATA_DIR, HOST_FS_PREFIX,
@@ -56,9 +49,6 @@ VALID_EXTENSIONS = (
 # RERANKER: estratto in rag_reranker.py
 # ==============================================================================
 from rag.reranker import _reranker
-
-if AST_ENABLED:
-    from tree_sitter import Parser
 
 if PATHSPEC_ENABLED:
     import pathspec
@@ -176,373 +166,9 @@ async def get_embedding(texts, priority=10, is_query=False):
 
 
 # ==============================================================================
-# CHUNKING AST-AWARE
+# CHUNKING AST-AWARE — estratto in rag/chunking.py
 # ==============================================================================
-
-def extract_dependencies(content, ext):
-    """Estrae le dipendenze (import/from/require) usando tree-sitter per Go, Python, JS/TS.
-    Fallback a regex per linguaggi non supportati o se AST disabilitato."""
-    deps = set()
-
-    if AST_ENABLED:
-        try:
-            if ext == '.go':
-                parser = Parser()
-                parser.language = GO
-                tree = parser.parse(bytes(content, "utf8"))
-                def _find_specs(n):
-                    if n.type == 'import_spec':
-                        for ch in n.children:
-                            if ch.type in ('interpreted_string_literal', 'raw_string_literal'):
-                                path = ch.text.decode().strip('"`')
-                                deps.add(path.split('/')[-1])
-                    for c in n.children:
-                        _find_specs(c)
-                def _walk(n):
-                    if n.type == 'import_declaration':
-                        _find_specs(n)
-                    for c in n.children:
-                        _walk(c)
-                _walk(tree.root_node)
-
-            elif ext == '.py':
-                parser = Parser()
-                parser.language = PY
-                tree = parser.parse(bytes(content, "utf8"))
-                def _walk(n):
-                    if n.type == 'import_statement':
-                        for c in n.children:
-                            if c.type == 'dotted_name':
-                                module = c.text.decode().split('.')[0]
-                                if module: deps.add(module)
-                            elif c.type == 'aliased_import':
-                                for ac in c.children:
-                                    if ac.type == 'dotted_name':
-                                        module = ac.text.decode().split('.')[0]
-                                        if module: deps.add(module)
-                    elif n.type == 'import_from_statement':
-                        for c in n.children:
-                            if c.type == 'dotted_name':
-                                module = c.text.decode().split('.')[0]
-                                if module:
-                                    deps.add(module)
-                                break
-                    for c in n.children:
-                        _walk(c)
-                _walk(tree.root_node)
-
-            elif ext in ('.js', '.jsx', '.ts', '.tsx'):
-                lang = JS if ext in ('.js', '.jsx') else TSX
-                parser = Parser()
-                parser.language = lang
-                tree = parser.parse(bytes(content, "utf8"))
-                def _walk(n):
-                    if n.type == 'import_statement':
-                        for c in n.children:
-                            if c.type == 'string':
-                                path = c.text.decode().strip('\'"`')
-                                name = path.split('/')[-1].replace('.js', '').replace('.ts', '').replace('.jsx', '').replace('.tsx', '')
-                                if name: deps.add(name)
-                    elif n.type == 'call_expression':
-                        first = n.children[0] if n.children else None
-                        if first and first.type == 'identifier' and first.text.decode() == 'require':
-                            for c in n.children:
-                                if c.type == 'arguments':
-                                    for a in c.children:
-                                        if a.type == 'string':
-                                            path = a.text.decode().strip('\'"`')
-                                            name = path.split('/')[-1].replace('.js', '').replace('.ts', '').replace('.jsx', '').replace('.tsx', '')
-                                            if name: deps.add(name)
-                    for c in n.children:
-                        _walk(c)
-                _walk(tree.root_node)
-        except Exception:
-            pass
-
-    # Fallback regex se tree-sitter non ha prodotto risultati o AST disabilitato
-    if not deps:
-        head = content[:2500]
-        if ext == '.go':
-            for m in re.findall(r'"([^"]+)"', head):
-                deps.add(m.split('/')[-1])
-        elif ext == '.py':
-            for m in re.findall(r'^(?:from|import)\s+([a-zA-Z0-9_\.]+)', head, re.MULTILINE):
-                deps.add(m.split('.')[0])
-        elif ext in ('.js', '.jsx', '.ts', '.tsx'):
-            for m in re.findall(r'from\s+[\'"]([^(\'|")]+)[\'"]', head):
-                deps.add(m.split('/')[-1].replace('.js', '').replace('.ts', ''))
-        elif ext == '.md':
-            for m in re.findall(r'\[.*?\]\((.*?\.md.*?)\)', content):
-                deps.add(m.split('/')[-1].split('#')[0])
-
-    return list(deps)
-
-
-# Tokenizer per chunking ricorsivo a 512 token
-_tokenizer = None
-
-def _get_tokenizer():
-    global _tokenizer
-    if _tokenizer is not None:
-        return _tokenizer
-
-    cache_dir = os.environ.get("TIKTOKEN_CACHE_DIR", "")
-    if cache_dir:
-        os.makedirs(cache_dir, exist_ok=True)
-
-    for enc_name in ("o200k_base", "cl100k_base", "gpt2"):
-        try:
-            _tokenizer = tiktoken.get_encoding(enc_name)
-            return _tokenizer
-        except Exception:
-            continue
-
-    raise RuntimeError("Nessun tokenizer tiktoken disponibile (offline e cache vuota)")
-
-def _token_count(text: str) -> int:
-    return len(_get_tokenizer().encode(text, disallowed_special=()))
-
-def _recursive_token_split(text: str, max_tokens: int) -> list[str]:
-    """Divide il testo ricorsivamente a max_tokens usando i confini di riga."""
-    if _token_count(text) <= max_tokens or not text:
-        return [text]
-    # Trova il punto di rottura: cerca \n\n (paragrafo) poi \n (riga) poi spazio
-    target = len(text) * max_tokens // max(1, _token_count(text))
-    # Arretra fino a un boundary
-    boundary = text.rfind("\n\n", 0, max(target, 1))
-    if boundary < max(target // 2, 1):
-        boundary = text.rfind("\n", 0, max(target, 1))
-    if boundary < max(target // 2, 1):
-        boundary = text.rfind(" ", 0, max(target, 1))
-    if boundary < max(target // 2, 1):
-        boundary = target
-    left = text[:boundary].rstrip()
-    right = text[boundary:].lstrip()
-    if not left or not right:
-        return [text]
-    return _recursive_token_split(left, max_tokens) + _recursive_token_split(right, max_tokens)
-
-def _make_parent_chunk_id(text: str) -> str:
-    return hashlib.md5(text.encode()).hexdigest()[:12]
-
-def _tag_split_children(chunks: list[dict], parent_text: str) -> list[dict]:
-    """Assegna parent_chunk_id, chunk_index, chunk_count a figli di uno split."""
-    if not chunks:
-        return chunks
-    if len(chunks) <= 1:
-        chunks[0]["parent_chunk_id"] = None
-        chunks[0]["chunk_index"] = None
-        chunks[0]["chunk_count"] = None
-        return chunks
-    pid = _make_parent_chunk_id(parent_text)
-    for i, c in enumerate(chunks):
-        c["parent_chunk_id"] = pid
-        c["chunk_index"] = i
-        c["chunk_count"] = len(chunks)
-    return chunks
-
-def ast_code_chunking(content, filepath):
-    """Chunking intelligente: usa Tree-sitter per estrarre funzioni/classi mantenendo il contesto gerarchico.
-    Returns list of dict: {text: str, section_hierarchy: list[str] | None, parent_chunk_id: str | None,
-    chunk_index: int | None, chunk_count: int | None}"""
-    if not AST_ENABLED:
-        return [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
-
-    ext = os.path.splitext(filepath)[1].lower()
-    parser = Parser()
-
-    if ext == '.go':
-        parser.language = GO
-        nodes = ['function_declaration', 'method_declaration', 'type_declaration', 'const_declaration', 'var_declaration', 'struct_type', 'interface_type']
-    elif ext == '.py':
-        parser.language = PY
-        nodes = ['function_definition', 'class_definition', 'async_function_definition']
-    elif ext in ['.js', '.jsx']:
-        parser.language = JS
-        nodes = ['function_declaration', 'lexical_declaration', 'class_declaration', 'arrow_function', 'method_definition']
-    elif ext in ['.ts', '.tsx']:
-        parser.language = TSX
-        nodes = ['function_declaration', 'lexical_declaration', 'class_declaration', 'arrow_function', 'method_definition', 'interface_declaration', 'type_alias_declaration']
-    elif ext in ['.c', '.h']:
-        parser.language = C
-        nodes = ['function_definition', 'declaration', 'struct_specifier', 'enum_specifier']
-    elif ext in ['.cpp', '.hpp', '.cc', '.cxx']:
-        parser.language = CPP
-        nodes = ['function_definition', 'class_specifier', 'struct_specifier', 'enum_specifier', 'namespace_definition', 'template_declaration']
-    elif ext == '.java':
-        parser.language = JAVA
-        nodes = ['method_declaration', 'class_declaration', 'interface_declaration', 'enum_declaration']
-    elif ext == '.rs':
-        parser.language = RUST
-        nodes = ['function_item', 'struct_item', 'enum_item', 'impl_item', 'trait_item']
-    elif ext == '.sql':
-        parser.language = SQL
-        nodes = ['statement']
-    elif ext in ['.yaml', '.yml']:
-        parser.language = YAML
-        nodes = ['document', 'block_mapping_pair', 'block_sequence_item']
-    elif ext == '.md':
-        # Markdown Semantic Chunking (per heading)
-        chunks = []
-        current_chunk = []
-        for line in content.split('\n'):
-            if line.startswith('#') and current_chunk and _token_count('\n'.join(current_chunk)) > CHUNK_SIZE // 4:
-                chunks.append('\n'.join(current_chunk))
-                current_chunk = [line]
-            else:
-                current_chunk.append(line)
-        if current_chunk:
-            chunks.append('\n'.join(current_chunk))
-        final_md_chunks = []
-        for chunk in chunks:
-            if _token_count(chunk) > CHUNK_SIZE:
-                children = [{"text": t, "section_hierarchy": None} for t in _recursive_token_split(chunk, CHUNK_SIZE)]
-                final_md_chunks.extend(_tag_split_children(children, chunk))
-            else:
-                final_md_chunks.append({"text": chunk, "section_hierarchy": None, "parent_chunk_id": None, "chunk_index": None, "chunk_count": None})
-        return final_md_chunks
-    else:
-        children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
-        return _tag_split_children(children, content)
-
-    try:
-        tree = parser.parse(bytes(content, "utf8"))
-        chunks = []
-
-        def get_signature(n):
-            try:
-                raw = n.text.decode()
-            except (AttributeError, UnicodeDecodeError):
-                raw = content[n.start_byte:n.end_byte]
-            lines = raw.split('\n')
-            sig = []
-            for line in lines[:3]:
-                s = line.strip()
-                sig.append(s)
-                if '{' in s or ':' in s:
-                    break
-            return " ".join(sig).split('{')[0].strip()
-
-        context_stack = []
-        seen_byte_ranges = set()
-
-        def traverse(n):
-            is_context = n.type in ['class_definition', 'class_declaration', 'class_specifier', 'struct_specifier', 'interface_declaration', 'impl_item', 'type_declaration', 'namespace_definition']
-            
-            if is_context:
-                sig = get_signature(n)
-                if sig: context_stack.append(sig)
-
-            if n.type in nodes:
-                byte_range = (n.start_byte, n.end_byte)
-                if byte_range not in seen_byte_ranges:
-                    seen_byte_ranges.add(byte_range)
-                    b = content[n.start_byte:n.end_byte]
-                    if len(b.strip()) > 20:
-                        start_line = n.start_point[0] + 1
-                        end_line = n.end_point[0] + 1
-
-                        chunks.append({
-                            "text": f"RIGHE {start_line}-{end_line}:\n{b}",
-                            "section_hierarchy": list(context_stack) if context_stack else None
-                        })
-
-            for c in n.children:
-                traverse(c)
-                
-            if is_context and context_stack:
-                context_stack.pop()
-
-        traverse(tree.root_node)
-
-        # PREAMBOLO solo se nessun chunk AST si sovrappone alle prime 50 righe
-        preamble_overlap = False
-        for c in chunks:
-            m = re.match(r"RIGHE (\d+)-\d+:", c["text"])
-            if m and int(m.group(1)) <= 50:
-                preamble_overlap = True
-                break
-        if not preamble_overlap:
-            preamble = "\n".join(content.split("\n")[:50])
-            if len(preamble.strip()) > 20:
-                chunks.insert(0, {"text": f"PREAMBOLO:\n{preamble}", "section_hierarchy": None})
-
-        if not chunks:
-            children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
-            return _tag_split_children(children, content)
-
-        # Fondere dinamicamente piccoli frammenti AST consecutivi
-        merged_chunks = []
-        current_chunk = None
-        for c in chunks:
-            if not current_chunk:
-                current_chunk = c
-            else:
-                combined_text = current_chunk["text"] + "\n\n" + c["text"]
-                if _token_count(combined_text) <= CHUNK_SIZE:
-                    words1 = set(current_chunk["text"].split())
-                    words2 = set(c["text"].split())
-                    overlap = len(words1 & words2) / len(words1 | words2) if words1 and words2 else 0
-                    if overlap > 0.05 or _token_count(c["text"]) < CHUNK_SIZE // 4:
-                        current_chunk["text"] = combined_text
-                        # Mantieni la gerarchia del primo chunk (più esterna)
-                    else:
-                        merged_chunks.append(current_chunk)
-                        current_chunk = c
-                else:
-                    merged_chunks.append(current_chunk)
-                    current_chunk = c
-        if current_chunk:
-            merged_chunks.append(current_chunk)
-
-        # ── Raggruppa chunk consecutivi per prossimità (fino a ~2000 token per gruppo) ──
-        PARENT_MAX_TOKENS = 2000
-        proximity_groups: list[list[dict]] = []
-        current_group = []
-        current_tokens = 0
-        for chunk in merged_chunks:
-            tok = _token_count(chunk["text"])
-            if current_group and current_tokens + tok > PARENT_MAX_TOKENS:
-                proximity_groups.append(current_group)
-                current_group = []
-                current_tokens = 0
-            current_group.append(chunk)
-            current_tokens += tok
-        if current_group:
-            proximity_groups.append(current_group)
-
-        final_chunks = []
-        for group in proximity_groups:
-            if len(group) > 1:
-                parent_text = "\n\n".join(c["text"] for c in group)
-                pid = _make_parent_chunk_id(parent_text)
-                for i, c in enumerate(group):
-                    if _token_count(c["text"]) > CHUNK_SIZE:
-                        for t in _recursive_token_split(c["text"], CHUNK_SIZE):
-                            final_chunks.append({"text": t, "section_hierarchy": c.get("section_hierarchy"),
-                                                  "parent_chunk_id": pid, "chunk_index": i, "chunk_count": len(group)})
-                    else:
-                        c["parent_chunk_id"] = pid
-                        c["chunk_index"] = i
-                        c["chunk_count"] = len(group)
-                        final_chunks.append(c)
-            else:
-                chunk = group[0]
-                chunk["parent_chunk_id"] = None
-                chunk["chunk_index"] = None
-                chunk["chunk_count"] = None
-                if _token_count(chunk["text"]) > CHUNK_SIZE:
-                    for t in _recursive_token_split(chunk["text"], CHUNK_SIZE):
-                        final_chunks.append({"text": t, "section_hierarchy": chunk.get("section_hierarchy"),
-                                              "parent_chunk_id": None, "chunk_index": None, "chunk_count": None})
-                else:
-                    final_chunks.append(chunk)
-
-        return final_chunks
-    except Exception as e:
-        logger.warning(f"Errore tree-sitter parsing: {e}")
-        children = [{"text": c, "section_hierarchy": None} for c in _recursive_token_split(content, CHUNK_SIZE)]
-        return _tag_split_children(children, content)
+from rag.chunking import extract_dependencies, ast_code_chunking
 
 
 # ==============================================================================
@@ -625,17 +251,13 @@ def _save_state_unsafe():
 def get_workspace_col_name(rel_path):
     parts = rel_path.replace('\\', '/').split('/')
     if len(parts) > 1:
-        ws_name = re.sub(r'[^a-zA-Z0-9_]', '_', parts[0])
+        ws_name = sanitize_project_name(parts[0])
         return f"collateral_docs_{ws_name}_{VECTOR_DB_VERSION}"
     return f"collateral_docs_default_{VECTOR_DB_VERSION}"
 
-def get_file_profile_col_name():
-    return f"file_profiles_{VECTOR_DB_VERSION}"
-
-def get_project_col_name(project_name: str) -> str:
-    """Restituisce il nome della collezione Qdrant per un dato project name."""
-    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', project_name)
-    return f"collateral_docs_{sanitized}_{VECTOR_DB_VERSION}"
+# get_project_col_name e get_file_profile_col_name sono ora in core.qdrant_utils.
+# Re-importate qui per retrocompatibilità con i moduli che importano da rag.engine.
+from core.qdrant_utils import get_project_col_name, get_file_profile_col_name, sanitize_project_name
 
 
 def get_project_path(project_name: str) -> str | None:
@@ -659,8 +281,8 @@ def get_project_path(project_name: str) -> str | None:
         # Match diretto (caso ideale: nessun carattere speciale)
         if base.lower() == name_lower:
             return True
-        # Match sanitizzato: stessa trasformazione di get_project_col_name()
-        sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', base)
+        # Match sanitizzato: stessa trasformazione di sanitize_project_name()
+        sanitized = sanitize_project_name(base)
         return sanitized.lower() == name_lower
 
     # 2. Cerca in WORKSPACE_PROJECTS
@@ -1024,6 +646,30 @@ async def ingest_local_documents(single_project_path: str | None = None):
                         del state.rag_state[rp]
                         _save_file_state_unsafe(rp)
                 logger.info(f"🗑️ Pulizia: Rimosso {rp} dai vettori.")
+
+    # ── 4b. Pulizia collezioni Qdrant orfane (progetti eliminati dal disco) ──
+    if not single_project_path:
+        try:
+            cols_info = await state.qdrant.get_collections()
+            all_col_names = [c.name for c in cols_info.collections if c.name.startswith("collateral_docs_")]
+            active_project_names = set()
+            for rp in current_files:
+                parts = rp.replace('\\', '/').split('/')
+                if len(parts) > 1:
+                    active_project_names.add(parts[0])
+            for col_name in all_col_names:
+                col_proj = col_name.replace("collateral_docs_", "")
+                col_proj = re.sub(r'_v\d+$', '', col_proj)
+                if col_proj == "default":
+                    continue
+                if col_proj not in active_project_names and not get_project_path(col_proj):
+                    try:
+                        await state.qdrant.delete_collection(collection_name=col_name)
+                        logger.info(f"🗑️ Collezione orfana eliminata: {col_name} (progetto '{col_proj}' non trovato su disco)")
+                    except Exception as e:
+                        logger.warning(f"Errore eliminazione collezione orfana {col_name}: {e}")
+        except Exception as e:
+            logger.warning(f"Errore scansione collezioni orfane: {e}")
 
     # ── 5. Processamento file nuovi/modificati ──
     files_to_process = []

@@ -5,6 +5,7 @@ import json
 import time
 import subprocess
 import logging
+import inspect
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
@@ -20,6 +21,17 @@ except ImportError:
     logging.warning("llama-cpp-python non installato. Il motore LLM locale non funzionerà.")
 
 logger = logging.getLogger(__name__)
+
+# Detect if this version of llama-cpp-python supports chat_template_kwargs
+_CHAT_TEMPLATE_KWARGS_SUPPORTED = False
+if Llama is not None:
+    try:
+        sig = inspect.signature(Llama.create_chat_completion)
+        _CHAT_TEMPLATE_KWARGS_SUPPORTED = "chat_template_kwargs" in sig.parameters
+    except Exception:
+        pass
+if not _CHAT_TEMPLATE_KWARGS_SUPPORTED:
+    logger.info("llama-cpp-python: chat_template_kwargs non supportato, disabilitato")
 
 def log_vram_usage(label=""):
     try:
@@ -345,21 +357,6 @@ class LlamaEngine:
     # ── Helper di generazione ────────────────────────────────────────
 
     @staticmethod
-    def _inject_thinking_tag(model: str, messages: list) -> list:
-        """Inietta il tag di thinking nel system prompt per modelli che lo supportano."""
-        if model == "chat" and LLM_THINKING_MODE and MODEL_PROFILE.thinking_support and messages:
-            _thinking_tag = "[Thinking]" if MODEL_PROFILE.chat_format == "gemma" else "<|think|>"
-            processed = []
-            for msg in messages:
-                if isinstance(msg, dict) and msg.get("role") == "system":
-                    content = msg.get("content", "")
-                    if _thinking_tag not in content:
-                        msg = {**msg, "content": f"{_thinking_tag}\n" + content}
-                processed.append(msg)
-            return processed
-        return messages
-
-    @staticmethod
     def _normalize_tools(tools: Optional[list], model: str) -> Optional[list]:
         """Normalizza tool in formato OpenAI per llama-cpp-python."""
         if not tools or model != "chat":
@@ -399,6 +396,10 @@ class LlamaEngine:
             messages: Lista di messaggi in formato OpenAI.
             tools: Tool definitions per function calling.
             options: Opzioni di generazione (temperature, max_tokens, ecc.).
+                     Supporta anche:
+                       chat_template_kwargs: dict da passare a create_chat_completion
+                           (es. {"enable_thinking": True/False})
+                       logit_bias: dict {token_id: bias} per bloccare/forzare token
             stream: Se True, restituisce un generatore asincrono.
             grammar: Grammatica GBNF per output strutturato.
             model: "chat" (Gemma 4 GPU) o "gatekeeper" (Qwen3.5 CPU).
@@ -411,8 +412,6 @@ class LlamaEngine:
 
         opts = options or {}
 
-        messages = self._inject_thinking_tag(model, messages)
-
         temperature = opts.get("temperature", 1.0)
         max_tokens = opts.get("num_predict", 2048)
         presence_penalty = opts.get("presence_penalty", 0.1)
@@ -421,6 +420,10 @@ class LlamaEngine:
         top_p = opts.get("top_p", 0.9)
         top_k = opts.get("top_k", 40)
         response_format = opts.get("response_format")
+        # Reasoning: chat_template_kwargs (es. {"enable_thinking": True}) e
+        # logit_bias per bloccare fisicamente il token di pensiero
+        chat_template_kwargs = opts.get("chat_template_kwargs") or {}
+        logit_bias = opts.get("logit_bias") or {}
         
         openai_tools = self._normalize_tools(tools, model)
 
@@ -499,9 +502,11 @@ class LlamaEngine:
                                     stream=True,
                                     response_format=response_format,
                                     grammar=None,
+                                    **({"chat_template_kwargs": chat_template_kwargs} if chat_template_kwargs and _CHAT_TEMPLATE_KWARGS_SUPPORTED else {}),
+                                    logit_bias=logit_bias or None,
                                 )
                             ),
-                        timeout=300
+                            timeout=300
                         )
                     except asyncio.TimeoutError:
                         logger.error("LLM streaming timed out after 300s (first chunk)")
@@ -554,6 +559,8 @@ class LlamaEngine:
                                     stream=False,
                                     response_format=response_format,
                                     grammar=None,
+                                    **({"chat_template_kwargs": chat_template_kwargs} if chat_template_kwargs and _CHAT_TEMPLATE_KWARGS_SUPPORTED else {}),
+                                    logit_bias=logit_bias or None,
                                 )
                         ),
                         timeout=300

@@ -52,69 +52,18 @@ def _import_telemetry():
 
 
 def _get_status_dict() -> dict:
-    s = _import_state()
-    total_s = int(time.time() - s._start_time) if hasattr(s, '_start_time') else 0
-    PT, _, _ = _import_telemetry()
-    return {
-        "uptime_seconds": total_s,
-        "uptime_hours": round(total_s / 3600, 1) if total_s else 0,
-        "total_requests": s.total_requests,
-        "total_prompt_tokens": s.total_prompt_tokens,
-        "total_completion_tokens": s.total_completion_tokens,
-        "active_traces": len(PT.get_all_active()),
-        "gatekeeper_initialized": s.gatekeeper_stats is not None,
-    }
+    from core.telemetry_api import get_status_dict as _gsd
+    return _gsd()
 
 
 def _get_model_info_dict() -> dict:
-    from core.config import MODEL_ID as cfg_model_id
-    info: dict[str, Any] = {
-        "model_id": cfg_model_id,
-        "model_path": None,
-        "n_gpu_layers": 0,
-        "n_ctx": 0,
-        "n_batch": 0,
-        "n_ubatch": 0,
-        "flash_attn": False,
-        "thinking_mode": False,
-        "max_tokens": 2048,
-        "gatekeeper_model_loaded": False,
-        "model_loaded": False,
-    }
-    try:
-        from core.config import (
-            LLAMA_MODEL_PATH, N_GPU_LAYERS, LLM_NUM_CTX,
-            LLM_BATCH_SIZE, LLM_UBATCH_SIZE, LLM_FLASH_ATTN,
-            LLM_THINKING_MODE, LLM_MAX_TOKENS,
-        )
-        info["model_path"] = LLAMA_MODEL_PATH
-        info["n_gpu_layers"] = N_GPU_LAYERS
-        info["n_ctx"] = LLM_NUM_CTX
-        info["n_batch"] = LLM_BATCH_SIZE
-        info["n_ubatch"] = LLM_UBATCH_SIZE
-        info["flash_attn"] = LLM_FLASH_ATTN
-        info["thinking_mode"] = LLM_THINKING_MODE
-        info["max_tokens"] = LLM_MAX_TOKENS
-    except Exception:
-        pass
-    try:
-        from core.llm_engine import engine
-        info["model_loaded"] = engine.chat_model is not None
-        info["gatekeeper_model_loaded"] = engine.gatekeeper_model is not None
-    except Exception:
-        pass
-    return info
+    from core.telemetry_api import get_model_info_dict as _gmid
+    return _gmid()
 
 
 def _get_pending_ops_dict() -> dict:
-    s = _import_state()
-    bg_count = len(s.background_tasks)
-    qsize = s.file_event_queue.qsize() if hasattr(s, 'file_event_queue') else 0
-    return {
-        "background_tasks_count": bg_count,
-        "file_event_queue_size": qsize,
-        "reindexing_in_progress": getattr(s, 'is_reindexing', False),
-    }
+    from core.telemetry_api import get_pending_ops_dict as _gpod
+    return _gpod()
 
 
 def _json_text(data: Any) -> str:
@@ -205,13 +154,12 @@ async def chat_send(message: str, user_id: str = "mcp_user") -> str:
 
         # ── Build enriched messages ──
         raw_messages = [{"role": "user", "content": message}]
-        enriched = await build_omniscient_prompt(
+        enriched, _ = await build_omniscient_prompt(
             raw_messages,
             user_id=user_id,
             conversation_id="mcp",
-            concise=False,
             request_id=tracer.request_id,
-            finalize_trace=False,  # Noi gestiamo il finish dopo la generazione LLM
+            finalize_trace=False,
         )
 
         # ── Generazione LLM ──
@@ -367,7 +315,7 @@ async def benchmark_pipeline(prompt: str = "Dammi data e ora attuale", max_token
 
         total_start = time.monotonic()
 
-        enriched = await _bop(
+        enriched, _ = await _bop(
             raw_messages, user_id="benchmark_mcp",
             conversation_id="benchmark", concise=False,
             request_id=tracer.request_id, finalize_trace=False,

@@ -39,16 +39,19 @@ from core.config import (
     SYNAPTIQ_ENABLED,
 )
 import core.state as state
+from core.chat_utils import handle_confirmation_token, spawn_background, resolve_user_id
+from core.telemetry_api import get_status_dict, get_model_info_dict, get_pending_ops_dict
 from rag.engine import ingest_local_documents, search_documents
 from rag.cache import semantic_cache_search, semantic_cache_store
 from memory.engine import extract_memories, save_to_memory, process_response_tags, reindex_graph_connections
 from agent.tags import strip_action_tags, TagSafeStream
-from agent.prompt import build_omniscient_prompt, PURE_GREETING
+from agent.prompt import build_omniscient_prompt
 from core.telemetry import PipelineTracer
-from core.llm_engine import engine, extract_content
+from core.llm_engine import engine, extract_content, MODEL_PROFILE
+from core.reasoning import configura_richiesta_agente, genera_stream_agente
 from agent.tools import execute_tool_call
-from agent.confirmation import ApiTokenProvider, ConfirmationManager
-from agent.classifier import is_internal_query, classify_confirmation
+from agent.confirmation import ConfirmationManager
+from agent.classifier import is_internal_query
 from openai_api import router as openai_router, init_openai_routes
 init_openai_routes()  # populate the router with all endpoint sub-modules
 
@@ -363,9 +366,7 @@ async def reset_all(request: Request):
     # Non ricreiamo le collezioni di memoria (mem0) in modo distruttivo.
     loop = asyncio.get_running_loop()
     state.memory = await loop.run_in_executor(state.mem0_executor, Memory.from_config, MEM0_CONFIG)
-    task = asyncio.create_task(ingest_local_documents())
-    state.background_tasks.add(task)
-    task.add_done_callback(state.background_tasks.discard)
+    spawn_background(ingest_local_documents())
     return JSONResponse({"status": "success", "message": "Reset totale eseguito. Ingestion Graph RAG ripartita."})
 
 
@@ -445,9 +446,7 @@ async def git_webhook(request: Request):
         except Exception as e:
             logger.error(f"❌ Errore esecuzione git pull: {e}")
 
-    task = asyncio.create_task(run_git_pull())
-    state.background_tasks.add(task)
-    task.add_done_callback(state.background_tasks.discard)
+    spawn_background(run_git_pull())
     
     return JSONResponse({"status": "success", "message": "Git pull avviato, l'ingestion partirà a breve."})
 
@@ -499,87 +498,19 @@ async def get_telemetry_errors():
 @app.get("/api/telemetry/status")
 async def get_telemetry_status():
     """Stato generale del sistema per diagnostica."""
-    total_duration_s = int(time.time() - state._start_time) if hasattr(state, '_start_time') else 0
-    uptime_h = total_duration_s / 3600 if total_duration_s else 0
-    return JSONResponse({
-        "uptime_seconds": total_duration_s,
-        "uptime_hours": round(uptime_h, 1),
-        "total_requests": state.total_requests,
-        "total_prompt_tokens": state.total_prompt_tokens,
-        "total_completion_tokens": state.total_completion_tokens,
-        "active_traces": len(PipelineTracer.get_all_active()),
-        "pipeline_traces_capacity": getattr(state.pipeline_traces, 'maxlen', 500),
-        "gatekeeper_initialized": state.gatekeeper_stats is not None,
-        "error_count": len(state.error_counters),
-    })
+    return JSONResponse(get_status_dict())
 
 
 @app.get("/api/telemetry/model")
 async def get_telemetry_model():
     """Informazioni sul modello LLM caricato."""
-    from core.config import MODEL_ID as cfg_model_id
-    info = {
-        "model_id": cfg_model_id,
-        "model_path": None,
-        "n_gpu_layers": 0,
-        "n_ctx": 0,
-        "n_batch": 0,
-        "n_ubatch": 0,
-        "flash_attn": False,
-        "thinking_mode": False,
-        "max_tokens": 2048,
-        "gatekeeper_model_loaded": False,
-        "detected_family": "unknown",
-    }
-    try:
-        from core.config import (
-            LLAMA_MODEL_PATH, N_GPU_LAYERS, LLM_NUM_CTX,
-            LLM_BATCH_SIZE, LLM_UBATCH_SIZE, LLM_FLASH_ATTN,
-            LLM_THINKING_MODE, LLM_MAX_TOKENS,
-        )
-        info["model_path"] = LLAMA_MODEL_PATH
-        info["n_gpu_layers"] = N_GPU_LAYERS
-        info["n_ctx"] = LLM_NUM_CTX
-        info["n_batch"] = LLM_BATCH_SIZE
-        info["n_ubatch"] = LLM_UBATCH_SIZE
-        info["flash_attn"] = LLM_FLASH_ATTN
-        info["thinking_mode"] = LLM_THINKING_MODE
-        info["max_tokens"] = LLM_MAX_TOKENS
-    except Exception:
-        pass
-    try:
-        from core.llm_engine import engine
-        if engine.chat_model is not None:
-            info["model_loaded"] = True
-        if engine.gatekeeper_model is not None:
-            info["gatekeeper_model_loaded"] = True
-    except Exception:
-        info["model_loaded"] = False
-    try:
-        from core.model_profiles import detect_model_family
-        family = detect_model_family(cfg_model_id)
-        info["detected_family"] = family.family if family else "unknown"
-    except Exception:
-        info["detected_family"] = "unknown"
-    return JSONResponse(info)
+    return JSONResponse(get_model_info_dict())
 
 
 @app.get("/api/telemetry/pending_ops")
 async def get_telemetry_pending_ops():
     """Operazioni pendenti: background tasks in esecuzione, coda eventi watchdog."""
-    bg_count = len(state.background_tasks)
-    queue_size = state.file_event_queue.qsize() if hasattr(state, 'file_event_queue') else 0
-    bg_task_names = []
-    # Raccogli i nomi dai task pendenti (dove accessibile)
-    for t in list(state.background_tasks)[:20]:
-        name = getattr(t, 'get_name', lambda: str(t))()
-        bg_task_names.append(str(name)[:80])
-    return JSONResponse({
-        "background_tasks_count": bg_count,
-        "background_tasks_sample": bg_task_names[:10],
-        "file_event_queue_size": queue_size,
-        "reindexing_in_progress": getattr(state, 'is_reindexing', False),
-    })
+    return JSONResponse(get_pending_ops_dict())
 
 
 # ═══════════════════════════════════════════
@@ -694,57 +625,11 @@ async def chat(payload: ChatRequest, request: Request):
 
     # ── Confirmation token handling ──
     confirmation_mgr = None
-    confirmation_token = body.get("confirmation_token") or payload.confirmation_token
-    if confirmation_token:
-        resolved = ApiTokenProvider.resolve(confirmation_token, approved=True)
-        if resolved:
-            return JSONResponse(status_code=200, content={
-                "id": f"chatcmpl-confirm",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": MODEL_ID,
-                "conversation_id": str(conversation_id),
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
-                    "finish_reason": "stop"
-                }]
-            })
-    elif raw_messages:
-        last_msg = raw_messages[-1] if isinstance(raw_messages[-1], dict) else {}
-        if last_msg.get("role") == "user":
-            msg_text = str(last_msg.get("content", ""))
-            result = classify_confirmation(msg_text)
-            if result:
-                token, approved = result
-                api_resolved = ApiTokenProvider.resolve(token, approved=approved)
-                if api_resolved:
-                    return JSONResponse(status_code=200, content={
-                        "id": f"chatcmpl-confirm",
-                        "object": "chat.completion",
-                        "created": int(time.time()),
-                        "model": MODEL_ID,
-                        "conversation_id": str(conversation_id),
-                        "choices": [{
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."},
-                            "finish_reason": "stop"
-                        }]
-                    })
-                else:
-                    return JSONResponse(status_code=200, content={
-                        "id": f"chatcmpl-confirm",
-                        "object": "chat.completion",
-                        "created": int(time.time()),
-                        "model": MODEL_ID,
-                        "conversation_id": str(conversation_id),
-                        "choices": [{
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "⚠️ Token di conferma non valido o scaduto."},
-                            "finish_reason": "stop"
-                        }]
-                    })
-        # Lazy: ConfirmationManager creato solo quando servono tool calls
+    confirm_resp = await handle_confirmation_token(body, conversation_id=str(conversation_id))
+    confirmation_mgr = None
+    confirm_resp = await handle_confirmation_token(body, conversation_id=str(conversation_id))
+    if confirm_resp is not None:
+        return confirm_resp
 
     # ── Pipeline Telemetry ──
     request_id = str(uuid.uuid4())[:12] if not is_internal else None
@@ -752,31 +637,7 @@ async def chat(payload: ChatRequest, request: Request):
     if tracer:
         tracer._conversation_id = str(conversation_id)
 
-    # ── Short-circuit per saluti puri — non serve chiamare Qwen per un "ciao" ──
-    _greeting_text = raw_messages[-1].get("content", "").strip().lower() if raw_messages else ""
-    if not is_internal and _greeting_text and PURE_GREETING.match(_greeting_text):
-        logger.info("🗣️ Saluto puro: risposta immediata — 0 token LLM")
-        if tracer:
-            tracer.step("greeting_shortcut", status="ok", details={"reason": "pure_greeting"})
-            tracer.finish()
-        _greeting_msg = "Ciao! 👋 Come posso aiutarti oggi?"
-        _quick_base = {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-            "created": int(time.time()),
-            "model": MODEL_ID,
-            "conversation_id": str(conversation_id),
-        }
-        if body.get("stream", True):
-            async def _quick_greet():
-                yield json.dumps({**_quick_base, "object": "chat.completion.chunk",
-                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": _greeting_msg}, "finish_reason": None}]}).encode() + b"\n"
-                yield json.dumps({**_quick_base, "object": "chat.completion.chunk",
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}).encode() + b"\n"
-            return StreamingResponse(_quick_greet(), media_type="application/x-ndjson")
-        return JSONResponse(status_code=200, content={**_quick_base, "object": "chat.completion",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": _greeting_msg}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-        })
+    gatekeeper_result = None  # inizializzato prima del conditional, aggiornato da build_omniscient_prompt
 
     # ── Global request timeout ──
     _PROMPT_TIMEOUT = 120   # max 2 min per contesto + compressione
@@ -785,7 +646,7 @@ async def chat(payload: ChatRequest, request: Request):
     if not is_internal:
         tracer.start_step("build_omniscient_prompt")
         try:
-            body["messages"] = await asyncio.wait_for(
+            body["messages"], gatekeeper_result = await asyncio.wait_for(
                 build_omniscient_prompt(
                     raw_messages, user_id=current_user_id,
                     conversation_id=str(conversation_id), concise=concise,
@@ -809,7 +670,38 @@ async def chat(payload: ChatRequest, request: Request):
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": fallback_msg}, "finish_reason": "stop"}],
             })
         tracer.end_step("build_omniscient_prompt")
-    
+
+    # ── Reasoning config: GatekeeperResult + ModelProfile → generation options ──
+    _last_user_msg = ""
+    for m in reversed(body.get("messages", [])):
+        if isinstance(m, dict) and m.get("role") == "user":
+            _last_user_msg = m.get("content", "")
+            break
+    if gatekeeper_result and _last_user_msg:
+        _content_prompt, _chat_kwargs, _settings = configura_richiesta_agente(
+            MODEL_PROFILE, gatekeeper_result, _last_user_msg,
+        )
+        # Merge chat_template_kwargs e logit_bias nelle options
+        opts = body.get("options") or {}
+        opts.setdefault("chat_template_kwargs", {}).update(_chat_kwargs)
+        if _settings.get("logit_bias"):
+            opts.setdefault("logit_bias", {}).update(_settings["logit_bias"])
+        # Temperature / top_p override solo se la richiesta non specifica già
+        if "temperature" not in opts and "temperature" in _settings:
+            opts["temperature"] = _settings["temperature"]
+        if "top_p" not in opts and "top_p" in _settings:
+            opts["top_p"] = _settings["top_p"]
+        if "repeat_penalty" not in opts and "repeat_penalty" in _settings:
+            opts["repeat_penalty"] = _settings["repeat_penalty"]
+        body["options"] = opts
+        # Inject /no_think prefix nell'ultimo messaggio utente
+        if _content_prompt and _content_prompt != _last_user_msg:
+            msg_list = body.get("messages", [])
+            for m in reversed(msg_list):
+                if m.get("role") == "user":
+                    m["content"] = _content_prompt
+                    break
+
     is_stream = body.get("stream", True)
     
     if not is_stream:
@@ -935,11 +827,7 @@ async def chat(payload: ChatRequest, request: Request):
         # Processa i tag in BACKGROUND per effetti collaterali
         if content:
             try:
-                bg_task = asyncio.create_task(
-                    process_response_tags(content, user_id=current_user_id)
-                )
-                state.background_tasks.add(bg_task)
-                bg_task.add_done_callback(state.background_tasks.discard)
+                spawn_background(process_response_tags(content, user_id=current_user_id))
             except Exception as e:
                 logger.warning(f"⚠️ Background tag processing error: {e}")
 
@@ -977,10 +865,13 @@ async def chat(payload: ChatRequest, request: Request):
                 yield json.dumps({"error": gen["error"]}).encode() + b"\n"
                 return
 
-            safe_stream = TagSafeStream(model_family=MODEL_PROFILE.family)
+            # Wrap raw stream with genera_stream_agente per convertire thinking
+            # tag (<think>...</think>) in HTML <details> per UI esterne
+            parsed_stream = genera_stream_agente(gen, MODEL_PROFILE)
+
             full_chunks = []
             _role_sent_in_stream = False
-            async for chunk in gen:
+            async for chunk in parsed_stream:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
                     delta = chunk["choices"][0].get("delta", {})
                     content = delta.get("content", "")
@@ -991,11 +882,7 @@ async def chat(payload: ChatRequest, request: Request):
                             tracer._ttft_ms = (time.monotonic() - _stream_start) * 1000
                     full_chunks.append(content)
 
-                    # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
-                    # Usa TagSafeStream per gestire tag spalmati su piu' chunk
-                    cleaned_content = safe_stream.process(content) if content else ""
-
-                    delta_payload = {"role": "assistant", "content": cleaned_content} if not _role_sent_in_stream else {"content": cleaned_content}
+                    delta_payload = {"role": "assistant", "content": content} if not _role_sent_in_stream else {"content": content}
                     _role_sent_in_stream = True
                     openai_chunk = {
                         "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
@@ -1010,11 +897,6 @@ async def chat(payload: ChatRequest, request: Request):
                         }]
                     }
                     yield json.dumps(openai_chunk).encode() + b"\n"
-
-            # Rilascia eventuale buffer safe (TagSafeStream anti-frammentazione)
-            final_flush = safe_stream.flush()
-            if final_flush:
-                full_chunks.append(final_flush)
 
             full_text = "".join(full_chunks)
 
@@ -1049,11 +931,7 @@ async def chat(payload: ChatRequest, request: Request):
             # Non blocca la risposta — il client ha già ricevuto done=true.
             if full_text:
                 try:
-                    bg_task = asyncio.create_task(
-                        process_response_tags(full_text, user_id=current_user_id)
-                    )
-                    state.background_tasks.add(bg_task)
-                    bg_task.add_done_callback(state.background_tasks.discard)
+                    spawn_background(process_response_tags(full_text, user_id=current_user_id))
                 except Exception as e:
                     logger.warning(f"⚠️ Background tag processing error: {e}")
 
@@ -1147,26 +1025,15 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
 
         # Processa i tag in BACKGROUND per effetti collaterali
         if content:
-            try:
-                bg_task = asyncio.create_task(
-                    process_response_tags(content, user_id=current_user_id)
-                )
-                state.background_tasks.add(bg_task)
-                bg_task.add_done_callback(state.background_tasks.discard)
-            except Exception as e:
-                logger.warning(f"⚠️ Background tag processing error: {e}")
+            spawn_background(process_response_tags(content, user_id=current_user_id))
         try:
-            bg_task = asyncio.create_task(semantic_cache_store(prompt, content))
-            state.background_tasks.add(bg_task)
-            bg_task.add_done_callback(state.background_tasks.discard)
+            spawn_background(semantic_cache_store(prompt, content))
         except Exception as e:
             logger.warning(f"⚠️ Background semantic cache error: {e}")
         
         # Salva prompt utente in memoria (endpoint generate non usa build_omniscient_prompt)
         try:
-            bg_task = asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
-            state.background_tasks.add(bg_task)
-            bg_task.add_done_callback(state.background_tasks.discard)
+            spawn_background(save_to_memory(prompt, user_id=current_user_id))
         except Exception as e:
             logger.warning(f"⚠️ Background save_to_memory error: {e}")
         
@@ -1179,36 +1046,25 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
     else:
         async def stream_gen():
             full_resp = []
-            safe_stream = TagSafeStream(model_family=MODEL_PROFILE.family)
             gen = await engine.generate_chat(messages, stream=True)
-            async for chunk in gen:
+            parsed_stream = genera_stream_agente(gen, MODEL_PROFILE)
+            async for chunk in parsed_stream:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
                     content = chunk["choices"][0].get("delta", {}).get("content", "")
                     full_resp.append(content)
 
-                    # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
-                    # Usa TagSafeStream per gestire tag spalmati su piu' chunk
-                    cleaned_content = safe_stream.process(content) if content else ""
-
                     yield json.dumps({
                         "model": body["model"],
                         "created_at": datetime.now(UTC).isoformat() + "Z",
-                        "response": cleaned_content,
+                        "response": content,
                         "done": False
                     }).encode() + b"\n"
-
-            # Rilascia eventuale buffer safe (TagSafeStream anti-frammentazione)
-            final_flush = safe_stream.flush()
-            if final_flush:
-                full_resp.append(final_flush)
 
             final_content = "".join(full_resp)
 
             # Salva prompt utente in background
             try:
-                bg_task = asyncio.create_task(save_to_memory(prompt, user_id=current_user_id))
-                state.background_tasks.add(bg_task)
-                bg_task.add_done_callback(state.background_tasks.discard)
+                spawn_background(save_to_memory(prompt, user_id=current_user_id))
             except Exception as e:
                 logger.warning(f"⚠️ Background save_to_memory error: {e}")
 
@@ -1225,17 +1081,11 @@ async def ollama_generate(payload: GenerateRequest, request: Request):
             # Processa i tag in BACKGROUND per effetti collaterali (MEMORY, SCHEDULE, SSH, ecc.)
             if final_content:
                 try:
-                    bg_task = asyncio.create_task(
-                        process_response_tags(final_content, user_id=current_user_id)
-                    )
-                    state.background_tasks.add(bg_task)
-                    bg_task.add_done_callback(state.background_tasks.discard)
+                    spawn_background(process_response_tags(final_content, user_id=current_user_id))
                 except Exception as e:
                     logger.warning(f"⚠️ Background tag processing error: {e}")
                 try:
-                    bg_task = asyncio.create_task(semantic_cache_store(prompt, final_content))
-                    state.background_tasks.add(bg_task)
-                    bg_task.add_done_callback(state.background_tasks.discard)
+                    spawn_background(semantic_cache_store(prompt, final_content))
                 except Exception as e:
                     logger.warning(f"⚠️ Background semantic cache error: {e}")
 

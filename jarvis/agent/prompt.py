@@ -115,16 +115,14 @@ SIMPLE_QUERIES = re.compile(
     r'|tell\s+me\s+(the\s+)?(date|time|date\s+and\s+time)\??$'
     r'|what.s\s+the\s+weather(\s+like)?\??$'
     r'|where\s+am\s+i\??$'
-    r'|tell\s+me\s+a\s+joke',
-    re.IGNORECASE
-)
-
-PURE_GREETING = re.compile(
-    r'^(ciao|hello|hi|hey|buongiorno|buonasera|buonpomeriggio|salve|'
-    r'grazie|thanks|ok|okay|sì|si|no|'
-    r'come\s+stai|come\s+va|tutto\s+bene|che\s+si\s+fa|'
-    r'grazie\s+(mille|tante|tanto)|'
-    r'buona\s+(giornata|serata|notte))$',
+    r'|tell\s+me\s+a\s+joke'
+    # CAMBIO LINGUA / LANGUAGE SWITCH
+    r'|parla\s+(in\s+)?\w+(\s+con\s+me)?'
+    r'|speak\s+\w+(\s+(with|to)\s+me)?'
+    r'|(parli|puoi\s+parlare)\s+\w+'
+    r'|(can\s+(you\s+)?speak)\s+\w+'
+    r'|in\s+italiano\s*(per\s+favore|please)?'
+    r'|change\s+(the\s+)?language\s+to\s+\w+',
     re.IGNORECASE
 )
 
@@ -215,10 +213,6 @@ async def _keyword_bypass(user_message: str, context: dict) -> GatekeeperResult 
         logger.info("🧠 Bypass: META (frase match)")
         return GatekeeperResult(intent="meta", confidence=1.0)
 
-    if PURE_GREETING.match(msg_lower):
-        logger.info("🧠 Bypass: GENERAL (saluto puro)")
-        return GatekeeperResult(intent="general", confidence=1.0)
-
     # Simple factual queries (data, ora, meteo, posizione) — bypass→general
     if SIMPLE_QUERIES.match(msg_lower):
         logger.info(f"🧠 Bypass: GENERAL (query fattuale semplice: '{msg_lower[:50]}')")
@@ -280,7 +274,7 @@ def _inject_datetime(messages) -> str:
     for _i in range(len(messages) - 1, -1, -1):
         if messages[_i]["role"] == "user":
             messages[_i]["content"] = (
-                f"[CURRENT DATETIME — YOU MUST USE THIS: {_dt_now}]\n\n"
+                f"[Current date/time: {_dt_now}]\n\n"
                 f"{messages[_i]['content']}"
             )
             break
@@ -574,7 +568,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 tracer.step("build_omniscient_prompt", status="skipped", details={"reason": "empty_message"})
                 if finalize_trace:
                     tracer.finish()
-        return messages
+        return (messages, None)
 
     current_user_id = user_id if user_id else "alfio_dev"
     tracer: PipelineTracer | None = None
@@ -604,13 +598,6 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 task.add_done_callback(state.background_tasks.discard)
             except Exception:
                 pass
-        if PURE_GREETING.match(clean_msg.strip().lower()):
-            logger.info("🗣️ Concise + saluto: skip caveman compression")
-            tracer.end_step("concise_pipeline", status="skipped", details={"reason": "greeting"})
-            if finalize_trace:
-                tracer.finish()
-            return messages
-
         compressed = await engine.compress_prompt(
             user_query=clean_msg, rag_context="", history="", active_project=None,
         )
@@ -635,17 +622,11 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 break
         tracer.set_system_prompt(system_prompt)
         tracer.set_user_content(user_content)
-        if not PURE_GREETING.match(clean_msg.strip().lower()):
-            tracer.set_compressed_text(compressed if isinstance(compressed, str) else str(compressed))
+        tracer.set_compressed_text(compressed if isinstance(compressed, str) else str(compressed))
         if finalize_trace:
             tracer.finish()
-        return messages
-
-    # ════════════════════════════════════════════════════
-    # WEB SEARCH + SUPER TAG PARSING
-    # ════════════════════════════════════════════════════
-    web_ctx, clean_msg = await perform_web_search_and_crawl(latest_msg)
-    mem_ctx, rag_ctx = "", ""
+        return (messages, None)
+    mem_ctx, rag_ctx, web_ctx = "", "", ""
     latest_msg, user_overrides = _parse_super_tags(latest_msg)
     _user_override_persona = user_overrides.get("persona", "")
     _user_override_focus = user_overrides.get("focus", "")
@@ -705,6 +686,8 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             logger.info(f"📁 Progetto attivo: {active_project}")
             state.set_last_project(current_user_id, conversation_id, active_project)
 
+    clean_msg = latest_msg  # per save_to_memory in _bg_add (Python 3.13 free variable scoping)
+
     if state.memory:
         try:
             async def _bg_add():
@@ -722,9 +705,16 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         logger.info("🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
         tracer.step("context_gathering", status="skipped", details={"reason": "general_intent"})
         tracer.step("caveman_compression", status="skipped", details={"reason": "general_intent"})
+        # Remove datetime context for clean general conversation — non serve far
+        # ragionare il modello sulla data per un saluto o chiacchiera
+        if messages:
+            messages[:] = [m for m in messages if not (m.get("role") == "system" and "Current date" in m.get("content", ""))]
+            for m in messages:
+                if m["role"] == "user" and m.get("content", "").startswith("[Current date/time:"):
+                    m["content"] = m["content"].split("\n\n", 1)[1] if "\n\n" in m["content"] else m["content"]
         if finalize_trace:
             tracer.finish()
-        return messages
+        return (messages, gk)
 
     if gk.intent == "meta":
         logger.info("🗂️ Intento META: skip caveman compression, risposta conversazionale")
@@ -739,7 +729,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         tracer.step("caveman_compression", status="skipped", details={"reason": "meta_intent"})
         if finalize_trace:
             tracer.finish()
-        return messages
+        return (messages, gk)
 
     # ════════════════════════════════════════════════════
     # CONTEXT GATHERING (STEP 3)
@@ -931,4 +921,4 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     if finalize_trace:
         tracer.finish()
         logger.info(f"🏁 build_omniscient_prompt complete — returning to main.py")
-    return messages
+    return (messages, gk)
