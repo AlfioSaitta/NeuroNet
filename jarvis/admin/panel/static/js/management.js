@@ -629,7 +629,7 @@ window.resetSettings = function() {
     _settingsDirty = false;
     const btn = document.getElementById('settings-save-btn');
     if (btn) btn.disabled = true;
-    document.getElementById('settings-reset-btn').style.display = 'none';
+    document.getElementById('settings-reset-btn').classList.add('hidden');
     const status = document.getElementById('settings-save-status');
     if (status) { status.textContent = '↺ Reset to original values'; status.className = 'save-status'; }
 };

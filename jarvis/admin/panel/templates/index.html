@@ -308,7 +308,7 @@
                         <li><span>Total Chunks</span> <span id="total-chunks">--</span></li>
                     </ul>
                     <div class="metric-row gap-6 mt-8 bt">
-                        <button class="btn btn-xs" onclick="triggerReindex()">⟳ Restart Ingestion</button>
+                        <button class="btn btn-xs" onclick="restartIngestion()">⟳ Restart Ingestion</button>
                         <button class="btn btn-accent btn-xs" onclick="openMemoryGraphModal()">✧ Memory Graph</button>
                     </div>
                 </div>
@@ -573,6 +573,7 @@
                             <input type="checkbox" id="log-auto-refresh" checked onchange="toggleAutoRefresh()"> Auto
                         </label>
                         <button class="btn" onclick="fetchLogs()">⟳ Refresh</button>
+                        <button class="btn btn-accent btn-xs" id="logs-restart-btn" onclick="restartLogContainer()">⟳ Restart</button>
                     </div>
                 </div>
                 <pre id="log-display" class="flex-1 mono text-sm log-display">Loading logs...</pre>

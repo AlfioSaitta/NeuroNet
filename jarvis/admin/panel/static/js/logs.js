@@ -49,7 +49,7 @@ async function fetchLogs() {
     const display = document.getElementById('log-display');
     setLoading(display, true, 'Loading logs...');
     try {
-        const res = await fetchWithTimeout(`/api/dashboard/containers/${encodeURIComponent(container)}/logs?tail=500`);
+        const res = await fetchWithTimeout(`/api/dashboard/containers/${encodeURIComponent(container)}/logs?tail=500`, {}, 30000);
         const data = await res.json();
         if (data.logs) {
             display.textContent = data.logs.map(l => `[${l.container}] ${l.message}`).join('\n');
@@ -66,6 +66,16 @@ async function fetchLogs() {
     } finally {
         setLoading(display, false);
     }
+}
+
+function restartLogContainer() {
+    const select = document.getElementById('log-container-select');
+    const name = select.value;
+    if (name === 'all') {
+        showToast('Cannot restart "All Containers" — select a specific container', 'warning');
+        return;
+    }
+    restartContainer(name);
 }
 
 async function restartContainer(name) {

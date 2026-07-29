@@ -946,7 +946,8 @@ async def get_dashboard_telemetry():
 @dashboard_router.post("/api/dashboard/ingestion/restart")
 async def restart_ingestion():
     from rag.engine import ingest_local_documents
-    state.is_reindexing = True
+    if state.is_reindexing:
+        return JSONResponse({"status": "already_running", "message": "Re-indexing already in progress"})
     task = asyncio.create_task(ingest_local_documents())
     state.background_tasks.add(task)
     task.add_done_callback(state.background_tasks.discard)
@@ -1059,7 +1060,7 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
     request_id = str(uuid.uuid4())[:12]
 
     try:
-        enhanced_messages = await build_omniscient_prompt(
+        enhanced_messages, _ = await build_omniscient_prompt(
             raw_messages, user_id=current_user_id,
             conversation_id=conversation_id, concise=False,
             request_id=request_id
@@ -1316,7 +1317,8 @@ async def get_rag_collections():
 async def trigger_rag_reindex(request: Request):
     """Trigger RAG re-indexing."""
     from rag.engine import ingest_local_documents
-    state.is_reindexing = True
+    if state.is_reindexing:
+        return JSONResponse({"status": "already_running", "message": "Re-indexing already in progress"})
     task = asyncio.create_task(ingest_local_documents())
     state.background_tasks.add(task)
     task.add_done_callback(state.background_tasks.discard)
@@ -1548,13 +1550,6 @@ async def get_inference_analytics():
         "history": history,
         "gatekeeper": gk_data,
     })
-
-
-@dashboard_router.get("/api/dashboard/analytics/errors")
-async def get_error_analytics():
-    """Error distribution."""
-    errors = dict(getattr(state, 'error_counters', {}))
-    return JSONResponse({"error_counters": errors, "total_errors": sum(errors.values()) if errors else 0})
 
 
 # Lazy import for tag processing
