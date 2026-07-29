@@ -9,6 +9,18 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 └───────────────────────────────────┬─────────────────────────────────────────┘
                                     │
                                     ▼
+                               ╔═══════════════════════════╗
+                               ║  SHORT-CIRCUIT CHECK      ║
+                               ║  (main.py / is_greeting)  ║
+                               ║                           ║
+                               ║  Se saluto puro:          ║
+                               ║  1-3 token, nessuna       ║
+                               ║  richiesta → risposta     ║
+                               ║  immediata (26ms)         ║
+                               ║  0 token LLM consumati    ║
+                               ╚═══════════════════════════╝
+                                    │
+                                    ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  1. ROUTING (main.py)                                                        │
 │                                                                              │
@@ -26,6 +38,10 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │  │  ├── GET/POST /api/users/*   → routes.users_router (admin only)         ││
 │  │  └── Telegram message        → tg_bot.bot.handle_telegram_message()     ││
 │  └─────────────────────────────────────────────────────────────────────────┘│
+│                                                                              │
+│  In handle_chat() e openai.chat.chat_completions():                          │
+│  build_omniscient_prompt() ora restituisce tuple (messages, context)         │
+│  invece di solo messages — per retrocompatibilità con chiamate esistenti     │
 └───────────────────────────────────┬──────────────────────────────────────────┘
                                     │
                                     ▼
@@ -165,6 +181,10 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │  │  │     ├── Se dentro tag → bufferizza (non yielda)                      ││
 │  │  │     ├── Se tag completo → yielda testo safe                          ││
 │  │  │     └── Se chunk successivo → riprende stato _in_tag                 ││
+│  │  ├── Per Qwen/DeepSeek: sostituisce [DONE] mancante con data: [DONE]    ││
+│  │  │     (fix Cherry Studio — risposte vuote senza terminatore SSE)       ││
+│  │  ├── Rimuove tag <reasoning> dal response visibile allo streaming       ││
+│  │  ├── Supporta prefix /no_think per disabilitare reasoning assistente    ││
 │  │  └── yield al client (SSE / Telegram / HTTP stream)                     ││
 │  └─────────────────────────────────────────────────────────────────────────┘│
 │                                                                              │

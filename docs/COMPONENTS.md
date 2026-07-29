@@ -32,23 +32,31 @@ NeuroNet/
     ├── Dockerfile                   # Build CUDA 13.0 + llama-cpp-python
     ├── requirements.txt             # 33 dipendenze Python
     ├── models/                      # File GGUF (~8.7GB, gitignored)
-    ├── main.py                      # Entry point FastAPI/Granian (1339 righe)
+    ├── main.py                      # Entry point FastAPI/Granian (1263 righe)
     ├── core/
-    │   ├── config.py                # Configurazione centralizzata (508 righe)
+    │   ├── config.py                # Configurazione centralizzata (512 righe)
     │   ├── state.py                 # Stato globale mutabile + ring buffer (249 righe)
-    │   ├── llm_engine.py            # LlamaEngine + PriorityLock + _strip_thinking + decomp. helpers (875 righe)
-    │   ├── model_profiles.py        # Auto-rilevamento famiglia modello GGUF (454 righe)
+    │   ├── llm_engine.py            # LlamaEngine + PriorityLock + _strip_thinking + decomp. helpers (1068 righe)
+    │   ├── model_profiles.py        # Auto-rilevamento famiglia modello GGUF (480 righe)
     │   ├── telemetry.py             # PipelineTracer + GatekeeperStats (577 righe)
-    │   └── lifecycle.py             # Lifecycle manager (435 righe)
+    │   ├── lifecycle.py             # Lifecycle manager (440 righe)
+    │   ├── embed_worker.py          # Worker per embedding asincrono (275 righe)
+    │   ├── chat_utils.py            # Helper formattazione e validazione chat (146 righe)
+    │   ├── qdrant_utils.py          # Utility Qdrant: sanitize_project_name (51 righe)
+    │   ├── reasoning.py             # Logica ragionamento approfondito + CoT (334 righe)
+    │   └── telemetry_api.py         # Endpoint API telemetry (98 righe)
     ├── agent/
-    │   ├── prompt.py                # Gatekeeper + build_omniscient_prompt + 6 helper (824 righe)
-    │   ├── tags.py                  # TagSafeStream + process_all_tags + 21 handler (1179 righe)
+    │   ├── prompt.py                # Gatekeeper + build_omniscient_prompt + 6 helper (924 righe)
+    │   ├── tags.py                  # TagSafeStream + process_all_tags + 21 handler (892 righe)
     │   ├── tools.py                 # execute_tool_call + 18 dispatch + 5 built-in (1065 righe)
+    │   ├── tool_handlers.py         # Handler tool-calling (file, shell, skills) (637 righe)
+    │   ├── tag_handlers.py          # Esecutori tag XML d'azione (320 righe)
     │   ├── skills.py                # Skill dinamiche da YAML (526 righe)
     │   ├── classifier.py           # Classificatore intenti centralizzato (188 righe)
     │   └── confirmation.py         # ConfirmationManager con timeout 5 min (260 righe)
     ├── rag/
-    │   ├── engine.py                # Pipeline RAG completa con AST chunking (1974 righe)
+    │   ├── engine.py                # Pipeline RAG completa (1608 righe)
+    │   ├── chunking.py              # AST chunking semantico via Tree-sitter (437 righe)
     │   ├── reranker.py              # Reranker modulare Qwen3 → FlashRank (80 righe)
     │   ├── cache.py                 # Cache semantica + Web Knowledge Qdrant (190 righe)
     │   └── web_search.py            # SearXNG + Crawl4AI (71 righe)
@@ -69,7 +77,7 @@ NeuroNet/
     │   ├── users.py                 # Admin CRUD utenti (151 righe)
     │   └── projects.py              # Gestione progetti RAG + Synaptiq graph (391 righe)
     ├── admin/
-    │   ├── dashboard.py             # SETTINGS_META (73 env var) + _persist_env (1566 righe)
+    │   ├── dashboard.py             # SETTINGS_META (73 env var) + _persist_env (1561 righe)
     │   └── panel/
     │       ├── __init__.py          # Router FastAPI + mount static files (91 righe)
     │       ├── templates/
@@ -90,7 +98,7 @@ NeuroNet/
     │   ├── synaptiq_engine.py       # SynaptiqEngine + build_graph + hybrid search + graph viz (743 righe)
     │   └── synaptiq_bridge.py       # Bridge RAG+Synaptiq per hybrid search (224 righe)
     ├── tg_bot/
-    │   ├── bot.py                   # Handler bot Telegram + comandi + auth (1287 righe)
+    │   ├── bot.py                   # Handler bot Telegram + comandi + auth (1286 righe)
     │   ├── format.py                # Utility formattazione Telegram Markdown (147 righe)
     │   ├── service.py               # Servizio Telegram (128 righe)
     │   └── userbot.py               # Multi-userbot Telethon via OTP (201 righe)
@@ -103,7 +111,7 @@ NeuroNet/
     │   ├── __init__.py              # Factory init_openai_routes() con lazy import (38 righe)
     │   ├── state.py                 # OpenAIDatabase SQLite singleton + asyncio lock (715 righe)
     │   ├── models.py                # Pydantic models + /v1/models endpoint (151 righe)
-    │   ├── chat.py                  # POST /v1/chat/completions (streaming, tool-calling) (268 righe)
+    │   ├── chat.py                  # POST /v1/chat/completions (streaming, tool-calling) (272 righe)
     │   ├── completions.py           # POST /v1/completions (legacy) (95 righe)
     │   ├── embeddings.py            # POST /v1/embeddings (float/base64) (57 righe)
     │   ├── audio.py                 # POST /v1/audio/transcriptions, translations, speech (131 righe)
@@ -153,7 +161,7 @@ NeuroNet/
       └── FAIL → fallback CPU locale
 ```
 
-**Decomposizione `load_models()`** (875 righe → 25 righe orchestrazione + 3 helper):
+**Decomposizione `load_models()`** (1068 righe → 25 righe orchestrazione + 3 helper):
 - `_load_single_model(path, params)` — carica un singolo GGUF con parametri
 - `_load_embedding_model()` — inizializza FastEmbed ONNX CPU (BAAI/bge-base-en-v1.5, 0 VRAM)
 - `_verify_gpu_layers(model_name, n_gpu_layers)` — verifica layer GPU allocati
@@ -178,7 +186,7 @@ NeuroNet/
 
 ---
 
-### 2. 📚 Pipeline RAG (`jarvis/rag/engine.py`) — 1974 righe
+### 2. 📚 Pipeline RAG (`jarvis/rag/engine.py`) — 1608 righe
 
 Il componente più complesso. Pipeline completa di Retrieval-Augmented Generation con chunking semantico del codice.
 
@@ -239,7 +247,7 @@ Il componente più complesso. Pipeline completa di Retrieval-Augmented Generatio
 ```
 
 **Feature evidenziate:**
-- **AST Chunking semantico:** usa Tree-sitter per parsare il codice in nodi significativi (funzioni, classi, type declarations, import sections)
+- **AST Chunking semantico:** implementato in `jarvis/rag/chunking.py`, usa Tree-sitter per parsare il codice in nodi significativi (funzioni, classi, type declarations, import sections)
 - **Reranker duale:** Qwen3-Reranker (primario, multilingua, MTEB-Code 73.42) → FlashRank (fallback ONNX) — modulare in `jarvis/rag/reranker.py`
 - **Gitignore-aware:** rispetta .gitignore nei progetti monitorati tramite pathspec
 - **Watchdog real-time:** PollingObserver per Docker compatibilità, ri-embedding automatico al salvataggio. Timeout e modalità watch configurabili via `.env` per bilanciare CPU/latenza

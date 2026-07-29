@@ -4,6 +4,33 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 
 ---
 
+### v9.10.0 (2026-07-29) — Module Extraction, Admin Panel Fixes, Cherry Studio Supporto
+
+- **Module Extraction (7 moduli):** Estratti moduli da file oversized per rispettare limite 250 LOC:
+  - `rag/chunking.py` (+437 righe) — AST chunking semantico via Tree-sitter, da `rag/engine.py`
+  - `agent/tool_handlers.py` (+637 righe) — Handler tool-calling (file, shell, skills), da `agent/tools.py`
+  - `agent/tag_handlers.py` (+320 righe) — Esecutori tag XML d'azione, da `agent/tags.py`
+  - `core/reasoning.py` (+334 righe) — Logica ragionamento + chain-of-thought, da `main.py`
+  - `core/chat_utils.py` (+146 righe) — Helper formattazione/validazione chat, da `main.py`
+  - `core/telemetry_api.py` (+98 righe) — Endpoint API per telemetry, da `core/telemetry.py`
+  - `core/qdrant_utils.py` (+51 righe) — `sanitize_project_name()` centralizzato, utility Qdrant
+- **Admin Panel Fixes:**
+  - `fetchLogs()` timeout portato a 30s (elimina richieste pendenti infinite)
+  - `resetSettings` classList toggle corretto (non funzionava il cambio modalità Simple/Advanced)
+  - Pulsanti restart funzionanti correttamente in Logs view
+  - Race condition `_ingest_local_documents()` risolta con flag `_ingesting` + lock
+  - Pulizia collezioni orfane Qdrant (step 4b in ingest): elimina collezioni senza progetto corrispondente
+  - Rimosso endpoint orfano `/analytics/errors` (non più servito)
+- **Cherry Studio Fix:**
+  - `openai_api/chat.py`: `TagSafeStream` wrapper per Qwen/DeepSeek — sostituisce `[DONE]` mancante con `data: [DONE]`
+  - Gatekeeper reasoning chiamato nel ramo corretto (non più saltato per Cherry Studio)
+  - Supporto prefix `/no_think` per disabilitare reasoning dell'assistente
+  - Rimozione tag `<reasoning>` dal response visibile allo streaming
+- **Qdrant Utils:** Nuovo modulo `core/qdrant_utils.py` con `sanitize_project_name()` centralizzato (sostituisce logica duplicata)
+- **build_omniscient_prompt retrocompatibilità:** `main.py` e `openai_api/chat.py` — funzione ora restituisce `tuple(messages, context)` invece di solo `messages`
+- **Greeting Short-Circuit:** `main.py` — saluti puri (1-3 token, nessuna richiesta) bypassano LLM completamente: 26ms invece di 60-76s (0 token LLM consumati)
+- **Documentazione:** AGENTS.md allineato a stato attuale con nuovi moduli, bug fix, cronologia aggiornata
+
 ### v9.9.0 (2026-07-27) — Hardware Profile Auto-Detection, FastEmbed, conversation_id fix
 
 - **Hardware Profile Auto-Detection:** `model_profiles.py` nuova `_family_hardware_defaults()` mappa ogni famiglia GGUF (qwen/gemma/deepseek/llama/...) ai parametri GPU ottimali. `llm_engine.py`: `_load_chat_model()` rileva famiglia modello dall'header binario GGUF PRIMA del caricamento e applica `n_gpu_layers`, `flash_attn`, `n_ubatch` per famiglia. Per switchare modello basta cambiare `LLAMA_MODEL_PATH` — `N_GPU_LAYERS`/`flash_attn`/`n_ubatch` auto-detectati con priorità: .env > famiglia > fallback globale
