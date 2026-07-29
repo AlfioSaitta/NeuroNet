@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,8 +18,9 @@ from fastapi.responses import JSONResponse
 from api.auth import require_auth, require_admin
 from core.config import WORKSPACE_PROJECTS, EXTERNAL_PROJECTS, HOST_FS_PREFIX, SYNAPTIQ_ENABLED, parse_external_projects
 from admin.dashboard import _persist_env
+from core.qdrant_utils import sanitize_project_name, get_project_col_name
 from rag.engine import (
-    list_rag_projects, get_project_col_name, get_project_path,
+    list_rag_projects, get_project_path,
     get_project_last_indexed, ingest_local_documents, _registered_project_paths,
     _save_state_unsafe,
 )
@@ -42,12 +42,6 @@ def _resolve_register_path(raw_path: str) -> str | None:
         if os.path.isdir(prefixed):
             return prefixed
     return None
-
-
-def _sanitize_name(name: str) -> str:
-    """Previene path-traversal: sostituisce con underscore tutti i caratteri non alfanumerici.
-    Allineato a get_project_col_name() in rag.py per consistenza."""
-    return re.sub(r'[^a-zA-Z0-9_]', '_', name)
 
 
 async def _get_project_stats(name: str) -> dict[str, Any]:
@@ -137,7 +131,7 @@ async def available_projects(_: dict = Depends(require_admin)):
 @router.get("/{name}")
 async def get_project(name: str, _: dict = Depends(require_admin)):
     """Dettaglio di un progetto specifico."""
-    name = _sanitize_name(name)
+    name = sanitize_project_name(name)
     col_name = get_project_col_name(name)
     stats = await _get_project_stats(name)
     last_idx = get_project_last_indexed(name)
@@ -173,7 +167,7 @@ async def reindex_project(body: dict, _: dict = Depends(require_admin)):
     name = body.get("name", "")
     if not name:
         raise HTTPException(400, "Missing 'name' in body")
-    name = _sanitize_name(name)
+    name = sanitize_project_name(name)
 
     project_path = get_project_path(name)
     if not project_path:
@@ -227,7 +221,7 @@ async def reindex_project(body: dict, _: dict = Depends(require_admin)):
 @router.delete("/{name}/collection")
 async def delete_project_collection(name: str, _: dict = Depends(require_admin)):
     """Elimina la collezione Qdrant di un progetto. NON modifica .env."""
-    name = _sanitize_name(name)
+    name = sanitize_project_name(name)
     col_name = get_project_col_name(name)
 
     try:
@@ -260,7 +254,7 @@ async def register_project(body: dict, _: dict = Depends(require_admin)):
     name = body.get("name", "")
     if not raw_path or not name:
         raise HTTPException(400, "Missing 'path' or 'name' in body")
-    name = _sanitize_name(name)
+    name = sanitize_project_name(name)
 
     # Risolvi il path
     resolved = _resolve_register_path(raw_path)
