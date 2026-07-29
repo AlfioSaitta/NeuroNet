@@ -9,12 +9,13 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from core.config import logger, MODEL_ID, MODEL_PROFILE
 from core.llm_engine import engine
+from core.chat_utils import handle_confirmation_token, build_llm_options, spawn_background
 from agent.prompt import build_omniscient_prompt
 from memory.engine import process_response_tags
 from agent.tags import strip_action_tags, TagSafeStream
 from agent.tools import execute_tool_call
-from agent.confirmation import ApiTokenProvider, ConfirmationManager
-from agent.classifier import classify_confirmation, is_internal_query
+from agent.confirmation import ConfirmationManager
+from agent.classifier import is_internal_query
 from .models import ChatCompletionRequestOpenAI
 import core.state as state
 
@@ -29,21 +30,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
     is_stream = body.get("stream", False)
     raw_messages = body.get("messages", [])
 
-    options = {}
-    if body.get("temperature") is not None:
-        options["temperature"] = body["temperature"]
-    if body.get("max_tokens") is not None:
-        options["num_predict"] = body["max_tokens"]
-    if body.get("top_p") is not None:
-        options["top_p"] = body["top_p"]
-    if body.get("seed") is not None:
-        options["seed"] = body["seed"]
-    if body.get("stop") is not None:
-        stop_seq = body["stop"]
-        if isinstance(stop_seq, list):
-            options["stop"] = stop_seq
-        elif isinstance(stop_seq, str):
-            options["stop"] = [stop_seq]
+    options = build_llm_options(body)
 
     # ── response_format: json_object → pass to create_chat_completion natively ──
     response_format = body.get("response_format")
@@ -80,45 +67,9 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
     # ── Confirmation token handling ──
     confirmation_mgr = None
-    confirmation_token = body.get("confirmation_token") or payload.confirmation_token
-    if confirmation_token:
-        resolved = ApiTokenProvider.resolve(confirmation_token, approved=True)
-        if resolved:
-            return {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                "object": "chat.completion",
-                "created": int(datetime.now(UTC).timestamp()),
-                "model": MODEL_ID,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": "✅ Conferma ricevuta. Operazione autorizzata."}, "finish_reason": "stop"}],
-                "usage": {}
-            }
-    elif raw_messages:
-        last_msg = raw_messages[-1] if isinstance(raw_messages[-1], dict) else {}
-        if last_msg.get("role") == "user":
-            msg_text = str(last_msg.get("content", ""))
-            result = classify_confirmation(msg_text)
-            if result:
-                token, approved = result
-                api_resolved = ApiTokenProvider.resolve(token, approved=approved)
-                if api_resolved:
-                    status_text = "✅ Conferma ricevuta. Operazione autorizzata." if approved else "❌ Operazione rifiutata."
-                    return {
-                        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                        "object": "chat.completion",
-                        "created": int(datetime.now(UTC).timestamp()),
-                        "model": MODEL_ID,
-                        "choices": [{"index": 0, "message": {"role": "assistant", "content": status_text}, "finish_reason": "stop"}],
-                        "usage": {}
-                    }
-                else:
-                    return {
-                        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                        "object": "chat.completion",
-                        "created": int(datetime.now(UTC).timestamp()),
-                        "model": MODEL_ID,
-                        "choices": [{"index": 0, "message": {"role": "assistant", "content": "⚠️ Token di conferma non valido o scaduto."}, "finish_reason": "stop"}],
-                        "usage": {}
-                    }
+    confirm_resp = await handle_confirmation_token(body)
+    if confirm_resp is not None:
+        return confirm_resp
 
     # ── Detect internal Mem0 extraction queries (## Summary prefix) ──
     # These come from Mem0's own LLM calls during memory.add() — they need raw
@@ -132,11 +83,47 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
     if _is_internal:
         # Bypass build_omniscient_prompt (no RAG, no memory context — circular!)
         enriched = ollama_messages
+        gatekeeper_result = None
     else:
-        enriched = await build_omniscient_prompt(
+        enriched, gatekeeper_result = await build_omniscient_prompt(
             ollama_messages, user_id=current_user_id,
             conversation_id=str(conversation_id), concise=concise
         )
+
+    # ── Apply reasoning configuration (thinking suppression) ──
+    # Must match what main.py does to prevent models from outputting
+    # chain-of-thought reasoning as their entire response.
+    if gatekeeper_result:
+        from core.reasoning import configura_richiesta_agente
+        # Find original (pre-enrichment) last user message
+        _orig_msg = ""
+        for m in reversed(raw_messages):
+            if isinstance(m, dict) and m.get("role") == "user":
+                _orig_msg = m.get("content", "")
+                break
+        if _orig_msg:
+            _content_prompt, _chat_kwargs, _settings = configura_richiesta_agente(
+                MODEL_PROFILE, gatekeeper_result, _orig_msg,
+            )
+            # Apply chat_template_kwargs (enable_thinking, etc.)
+            options.setdefault("chat_template_kwargs", {}).update(_chat_kwargs)
+            # Apply logit_bias to block thinking tokens
+            if _settings.get("logit_bias"):
+                options.setdefault("logit_bias", {}).update(_settings["logit_bias"])
+            # Temperature/top_p overrides only if not explicitly set by client
+            for _key in ("temperature", "top_p", "repeat_penalty"):
+                if _key not in options and _key in _settings:
+                    options[_key] = _settings[_key]
+            # Inject /no_think prefix (prepend to enriched content, don't replace)
+            if _content_prompt and _content_prompt != _orig_msg:
+                # Extract the prefix only (e.g. "/no_think ") from content_prompt
+                _prefix = _content_prompt
+                if _orig_msg and _content_prompt.endswith(_orig_msg):
+                    _prefix = _content_prompt[:-len(_orig_msg)]
+                for m in reversed(enriched):
+                    if m.get("role") == "user":
+                        m["content"] = _prefix + m["content"]
+                        break
 
     tools = body.get("tools")
     if not is_stream:
@@ -278,11 +265,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             # Skip for internal Mem0 queries to avoid recursive memory loops
             if full_text and not _is_internal:
                 try:
-                    bg_task = asyncio.create_task(
-                        process_response_tags(full_text, user_id=current_user_id)
-                    )
-                    state.background_tasks.add(bg_task)
-                    bg_task.add_done_callback(state.background_tasks.discard)
+                    spawn_background(process_response_tags(full_text, user_id=current_user_id))
                 except Exception as e:
                     logger.warning(f"⚠️ Background tag processing error: {e}")
 
