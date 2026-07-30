@@ -1272,14 +1272,36 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
         stream_end_time = time.monotonic()
         full_text = "".join(full_text_chunks)
 
-        # ── Clean response: strip thinking/reasoning tags ──
-        # NOTA: NON estraiamo reasoning separato per la dashboard perché
-        # Qwen3.5 mette spesso la risposta FINALE dentro il blocco <|think|>,
-        # causando duplicazione (response inside reasoning box + main content).
-        # TagSafeStream già filtra i tag thinking durante lo streaming,
-        # quindi il frontend vede il contenuto pulito in tempo reale.
-        # strip_action_tags rimuove eventuali residui di tag thinking/blocchi.
-        clean_text = strip_action_tags(full_text, model_family=MODEL_PROFILE.family) if full_text else ""
+        # ── Extract reasoning: separa <|think|>...</think> dal contenuto visibile ──
+        # Qwen3.5 mette spesso TUTTO (ragionamento + risposta finale) dentro il blocco
+        # <|think|>, con </think> alla fine. In tal caso _display_text = "" e il
+        # fallback va a _streamFullContent (già filtrato da TagSafeStream).
+        # Se la risposta finale è DENTRO il reasoning (duplicata), la deduplica.
+        reasoning_text = ""
+        _display_text = full_text
+        if full_text:
+            _think_pair_pat = re.compile(r'<\|think\|>(.*?)</think>', re.DOTALL | re.IGNORECASE)
+            _paired = _think_pair_pat.findall(full_text)
+            if _paired:
+                reasoning_text = "\n\n".join(m.strip() for m in _paired)
+                _display_text = _think_pair_pat.sub("", full_text).strip()
+                logger.debug(f"🧠 Extracted {len(_paired)} <|think|> pair(s): {len(reasoning_text)} chars")
+                # Deduplica: se la risposta finale è in coda al reasoning, rimuovila
+                if _display_text and reasoning_text.endswith(_display_text):
+                    reasoning_text = reasoning_text[:-len(_display_text)].strip()
+                    logger.debug(f"🧹 Deduplicated response from reasoning tail ({len(_display_text)} chars)")
+            # fallback: lone </think> all'inizio o alla fine
+            if not reasoning_text and '</think>' in full_text.lower():
+                _idx = full_text.lower().rfind('</think>')
+                if _idx > 0:
+                    _before = full_text[:_idx].strip()
+                    _after = full_text[_idx + 8:].strip()
+                    if _before and _after:
+                        reasoning_text = _before
+                        _display_text = _after
+                        logger.debug(f"🧠 Extracted reasoning from lone </think>: {len(reasoning_text)} chars")
+
+        clean_text = strip_action_tags(_display_text, model_family=MODEL_PROFILE.family) if _display_text else ""
 
         # Compute metrics — usa clean_text chars (senza reasoning/tags)
         total_duration_ms = round((stream_end_time - stream_start_time) * 1000, 1)
@@ -1352,6 +1374,8 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
             'tokens': estimated_tokens,
             'duration_ms': total_duration_ms,
         }
+        if reasoning_text:
+            done_payload['reasoning'] = reasoning_text
         yield f"data: {json.dumps(done_payload)}\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
