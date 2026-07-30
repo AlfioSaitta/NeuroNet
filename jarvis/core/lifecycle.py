@@ -97,6 +97,26 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(engine.load_models)
     logger.info("Modelli Llama caricati in locale (No Ollama).")
 
+    # Warm-up modello chat: genera 1-2 token per caricare CUDA kernel
+    # (evita latenza 15s sulla prima richiesta di classificazione)
+    async def _warmup_chat():
+        try:
+            logger.info("🔥 Warm-up chat model (CUDA kernel load)...")
+            resp = await engine.generate_chat(
+                [{"role": "user", "content": "Hi"}],
+                stream=False,
+                options={"temperature": 0.0, "num_predict": 2, "max_tokens": 5},
+                model="chat", priority=0,
+            )
+            if "error" not in resp:
+                logger.info("✅ Warm-up chat model completato")
+            else:
+                logger.warning(f"⚠️ Warm-up chat fallito: {resp.get('error')}")
+        except Exception as e:
+            logger.warning(f"⚠️ Warm-up chat eccezione: {e}")
+
+    await _warmup_chat()
+
     # Inizializzazione provider esterni (Gemini, ecc.)
     try:
         router = engine.init_provider_router()

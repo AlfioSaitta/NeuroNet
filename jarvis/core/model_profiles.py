@@ -362,10 +362,14 @@ def family_to_chat_format(family: str, variant: str = "") -> Optional[str]:
         None: Nessun formato specifico (raw, nessun template applicato)
     """
     fmt_map = {
-        "qwen": "chatml",
-        "qwq": "chatml",
+        # Qwen, QwQ, DeepSeek: hanno tokenizer.chat_template built-in nel GGUF
+        # con supporto Jinja2 completo per tools, tool_calls e tool_responses.
+        # Usando None → llama-cpp-python usa il template nativo invece del
+        # formatter chatml che ignora tools.
+        "qwen": None,
+        "qwq": None,
+        "deepseek": None,
         "gemma": "gemma",
-        "deepseek": "chatml",
         "llama": "llama-2",
         "mistral": "llama-2",
         "mixtral": "llama-2",

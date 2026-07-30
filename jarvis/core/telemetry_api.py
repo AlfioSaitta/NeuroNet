@@ -73,7 +73,8 @@ def get_model_info_dict() -> dict:
         info["model_loaded"] = False
     try:
         from core.model_profiles import detect_model_family
-        family = detect_model_family(cfg_model_id)
+        from core.config import LLAMA_MODEL_PATH
+        family = detect_model_family(LLAMA_MODEL_PATH)
         info["detected_family"] = family.family if family else "unknown"
     except Exception:
         info["detected_family"] = "unknown"
