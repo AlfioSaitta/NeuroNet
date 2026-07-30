@@ -163,7 +163,9 @@ MERMAID_RULES = (
 
 CAVEMAN_GEMMA_SYSTEM_ADDENDUM = (
     "\n\n[RESPONSE RULES]\n"
-    "- No thinking tags, no XML tags.\n"
+    "- You CAN use tools. When the user asks you to DO something (read/write files, "
+    "run commands, search code), use <tool_call> XML. That is the ONLY XML tag you may use.\n"
+    "- No thinking tags, no Jarvis action XML tags (MEMORY, SCHEDULE, SSH, TODO, WEB, etc.).\n"
     "- Code changes: SEARCH/REPLACE blocks only.\n"
     "- Use Markdown formatting for readability: tables for comparisons/data, "
     "code blocks for code/config/schemas, bullet lists for multiple items, "
@@ -504,7 +506,8 @@ def _build_final_prompt(
             "Riepilogo: (2-3 bullet riassuntivi)\n"
             "Attenzione: (warnings/note, ometti se non serve)\n"
             "\n"
-            "- No thinking tags, no XML tags.\n"
+            "- No thinking tags, no Jarvis action XML tags (MEMORY, SCHEDULE, SSH, TODO, WEB, etc.).\n"
+            "- Use <tool_call> XML for tool calling when instructed — that is the ONLY allowed XML tag.\n"
             + MERMAID_RULES + "\n"
         )
         user_content = f"Context:\n{compressed}"
@@ -515,7 +518,16 @@ def _build_final_prompt(
         )
         user_content = compressed
 
-    messages.append({"role": "system", "content": system_prompt})
+    # ── Remove ALL existing system messages, insert new one at 0 ──
+    # _inject_datetime() inserted a datetime system message at index 0,
+    # but some chat templates (Qwen) REQUIRE system messages to be at
+    # the very beginning — appending a second system message after user
+    # content triggers "System message must be at the beginning."
+    # The new system_prompt already includes datetime info, so the old
+    # one is redundant.  Clean up ALL previous system messages and
+    # insert the new one at position 0 (BEFORE user).
+    messages[:] = [m for m in messages if m["role"] != "system"]
+    messages.insert(0, {"role": "system", "content": system_prompt})
     for m in reversed(messages):
         if m["role"] == "user":
             m["content"] = user_content
@@ -615,7 +627,9 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             user_content = compressed
             tracer.end_step("concise_pipeline", details={"comp_len": len(compressed)})
         system_prompt = f"[{_datetime_context()}]\n\n" + CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
-        messages.append({"role": "system", "content": system_prompt})
+        # Remove previous system messages, insert new one at index 0
+        messages[:] = [m for m in messages if m["role"] != "system"]
+        messages.insert(0, {"role": "system", "content": system_prompt})
         for m in reversed(messages):
             if m["role"] == "user":
                 m["content"] = user_content

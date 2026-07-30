@@ -39,8 +39,9 @@ THINKING_PATTERNS: list[tuple[str, str, str]] = [
     (r'<\|im_start\|>|<\|im_end\|>', "", "qwen"),
     # Qwen thinking: <|think|>...</think> or <|think|>...<|/think|>
     (r'(?s)<\|think\|>.*?(?:</?think>|<\|think\|>)\s*', "", "qwen"),
-    # Qwen tool_call tags
+    # Qwen tool_call tags (both legacy pipe and new XML formats)
     (r'(?s)<\|tool_call\|>.*?<\|tool_call\|>\s*', "", "qwen"),
+    (r'(?s)<tool_call\s*>.*?</tool_call\s*>\s*', "", "qwen"),
     
     # ── DeepSeek ──
     # DeepSeek: <|think|>...</end> or <|think|>...<|end|>
@@ -243,6 +244,9 @@ _register(TagDef("SUMMARY",      re.compile(r"<SUMMARY(.*?)</SUMMARY>", re.DOTAL
 _register(TagDef("BRANCH",       _tag_pattern("BRANCH"),        _handle_branch,       "action",  "Cambia branch git in un progetto"))
 _register(TagDef("COMMIT",       _tag_pattern("COMMIT"),        _handle_commit,       "action",  "Crea un commit git con i cambiamenti locali"))
 _register(TagDef("EXEC",         _tag_pattern("EXEC"),          _handle_exec,         "action",  "Esegue un comando shell readonly (whitelist)"))
+# Tool call tag — Qwen XML format: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+# Stripped from streaming output; tool call parsing done via parse_qwen_tool_calls().
+_register(TagDef("TOOL_CALL",    _tag_pattern("TOOL_CALL"),     None,                 "hidden",  "Tool call XML format (Qwen) — stripped from client output"))
 
 
 # ──────────────────────────────────────────────

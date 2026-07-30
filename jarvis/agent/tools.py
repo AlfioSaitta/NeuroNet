@@ -274,7 +274,18 @@ TOOLS_SCHEMA = [
 # ──────────────────────────────────────────────
 
 def resolve_path(rel_path: str) -> str:
-    """Risolve un percorso relativo al progetto in un percorso assoluto sicuro."""
+    """Risolve un percorso assoluto o relativo al progetto in un percorso sicuro.
+    
+    - Se rel_path è assoluto: verifica che sia un path valido esistente e lo restituisce.
+    - Se rel_path è relativo: unisce a DOC_DIR e verifica che non fuoriesca.
+    """
+    if os.path.isabs(rel_path):
+        safe_path = os.path.normpath(rel_path)
+        # Verifica che il path esista (previene path traversal arbitrari)
+        if not os.path.exists(safe_path):
+            raise ValueError(f"Path non trovato: {safe_path}")
+        return safe_path
+    # Path relativo: unisci a DOC_DIR
     safe_path = os.path.normpath(os.path.join(DOC_DIR, rel_path))
     if not safe_path.startswith(DOC_DIR):
         raise ValueError("Path escape attempt")
@@ -428,7 +439,7 @@ async def _tool_find_files(args, confirmation_mgr=None):
 async def _tool_list_directory(args, confirmation_mgr=None):
     rel_path = args.get("path", "")
     show_hidden = args.get("show_hidden", False)
-    max_depth = min(args.get("max_depth", 0), 2)
+    max_depth = min((args.get("max_depth") or 0), 2)
 
     target_dir = resolve_path(rel_path) if rel_path else DOC_DIR
     if not os.path.isdir(target_dir):
@@ -904,11 +915,31 @@ except ImportError:
 
 
 # ══════════════════════════════════════════════
+# GET_CURRENT_TIME TOOL
+# ══════════════════════════════════════════════
+
+async def _tool_get_current_time(args: dict, **kwargs) -> str:
+    """Restituisce data/ora corrente, opzionalmente in un fuso orario specifico."""
+    from datetime import datetime, UTC
+    tz_name = args.get("tz", "") if isinstance(args, dict) else ""
+    if tz_name:
+        try:
+            import zoneinfo
+            now = datetime.now(zoneinfo.ZoneInfo(tz_name))
+            return f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        except Exception:
+            pass
+    now = datetime.now(UTC)
+    return f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+
+
+# ══════════════════════════════════════════════
 # DISPATCH TABLE
 # ══════════════════════════════════════════════
 
 _HANDLERS = {
     "read_file": _tool_read_file,
+    "get_current_time": _tool_get_current_time,
     "read_file_range": _tool_read_file_range,
     "search_code": _tool_search_code,
     "find_files": _tool_find_files,

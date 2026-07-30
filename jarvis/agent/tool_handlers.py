@@ -28,7 +28,16 @@ except ImportError:
 # ══════════════════════════════════════════════
 
 def resolve_path(rel_path: str) -> str:
-    """Risolve un percorso relativo al progetto in un percorso assoluto sicuro."""
+    """Risolve un percorso assoluto o relativo al progetto in un percorso sicuro.
+    
+    - Se rel_path è assoluto: verifica che sia un path valido esistente e lo restituisce.
+    - Se rel_path è relativo: unisce a DOC_DIR e verifica che non fuoriesca.
+    """
+    if os.path.isabs(rel_path):
+        safe_path = os.path.normpath(rel_path)
+        if not os.path.exists(safe_path):
+            raise ValueError(f"Path non trovato: {safe_path}")
+        return safe_path
     safe_path = os.path.normpath(os.path.join(DOC_DIR, rel_path))
     if not safe_path.startswith(DOC_DIR):
         raise ValueError("Path escape attempt")
