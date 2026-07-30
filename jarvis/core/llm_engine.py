@@ -426,6 +426,104 @@ class LlamaEngine:
         logit_bias = opts.get("logit_bias") or {}
         
         openai_tools = self._normalize_tools(tools, model)
+        logger.info(f"⛏️ generate_chat: tools={'YES' if tools else 'NO'} openai_tools={'SET' if openai_tools else 'NONE'} tool_choice={opts.get('tool_choice', 'NOT_SET')!r} has_tool_role={any(isinstance(m, dict) and m.get('role') == 'tool' for m in messages)}")
+
+        # ── Tool calling: inject tool definitions into messages ──
+        # Qwen emette tool call in formato XML <tool_call>, non JSON.
+        # Quando passiamo `tools` a llama-cpp-python, formatta i tool in
+        # JSON grammar che CONFLITTA con l'XML nativo di Qwen — il modello
+        # smette di generare tool call e risponde solo in testo.
+        # Soluzione: iniettiamo le definizioni dei tool direttamente nei
+        # messaggi come testo (formato naturale per Qwen) e NON passiamo
+        # `tools` a llama-cpp-python.
+        # Usiamo _has_openai_tools per ricordare che tools erano presenti
+        # (serve alla logica di buffering nello streaming).
+        _has_openai_tools = bool(openai_tools)
+        tool_choice = opts.get("tool_choice")
+        if openai_tools and tool_choice != "none":
+            has_tool_role = any(isinstance(m, dict) and m.get("role") == "tool" for m in messages)
+            if not has_tool_role:
+                # Format tool definitions for XML-native models
+                # Per modelli piccoli: istruzioni brevi, esempio concreto, rinforzo alla fine.
+                _tools_text = "## Available Tools\n\n"
+                for t in openai_tools:
+                    func = t.get("function", t)
+                    _tools_text += json.dumps({
+                        "name": func.get("name", "unknown"),
+                        "description": func.get("description", ""),
+                        "parameters": func.get("parameters", {"type": "object", "properties": {}}),
+                    }, indent=2) + "\n\n"
+                # Mostra il PRIMO tool come esempio concreto
+                _first_tool_name = "tool_name"
+                _first_tool_args = '{"arg1": "value1"}'
+                for t in openai_tools:
+                    func = t.get("function", t)
+                    _first_tool_name = func.get("name", "tool_name")
+                    props = func.get("parameters", {}).get("properties", {})
+                    example_args = {}
+                    for pk in list(props.keys())[:2]:
+                        example_args[pk] = f"<{pk}_value>"
+                    if example_args:
+                        _first_tool_args = json.dumps(example_args)
+                    break
+                _tools_text += (
+                    "## Tool Calling Format\n\n"
+                    "To call a tool, output ONLY this XML (no other text):\n"
+                    "<tool_call>\n"
+                    f'{{"name": "{_first_tool_name}", "arguments": {_first_tool_args}}}\n'
+                    "</tool_call>\n\n"
+                    "Example: if the user asks about the current time, you would output:\n"
+                    '<tool_call>\n'
+                    '{"name": "get_current_time", "arguments": {"format": "full"}}\n'
+                    '</tool_call>\n'
+                    "Then STOP — wait for the tool result."
+                )
+
+                # For specific function forcing
+                _force_name = ""
+                if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+                    _force_name = tool_choice.get("function", {}).get("name", "")
+
+                modified_msgs = [dict(m) if isinstance(m, dict) else m for m in messages]
+                if _force_name:
+                    # specific tool: inject force instruction + temperature=0 + concrete example
+                    _force_example = _build_tool_example(_force_name, openai_tools)
+                    for i in range(len(modified_msgs) - 1, -1, -1):
+                        if modified_msgs[i].get("role") == "user":
+                            modified_msgs[i]["content"] = (
+                                _tools_text + "\n\n"
+                                + str(modified_msgs[i].get("content", ""))
+                                + f"\n\n[INSTRUCTION]\n"
+                                f"You MUST use the tool '{_force_name}' now.\n"
+                                f"Output ONLY this XML — no explanation, no text:\n"
+                                f"{_force_example}\n"
+                                f"[/INSTRUCTION]"
+                            )
+                            break
+                    temperature = 0.0
+                else:
+                    # auto: tool definitions + reinforcement at the END of user message
+                    _reinforcement = (
+                        "\n\n[INSTRUCTION]\n"
+                        "You have tools available. If the user's request matches a tool, "
+                        "output ONLY the <tool_call> XML. Otherwise respond normally.\n"
+                        "[/INSTRUCTION]"
+                    )
+                    for i in range(len(modified_msgs) - 1, -1, -1):
+                        if modified_msgs[i].get("role") == "user":
+                            modified_msgs[i]["content"] = (
+                                str(modified_msgs[i].get("content", ""))
+                                + "\n\n"
+                                + _tools_text
+                                + _reinforcement
+                            )
+                            break
+                messages = modified_msgs
+            # Never pass tools to llama-cpp-python — it breaks Qwen's XML format
+            openai_tools = None
+        elif tool_choice == "none":
+            _has_openai_tools = False
+            openai_tools = None
 
         # --- DELEGAZIONE EXTERNAL GPU — solo per main chat model ---
         if model == "chat" and EXTERNAL_GPU_URL:
@@ -518,6 +616,9 @@ class LlamaEngine:
                         except StopIteration:
                             return None
                     
+                    # ── Streaming live immediato (nessun buffer) ──
+                    # Strumenti/nessuno strumento: yield chunks immediatamente.
+                    # Il tool calling XML viene rilevato post-stream da main.py.
                     _stream_deadline = time.monotonic() + _STREAM_TOTAL_TIMEOUT
                     while True:
                         if time.monotonic() > _stream_deadline:
@@ -565,6 +666,18 @@ class LlamaEngine:
                         ),
                         timeout=300
                     )
+                    # ── Tool call parsing: Qwen emette tool call come XML in content
+                    #    anziché come tool_calls strutturati. Se abbiamo passato tools
+                    #    e la risposta contiene XML, lo convertiamo. ──
+                    if openai_tools and "error" not in response:
+                        choice = response.get("choices", [{}])[0]
+                        content = choice.get("message", {}).get("content", "") or ""
+                        if content and ("<tool_call" in content.lower() or "<|tool_call|>" in content):
+                            parsed = parse_qwen_tool_calls(content)
+                            if parsed:
+                                choice["message"]["tool_calls"] = parsed
+                                choice["message"]["content"] = None
+                                choice["finish_reason"] = "tool_calls"
                     return response
                 except asyncio.TimeoutError:
                     logger.error(f"LLM inference timed out after 300s (max_tokens={max_tokens})")
@@ -966,27 +1079,217 @@ def extract_tool_calls(response: dict) -> list:
         return []
 
 
-def parse_qwen_tool_calls(text: str) -> list[dict]:
+def _build_tool_example(tool_name: str, openai_tools: list) -> str:
     """
-    Parsa chiamate a funzione in formato nativo Qwen dal testo della risposta.
+    Costruisce un esempio XML concreto per un tool specifico,
+    usando i nomi dei parametri reali (primi 2 parametri).
+    """
+    for t in openai_tools:
+        func = t.get("function", t)
+        if func.get("name") == tool_name:
+            props = func.get("parameters", {}).get("properties", {})
+            example_args = {}
+            for pk in list(props.keys())[:2]:
+                example_args[pk] = f"<{pk}>"
+            if example_args:
+                args_json = json.dumps(example_args)
+            else:
+                args_json = '{}'
+            return (
+                '<tool_call>\n'
+                f'{{"name": "{tool_name}", "arguments": {args_json}}}\n'
+                '</tool_call>'
+            )
+    # Fallback generico
+    return (
+        '<tool_call>\n'
+        f'{{"name": "{tool_name}", "arguments": {{}}}}\n'
+        '</tool_call>'
+    )
+
+
+def _recover_malformed_json_tool_call(inner: str) -> dict | None:
+    """
+    Recupera tool call da JSON malformato dove il modello omette la chiave "arguments".
     
-    La Qwen con chat_format=None emette i tool call come testo invece di
-    usarli nel campo strutturato tool_calls della API. Questa funzione
-    rileva il pattern <|tool_call|>...<|tool_call|> e lo converte in
-    formato tool_call standard.
+    Casi gestiti:
+    1. {"name": "x", {"command": "ls"}}          — unnamed nested object
+    2. {"name": "x", {"arguments": {"cmd": "ls"}}} — arguments nested inside unnamed object
+    3. {"name": "x", "key": "val"}                — args flattened at top level
+    4. {"name": "x", "arguments": {"cmd": "ls"}}  — valid JSON (falls through to json.loads)
     
-    IMPORTANTE: Se il chat_format è configurato correttamente (es. "chatml"),
-    llama-cpp-python gestisce tool_calls strutturati automaticamente e
-    questo fallback non serve. Attivato solo per modelli raw (chat_format=None).
+    Usa regex multilivello per estrarre nome e argomenti.
+    """
+    # Estrai "name": "..." o 'name': '...'
+    name_match = re.search(r'"name"\s*:\s*"([^"]+)"', inner)
+    if not name_match:
+        name_match = re.search(r"'name'\s*:\s*'([^']+)'", inner)
+    if not name_match:
+        return None
+    fn_name = name_match.group(1)
     
-    Formati supportati:
-      <|tool_call|>call:function_name{param:"value"}<|tool_call|>
-      <|tool_call|>{"name":"fn","arguments":{...}}<|tool_call|>
-      <|tool_call|>call:function(param="value")<|tool_call|>
+    # Cerca oggetti JSON annidati a vari livelli di profondita
+    args = {}
+    
+    # Pattern multilivello: trova oggetti JSON con fino a 2 livelli di nidificazione
+    for obj_match in re.finditer(
+        r'\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}',
+        inner
+    ):
+        obj_str = obj_match.group(0)
+        # Salta l'oggetto che contiene il nome del tool (e' l'outer)
+        if '"name"' in obj_str:
+            continue
+        
+        try:
+            parsed_obj = json.loads(obj_str)
+            if isinstance(parsed_obj, dict):
+                # Se il nested object ha una chiave "arguments", estrai da li
+                if "arguments" in parsed_obj and isinstance(parsed_obj["arguments"], dict):
+                    args = dict(parsed_obj["arguments"])
+                else:
+                    # Altrimenti prendi tutto come args
+                    args = dict(parsed_obj)
+        except (json.JSONDecodeError, TypeError):
+            # Se JSON fallisce, prova regex key:value
+            for kv in re.finditer(r'"(\w+)"\s*:\s*"([^"]*?)"', obj_str):
+                args[kv.group(1)] = kv.group(2)
+    
+    if not args:
+        return None
+    
+    return {"name": fn_name, "arguments": json.dumps(args)}
+
+
+def _parse_qwen_xml_tool_call(text: str) -> list[dict]:
+    """
+    Parsa tool call in formato XML nativo Qwen3.5:
+      <tool_call>
+      <function=NOME>
+      <parameter=KEY>
+      VALUE
+      </parameter>
+      </function>
+      </tool_call>
+    
+    Supporta anche varianti:
+      <tool_call><function name="NOME"><parameter name="KEY">VALUE</parameter></function></tool_call>
+      <tool_call><function=NOME><parameter=KEY>VALUE</parameter></function></tool_call>
+      <tool_call>{JSON}</tool_call>
     """
     if not text:
         return []
     
+    tool_calls = []
+    
+    # Pattern flessibile: cattura blocchi <tool_call>...</tool_call>
+    # (self-closing compresi)
+    xml_pattern = re.compile(
+        r'<tool_call[^>]*>(.*?)</tool_call\s*>',
+        re.DOTALL | re.IGNORECASE
+    )
+    
+    for match in xml_pattern.finditer(text):
+        inner = match.group(1).strip()
+        if not inner:
+            continue
+        
+        # Se l'interno È JSON, parsalo direttamente
+        if inner.startswith("{") and inner.endswith("}"):
+            try:
+                parsed = json.loads(inner)
+                fn_name = parsed.get("name", parsed.get("function", ""))
+                fn_args = parsed.get("arguments", {})
+                if isinstance(fn_args, str):
+                    try:
+                        fn_args = json.loads(fn_args)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                # Se manca "arguments", prendi TUTTO ciò che non è "name"/"function" come args
+                if not fn_args and fn_name:
+                    fn_args = {k: v for k, v in parsed.items()
+                               if k not in ("name", "function", "type")}
+                tool_calls.append({
+                    "id": f"call_{len(tool_calls)}",
+                    "type": "function",
+                    "function": {"name": fn_name, "arguments": json.dumps(fn_args)},
+                })
+            except (json.JSONDecodeError, TypeError):
+                # JSON malformato (es. {"name": "x", {"key": "val"}} senza chiave per il secondo oggetto).
+                # Tenta recovery via regex: estrai name + primo oggetto annidato
+                _recovered = _recover_malformed_json_tool_call(inner)
+                if _recovered:
+                    tool_calls.append({
+                        "id": f"call_{len(tool_calls)}",
+                        "type": "function",
+                        "function": _recovered,
+                    })
+            continue
+        
+        # Estrai nome funzione da <function=VALUE>, <function name="VALUE">, <function = VALUE >
+        fn_name = ""
+        fn_tag = re.search(r'<function\s+name\s*=\s*["\']?([^>"\'\s]+)["\']?\s*/?\s*>', inner, re.IGNORECASE)
+        if fn_tag:
+            fn_name = fn_tag.group(1).strip()
+        else:
+            # <function=VALUE> o <function = VALUE >
+            fn_tag = re.search(r'<function\s*=\s*["\']?([^>"\'\s]+)["\']?\s*/?\s*>', inner, re.IGNORECASE)
+            if fn_tag:
+                fn_name = fn_tag.group(1).strip()
+            else:
+                # <function>VALUE</function>
+                fn_tag = re.search(r'<function[^>]*>\s*(.+?)\s*</function\s*>', inner, re.IGNORECASE)
+                if fn_tag:
+                    fn_name = fn_tag.group(1).strip()
+        if not fn_name:
+            continue
+        
+        # Estrai parametri: <parameter=KEY>VALUE</parameter> o <parameter name="KEY">VALUE</parameter>
+        args = {}
+        for pmatch in re.finditer(
+            r'<parameter\s+(?:name\s*=\s*)?["\']?([^>"\'\s]+)["\']?\s*>(.*?)</parameter\s*>',
+            inner, re.DOTALL | re.IGNORECASE
+        ):
+            key = pmatch.group(1).strip()
+            val = pmatch.group(2).strip()
+            if key and val:
+                args[key] = val
+        
+        if not args:
+            # <parameter=KEY>VALUE</parameter> (con = subito dopo parameter)
+            for pmatch in re.finditer(
+                r'<parameter\s*=\s*["\']?([^>"\'\s]+)["\']?\s*>\s*\n?\s*(.*?)\s*\n?\s*</parameter\s*>',
+                inner, re.DOTALL | re.IGNORECASE
+            ):
+                key = pmatch.group(1).strip()
+                val = pmatch.group(2).strip()
+                if key and val:
+                    args[key] = val
+        
+        # Fallback: <KEY>VALUE</KEY> per qualsiasi tag non-function
+        if not args:
+            for pmatch in re.finditer(
+                r'<(\w+)>\s*(.+?)\s*</\1\s*>',
+                inner, re.DOTALL | re.IGNORECASE
+            ):
+                key = pmatch.group(1).strip()
+                val = pmatch.group(2).strip()
+                if key.lower() != "function" and key and val:
+                    args[key] = val
+        
+        tool_calls.append({
+            "id": f"call_{len(tool_calls)}",
+            "type": "function",
+            "function": {"name": fn_name, "arguments": json.dumps(args)},
+        })
+    
+    return tool_calls
+
+
+def _parse_qwen_pipe_tool_calls(text: str) -> list[dict]:
+    """
+    Parsa formato <|tool_call|>...<|tool_call|> (con pipe, legacy).
+    """
     pattern = re.compile(
         r'<\|tool_call\|>(.*?)<\|tool_call\|>',
         re.DOTALL | re.IGNORECASE
@@ -996,7 +1299,6 @@ def parse_qwen_tool_calls(text: str) -> list[dict]:
     for match in pattern.finditer(text):
         raw = match.group(1).strip()
         try:
-            # Prova prima JSON format: {"name":"fn","arguments":{...}}
             if raw.startswith("{"):
                 parsed = json.loads(raw)
                 tc = {
@@ -1010,10 +1312,8 @@ def parse_qwen_tool_calls(text: str) -> list[dict]:
                 tool_calls.append(tc)
                 continue
             
-            # Formato call:function_name{...} o call:function_name(...)
             if raw.startswith("call:"):
                 fn_part = raw[5:].strip()
-                # Estrai nome funzione (fino a primo { o ()
                 paren_idx = -1
                 brace_idx = -1
                 if "(" in fn_part:
@@ -1025,43 +1325,69 @@ def parse_qwen_tool_calls(text: str) -> list[dict]:
                     [i for i in (paren_idx, brace_idx) if i >= 0],
                     default=len(fn_part)
                 )
-                
                 fn_name = fn_part[:split_idx].strip()
-                
-                # Estrai argomenti se presenti
                 args = {}
                 if paren_idx >= 0:
                     args_str = fn_part[paren_idx+1:fn_part.rindex(")")] if ")" in fn_part else fn_part[paren_idx+1:]
-                    # Parsa key=value o key="value"
                     for arg in args_str.split(","):
                         if "=" in arg:
                             k, v = arg.split("=", 1)
                             args[k.strip()] = v.strip().strip('"\'')
                 elif brace_idx >= 0:
                     args_str = fn_part[brace_idx+1:fn_part.rindex("}")] if "}" in fn_part else fn_part[brace_idx+1:]
-                    # Prova JSON parse
                     try:
                         args = json.loads("{" + args_str + "}")
                     except json.JSONDecodeError:
-                        # Fallback: key:value parsing
                         for arg in args_str.split(","):
                             if ":" in arg:
                                 k, v = arg.split(":", 1)
                                 args[k.strip().strip('"\'')] = v.strip().strip('"\'')
                 
-                tc = {
+                tool_calls.append({
                     "id": f"call_{len(tool_calls)}",
                     "type": "function",
-                    "function": {
-                        "name": fn_name,
-                        "arguments": json.dumps(args)
-                    }
-                }
-                tool_calls.append(tc)
+                    "function": {"name": fn_name, "arguments": json.dumps(args)}
+                })
         except Exception:
             continue
     
     return tool_calls
+
+
+def parse_qwen_tool_calls(text: str) -> list[dict]:
+    """
+    Parsa tool call da testo risposta Qwen in QUALSIASI formato.
+    
+    Prova in ordine:
+      1. Formato XML <tool_call> (nuovo Qwen3.5)
+      2. Formato <|tool_call|> (legacy Qwen2.5)
+    
+    Returns:
+      Lista di dict in formato OpenAI tool_calls, o [] se non trovato.
+    """
+    if not text:
+        return []
+    
+    # 1. Prova formato XML <tool_call>...</tool_call>
+    result = _parse_qwen_xml_tool_call(text)
+    if result:
+        return result
+    
+    # 2. Fallback: formato <|tool_call|>...<|tool_call|>
+    result = _parse_qwen_pipe_tool_calls(text)
+    if result:
+        return result
+    
+    # 3. Prova regex generica: <TOOL_CALL> o <tool_call> in qualsiasi variante
+    generic = re.findall(
+        r'<tool_call[^>]*>.*?</tool_call\s*>',
+        text, re.DOTALL | re.IGNORECASE
+    )
+    if generic:
+        # Già coperto da _parse_qwen_xml_tool_call, ma per sicurezza
+        return _parse_qwen_xml_tool_call(text)
+    
+    return []
 
 
 # Inizializziamo l'istanza globale
