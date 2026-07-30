@@ -306,6 +306,54 @@ from admin.panel import setup_admin_panel
 setup_admin_panel(app)
 
 
+# ── T1+T2 Helper: Ricostruisce tool_calls da chunk streaming ──────────
+def _reconstruct_tool_calls(stream_chunks):
+    """Reconstruct complete tool_calls list from OpenAI streaming delta chunks.
+
+    Nel formato streaming, tool_calls arrivano come delta incrementali su
+    piú chunk. Ogni chunk ha 'delta.tool_calls' con un array di oggetti
+    ciascuno con un campo 'index'. Gli arguments di funzione sono frammentati
+    e vanno concatenati per index.
+
+    Returns:
+        List[dict]: Lista completa di tool_calls (id, type, function.name, function.arguments),
+                    pronta per essere inserita in assistant message.
+    """
+    by_index = {}
+    for chunk in stream_chunks:
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+        delta = choices[0].get("delta", {})
+        tc_list = delta.get("tool_calls", [])
+        if not tc_list:
+            # Fallback: tool_calls a livello choices (alcuni provider)
+            tc_list = choices[0].get("tool_calls", [])
+        for tc in tc_list:
+            idx = tc.get("index", 0)
+            if idx not in by_index:
+                by_index[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+            func = tc.get("function", {})
+            if func.get("name"):
+                by_index[idx]["function"]["name"] = func["name"]
+            if func.get("arguments"):
+                by_index[idx]["function"]["arguments"] += func["arguments"]
+            if tc.get("id"):
+                by_index[idx]["id"] = tc["id"]
+
+    result = []
+    for idx in sorted(by_index.keys()):
+        tc = by_index[idx]
+        if not tc["id"]:
+            tc["id"] = f"call_{uuid.uuid4().hex[:12]}"
+        result.append({
+            "id": tc["id"],
+            "type": tc["type"],
+            "function": dict(tc["function"])
+        })
+    return result
+
+
 # ==============================================================================
 # ENDPOINTS
 # ==============================================================================
@@ -600,6 +648,10 @@ async def chat(payload: ChatRequest, request: Request):
     raw_messages = body.get("messages", [])
     
     options = body.get("options") or {}
+    # Propaga tool_choice dal body alle options per generate_chat
+    if "tool_choice" in body:
+        options["tool_choice"] = body["tool_choice"]
+        body["options"] = options  # BAIT: body.get("options") era {} nuovo, rilega a body
     
     # Bypass per Mem0 internal queries o per Worker Offloading (skip_rag)
     is_internal = False
@@ -709,6 +761,8 @@ async def chat(payload: ChatRequest, request: Request):
         if tracer:
             tracer.start_step("gemma_generation")
         try:
+            _opts_debug = body.get("options", {})
+            logger.info(f"🔧 Calling generate_chat: tools={'set' if body.get('tools') else None} options_keys={list(_opts_debug.keys())} tool_choice={_opts_debug.get('tool_choice')!r}")
             response = await asyncio.wait_for(
                 engine.generate_chat_with_router(
                     body["messages"], tools=body.get("tools"), options=body.get("options"),
@@ -768,22 +822,54 @@ async def chat(payload: ChatRequest, request: Request):
         }
         
         # Gestione Agentica per intercettare i tools non stream (iterazione)
+        # Since we don't pass tools to llama-cpp-python (Qwen XML format conflict),
+        # the model emits tool calls as XML in content. Parse them here.
         tool_calls = choice["message"].get("tool_calls", [])
+        if not tool_calls:
+            _raw_content = choice["message"].get("content", "")
+            if _raw_content:
+                try:
+                    from core.llm_engine import parse_qwen_tool_calls
+                    import re as _re
+                    tool_calls = parse_qwen_tool_calls(_raw_content)
+                    if tool_calls:
+                        # Strip raw XML from content before passing to tool loop
+                        choice["message"]["content"] = _re.sub(
+                            r'<tool_call[^>]*>.*?</tool_call\s*>\s*', '',
+                            _raw_content, flags=_re.DOTALL
+                        ).strip()
+                except ImportError:
+                    pass
         if tool_calls:
             # Lazy init: confirmation_mgr solo se servono tool calls
             if confirmation_mgr is None:
                 confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
             body["messages"].append(choice["message"])
-            for tc in tool_calls:
+            
+            # T1+T2: Esecuzione tool IN PARALLELO (asyncio.gather)
+            # Invece di for-sequenziale, eseguiamo tutti i tool contemporaneamente.
+            # Il contenuto della prima risposta LLM è già preservato in
+            # body["messages"] (linea sopra), quindi la seconda chiamata LLM
+            # vede cosa il modello ha già "detto" e continua naturalmente.
+            _first_content = choice["message"].get("content", "")
+            
+            async def _exec_one_tool(tc):
+                _tool_name = tc.get("function", {}).get("name", "unknown")
                 if tracer:
                     tracer.start_step("tool_execution")
-                tool_res = await execute_tool_call(tc, confirmation_mgr=confirmation_mgr)
-                body["messages"].append({"role": "tool", "content": tool_res, "name": tc.get("function", {}).get("name", "unknown")})
+                _res = await execute_tool_call(tc, confirmation_mgr=confirmation_mgr)
                 if tracer:
-                    tracer.end_step("tool_execution", details={"tool": tc.get("function", {}).get("name", "unknown")})
+                    tracer.end_step("tool_execution", details={"tool": _tool_name})
                     tracer.increment_tool_calls()
+                return {"role": "tool", "content": _res, "name": _tool_name}
+            
+            _tool_msgs = await asyncio.gather(*[_exec_one_tool(tc) for tc in tool_calls])
+            body["messages"].extend(_tool_msgs)
             
             # Ricorsione simulata per far generare la risposta finale dopo il tool
+            # Rimuovi tool_choice forzato per non interferire con la risposta finale
+            if isinstance(body.get("options"), dict):
+                body["options"].pop("tool_choice", None)
             if tracer:
                 tracer.start_step("gemma_generation_tool_final")
             response = await engine.generate_chat_with_router(
@@ -793,6 +879,12 @@ async def chat(payload: ChatRequest, request: Request):
             final_choice = response["choices"][0]
             chat_resp["choices"] = [final_choice]
             chat_resp["usage"] = response.get("usage", {})
+            # T2: Se il primo contenuto era significativo e il finale non lo include,
+            # prependiamolo per non perdere la continuità del discorso.
+            _first_content = _first_content.strip() if _first_content else ""
+            _final_content = final_choice["message"].get("content", "").strip() if final_choice["message"].get("content") else ""
+            if _first_content and _final_content and _first_content not in _final_content:
+                final_choice["message"]["content"] = _first_content + "\n\n" + _final_content
             if tracer:
                 tracer.set_llm_response(final_choice["message"].get("content", ""))
                 usage2 = response.get("usage", {})
@@ -853,6 +945,7 @@ async def chat(payload: ChatRequest, request: Request):
     else:
         # Streaming
         async def stream_gen():
+            nonlocal confirmation_mgr
             if tracer:
                 tracer.start_step("gemma_generation_stream")
             _stream_start = time.monotonic()
@@ -869,34 +962,276 @@ async def chat(payload: ChatRequest, request: Request):
             # tag (<think>...</think>) in HTML <details> per UI esterne
             parsed_stream = genera_stream_agente(gen, MODEL_PROFILE)
 
+            # ── T1+T2: Streaming loop con tool-calling support ──
+            # T2: Primo contenuto (se c'è) viene inviato subito al client,
+            # prima che i tool vengano eseguiti. Questo riduce l'attesa percepita
+            # da ~8s (doppia generazione completa) a ~1-3s (prima risposta visibile).
+            # T1: Tutti i tool vengono eseguiti IN PARALLELO (asyncio.gather).
             full_chunks = []
             _role_sent_in_stream = False
+            tool_calls_stream_acc = []  # chunks con delta.tool_calls
+            tool_calls_detected = False
+            # Stateful XML buffer for fragmented <tool_call> across tiny chunks (1-3 chars)
+            _xml_buf = None       # None = not buffering, str = accumulating XML
+            _delay_buf = []       # 3-chunk lookahead buffer to detect fragmented XML
+
             async for chunk in parsed_stream:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
                     delta = chunk["choices"][0].get("delta", {})
                     content = delta.get("content", "")
+                    finish_reason = chunk["choices"][0].get("finish_reason")
+
+                    # T1: Raccogli tool_calls dai chunk streaming
+                    tc_delta = delta.get("tool_calls")
+                    if tc_delta:
+                        tool_calls_stream_acc.append(chunk)
+                        tool_calls_detected = True
+
                     # Misura TTFT al primo chunk con contenuto
                     if not _first_token_recorded and content:
                         _first_token_recorded = True
                         if tracer:
                             tracer._ttft_ms = (time.monotonic() - _stream_start) * 1000
-                    full_chunks.append(content)
 
-                    delta_payload = {"role": "assistant", "content": content} if not _role_sent_in_stream else {"content": content}
+                    # T2: Se finish_reason=tool_calls, interrompiamo il primo stream
+                    # (il contenuto finora raccolto è già stato inviato al client)
+                    if finish_reason == "tool_calls":
+                        tool_calls_detected = True
+                        if not tc_delta:
+                            tool_calls_stream_acc.append(chunk)
+                        break
+
+                    if content:
+                        full_chunks.append(content)
+
+                        # ── Stateful XML tool-call buffer ──
+                        # Qwen emits <tool_call>...JSON...</tool_call> across tiny streaming
+                        # chunks (1-3 chars). A per-chunk regex can't match fragmented XML.
+                        # Instead: 3-chunk lookahead detects <tool_call start, then we enter
+                        # buffering mode. When </tool_call> arrives, we strip XML and yield
+                        # the cleaned text. False alarms >200 chars are flushed back.
+                        import re as _re_strip
+
+                        if _xml_buf is not None:
+                            # ── XML BUFFERING MODE: accumulate, don't yield ──
+                            _xml_buf += content
+                            if "</tool_call>" in _xml_buf:
+                                # Complete XML block — strip and flush cleaned text
+                                _clean = _re_strip.sub(
+                                    r'<tool_call[^>]*>.*?</tool_call\s*>\s*',
+                                    '', _xml_buf, flags=_re_strip.DOTALL
+                                ).strip()
+                                _xml_buf = None
+                                if _clean:
+                                    _stream_content = _clean
+                                    delta_payload = {"role": "assistant", "content": _stream_content} if not _role_sent_in_stream else {"content": _stream_content}
+                                    _role_sent_in_stream = True
+                                    openai_chunk = {
+                                        "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                                        "object": "chat.completion.chunk",
+                                        "created": int(time.time()),
+                                        "model": MODEL_ID,
+                                        "conversation_id": str(conversation_id),
+                                        "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}]
+                                    }
+                                    yield json.dumps(openai_chunk).encode() + b"\n"
+                            elif len(_xml_buf) > 200:
+                                # False alarm — flush and resume normal mode
+                                if _xml_buf.strip():
+                                    logger.info(f"🌀 XML buffer false alarm ({len(_xml_buf)} chars), flushing")
+                                    _stream_content = _xml_buf.strip()
+                                    delta_payload = {"role": "assistant", "content": _stream_content} if not _role_sent_in_stream else {"content": _stream_content}
+                                    _role_sent_in_stream = True
+                                    openai_chunk = {
+                                        "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                                        "object": "chat.completion.chunk",
+                                        "created": int(time.time()),
+                                        "model": MODEL_ID,
+                                        "conversation_id": str(conversation_id),
+                                        "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}]
+                                    }
+                                    yield json.dumps(openai_chunk).encode() + b"\n"
+                                _xml_buf = None
+                            continue  # don't yield while buffering
+
+                        # ── NORMAL MODE: 3-chunk lookahead for XML detection ──
+                        _delay_buf.append(content)
+                        _recent_text = "".join(_delay_buf)
+
+                        if "<tool_call" in _recent_text:
+                            # Detected XML start in lookahead buffer
+                            _idx = _recent_text.find("<tool_call")
+                            _pre_xml = _recent_text[:_idx]
+                            if _pre_xml.strip():
+                                # Yield any text that appeared BEFORE the XML tag
+                                _stream_content = _pre_xml.strip()
+                                delta_payload = {"role": "assistant", "content": _stream_content} if not _role_sent_in_stream else {"content": _stream_content}
+                                _role_sent_in_stream = True
+                                openai_chunk = {
+                                    "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": MODEL_ID,
+                                    "conversation_id": str(conversation_id),
+                                    "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}]
+                                }
+                                yield json.dumps(openai_chunk).encode() + b"\n"
+                            if "</tool_call>" in _recent_text:
+                                # Complete XML in lookahead buffer — strip and yield text after
+                                _after_xml = _re_strip.sub(
+                                    r'<tool_call[^>]*>.*?</tool_call\s*>\s*',
+                                    '', _recent_text[_idx:], flags=_re_strip.DOTALL
+                                ).strip()
+                                _delay_buf = []
+                                if _after_xml:
+                                    _stream_content = _after_xml
+                                    delta_payload = {"role": "assistant", "content": _stream_content} if not _role_sent_in_stream else {"content": _stream_content}
+                                    _role_sent_in_stream = True
+                                    openai_chunk = {
+                                        "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                                        "object": "chat.completion.chunk",
+                                        "created": int(time.time()),
+                                        "model": MODEL_ID,
+                                        "conversation_id": str(conversation_id),
+                                        "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}]
+                                    }
+                                    yield json.dumps(openai_chunk).encode() + b"\n"
+                                continue
+                            # Incomplete XML — enter buffering mode
+                            _xml_buf = _recent_text[_idx:]
+                            _delay_buf = []
+                            continue
+
+                        # ── YIELD OLDEST CHUNK FROM DELAY BUFFER ──
+                        if len(_delay_buf) >= 3:
+                            _to_yield = _delay_buf.pop(0)
+                            # Also apply regex for non-fragmented cases
+                            _clean_content = _re_strip.sub(
+                                r'<tool_call[^>]*>.*?</tool_call\s*>\s*',
+                                '', _to_yield, flags=_re_strip.DOTALL
+                            ).strip()
+                            if _clean_content:
+                                _stream_content = _clean_content
+                                delta_payload = {"role": "assistant", "content": _stream_content} if not _role_sent_in_stream else {"content": _stream_content}
+                                _role_sent_in_stream = True
+                                openai_chunk = {
+                                    "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": MODEL_ID,
+                                    "conversation_id": str(conversation_id),
+                                    "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}]
+                                }
+                                yield json.dumps(openai_chunk).encode() + b"\n"
+
+            # ── Flush delay buffer (any content left after loop break) ──
+            import re as _re_flush
+            for _remaining in _delay_buf:
+                _clean_rem = _re_flush.sub(
+                    r'<tool_call[^>]*>.*?</tool_call\s*>\s*', '',
+                    _remaining, flags=_re_flush.DOTALL
+                ).strip()
+                if _clean_rem:
+                    delta_payload = {"role": "assistant", "content": _clean_rem} if not _role_sent_in_stream else {"content": _clean_rem}
                     _role_sent_in_stream = True
-                    openai_chunk = {
+                    yield json.dumps({
                         "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": MODEL_ID,
-                        "conversation_id": str(conversation_id),
-                        "choices": [{
-                            "index": 0,
-                            "delta": delta_payload,
-                            "finish_reason": None
-                        }]
-                    }
-                    yield json.dumps(openai_chunk).encode() + b"\n"
+                        "object": "chat.completion.chunk", "created": int(time.time()),
+                        "model": MODEL_ID, "conversation_id": str(conversation_id),
+                        "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}]
+                    }).encode() + b"\n"
+
+            # ── T1+T2: Tool-calling handling ──
+            # Since we don't pass tools to llama-cpp-python (Qwen XML format conflict),
+            # the model emits tool calls as XML in content. Also check here.
+            _xml_tools_from_content = None
+            if not tool_calls_detected:
+                _full_text_tc = "".join(full_chunks)
+                if _full_text_tc:
+                    try:
+                        from core.llm_engine import parse_qwen_tool_calls
+                        _xml_tools_from_content = parse_qwen_tool_calls(_full_text_tc)
+                        if _xml_tools_from_content:
+                            tool_calls_detected = True
+                    except ImportError:
+                        pass
+            
+            if tool_calls_detected:
+                if _xml_tools_from_content:
+                    tool_calls = _xml_tools_from_content
+                else:
+                    tool_calls = _reconstruct_tool_calls(tool_calls_stream_acc)
+                first_text = "".join(full_chunks)
+                # Strip raw XML from first_text for the assistant message content
+                if _xml_tools_from_content:
+                    import re as _re
+                    first_text = _re.sub(
+                        r'<tool_call[^>]*>.*?</tool_call\s*>\s*', '',
+                        first_text, flags=_re.DOTALL
+                    ).strip()
+
+                # Costruisce assistant message con contenuto catturato + tool_calls
+                # Il contenuto della prima risposta è preservato, quindi la seconda
+                # chiamata LLM sa cosa il modello ha già "detto".
+                assistant_msg = {"role": "assistant", "content": first_text}
+                if tool_calls:
+                    assistant_msg["tool_calls"] = tool_calls
+                body["messages"].append(assistant_msg)
+
+                # T1: Esecuzione tool IN PARALLELO
+                if confirmation_mgr is None:
+                    confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
+
+                async def _exec_one_tool(tc):
+                    _res = await execute_tool_call(tc, confirmation_mgr=confirmation_mgr)
+                    _tname = tc.get("function", {}).get("name", "unknown")
+                    if tracer:
+                        tracer.increment_tool_calls()
+                    return {"role": "tool", "content": _res, "name": _tname}
+
+                tool_msgs = await asyncio.gather(*[_exec_one_tool(tc) for tc in tool_calls])
+                body["messages"].extend(tool_msgs)
+
+                # Rimuovi tool_choice forzato per non interferire con la risposta finale
+                if isinstance(body.get("options"), dict):
+                    body["options"].pop("tool_choice", None)
+
+                # Seconda chiamata LLM in streaming (continuazione dopo tool)
+                if tracer:
+                    tracer.start_step("gemma_generation_stream_tool_final")
+                gen2 = await engine.generate_chat_with_router(
+                    body["messages"], tools=body.get("tools"), options=body.get("options"),
+                    stream=True, preferred_provider=provider
+                )
+
+                if not (isinstance(gen2, dict) and "error" in gen2):
+                    parsed_stream2 = genera_stream_agente(gen2, MODEL_PROFILE)
+                    async for chunk in parsed_stream2:
+                        if "choices" in chunk and len(chunk["choices"]) > 0:
+                            delta2 = chunk["choices"][0].get("delta", {})
+                            content2 = delta2.get("content", "")
+                            if content2:
+                                full_chunks.append(content2)
+                                t2_payload = {"content": content2} if _role_sent_in_stream else {"role": "assistant", "content": content2}
+                                _role_sent_in_stream = True
+                                t2_chunk = {
+                                    "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": MODEL_ID,
+                                    "conversation_id": str(conversation_id),
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": t2_payload,
+                                        "finish_reason": None
+                                    }]
+                                }
+                                yield json.dumps(t2_chunk).encode() + b"\n"
+
+                    if tracer:
+                        tracer.end_step("gemma_generation_stream_tool_final")
+                elif tracer:
+                    tracer.end_step("gemma_generation_stream_tool_final", details={"error": gen2.get("error", "unknown")})
 
             full_text = "".join(full_chunks)
 

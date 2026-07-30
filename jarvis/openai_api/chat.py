@@ -19,6 +19,39 @@ from agent.classifier import is_internal_query
 from .models import ChatCompletionRequestOpenAI
 import core.state as state
 
+# ── T1+T2 Helper: Ricostruisce tool_calls da chunk streaming ──────────
+def _reconstruct_tool_calls(stream_chunks):
+    """Reconstruct complete tool_calls list from OpenAI streaming delta chunks.
+    Raggruppa per index e concatena function.arguments frammentati."""
+    by_index = {}
+    for chunk in stream_chunks:
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+        delta = choices[0].get("delta", {})
+        tc_list = delta.get("tool_calls", [])
+        if not tc_list:
+            tc_list = choices[0].get("tool_calls", [])
+        for tc in tc_list:
+            idx = tc.get("index", 0)
+            if idx not in by_index:
+                by_index[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+            func = tc.get("function", {})
+            if func.get("name"):
+                by_index[idx]["function"]["name"] = func["name"]
+            if func.get("arguments"):
+                by_index[idx]["function"]["arguments"] += func["arguments"]
+            if tc.get("id"):
+                by_index[idx]["id"] = tc["id"]
+    result = []
+    for idx in sorted(by_index.keys()):
+        tc = by_index[idx]
+        if not tc["id"]:
+            tc["id"] = f"call_{uuid.uuid4().hex[:12]}"
+        result.append({"id": tc["id"], "type": tc["type"], "function": dict(tc["function"])})
+    return result
+
+
 router = APIRouter()
 
 
@@ -126,6 +159,9 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                         break
 
     tools = body.get("tools")
+    # Propaga tool_choice alle options per forzatura Qwen XML tool call
+    if tool_choice is not None:
+        options["tool_choice"] = tool_choice
     if not is_stream:
         response = await engine.generate_chat_with_router(
             enriched, tools=tools, options=options, stream=False,
@@ -139,18 +175,33 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
         choice = response["choices"][0]["message"]
 
-        # ── Tool calling loop (non-stream) ──
+        # ── Tool calling loop (non-stream) — T1: parallel execution ──
+        # Since we don't pass tools to llama-cpp-python (Qwen XML format conflict),
+        # the model emits tool calls as XML in content. Parse them here.
         tool_calls = choice.get("tool_calls", [])
+        if not tool_calls:
+            _raw_c = choice.get("content", "")
+            if _raw_c:
+                from core.llm_engine import parse_qwen_tool_calls
+                import re as _re
+                tool_calls = parse_qwen_tool_calls(_raw_c)
+                if tool_calls:
+                    choice["content"] = _re.sub(
+                        r'<tool_call[^>]*>.*?</tool_call\s*>\s*', '',
+                        _raw_c, flags=_re.DOTALL
+                    ).strip()
         if tool_calls:
             if confirmation_mgr is None:
                 confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
             enriched.append(dict(choice))
-            for tc in tool_calls:
-                tool_res = await execute_tool_call(tc, confirmation_mgr=confirmation_mgr)
-                enriched.append({
-                    "role": "tool", "content": tool_res,
-                    "name": tc.get("function", {}).get("name", "unknown")
-                })
+            # T1: Esecuzione tool IN PARALLELO (asyncio.gather) invece di for-sequenziale
+            async def _exec_one_tool(tc):
+                _res = await execute_tool_call(tc, confirmation_mgr=confirmation_mgr)
+                return {"role": "tool", "content": _res, "name": tc.get("function", {}).get("name", "unknown")}
+            _tool_msgs = await asyncio.gather(*[_exec_one_tool(tc) for tc in tool_calls])
+            enriched.extend(_tool_msgs)
+            # Rimuovi tool_choice forzato per non interferire con risposta finale
+            options.pop("tool_choice", None)
             response = await engine.generate_chat_with_router(
                 enriched, tools=tools, options=options, stream=False,
                 grammar=grammar, preferred_provider=body.get("provider"),
@@ -208,6 +259,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
         }
     else:
         async def openai_stream_gen():
+            nonlocal confirmation_mgr
             gen = await engine.generate_chat_with_router(
                 enriched, tools=tools, options=options, stream=True,
                 grammar=grammar, preferred_provider=body.get("provider"),
@@ -219,29 +271,51 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
             response_created = int(datetime.now(UTC).timestamp())
 
+            # ── T1+T2: Streaming loop con tool-calling support ──
             safe_stream = TagSafeStream(model_family=MODEL_PROFILE.family)
             full_chunks = []
             role_sent = False
+            tool_calls_stream_acc = []
+            tool_calls_detected = False
+
             async for chunk in gen:
                 if "choices" in chunk and len(chunk["choices"]) > 0:
                     delta = chunk["choices"][0].get("delta", {})
                     content = delta.get("content", "")
                     finish_reason = chunk["choices"][0].get("finish_reason")
 
+                    # T1: Raccogli tool_calls dai chunk streaming
+                    tc_delta = delta.get("tool_calls")
+                    if tc_delta:
+                        tool_calls_stream_acc.append(chunk)
+                        tool_calls_detected = True
+
                     # Strip XML action tags (MEMORY, SCHEDULE, etc.) BEFORE streaming
-                    # Usa TagSafeStream per gestire tag spalmati su piu' chunk
                     cleaned_content = safe_stream.process(content) if content else ""
 
-                    # Quando arriva finish_reason, rilascia eventuale buffer safe
-                    # che TagSafeStream ha trattenuto per sicurezza anti-frammentazione
-                    if finish_reason:
-                        final_flush = safe_stream.flush()
-                        if final_flush:
-                            if cleaned_content:
-                                cleaned_content += final_flush
-                            else:
-                                cleaned_content = final_flush
+                    # Se finish_reason=tool_calls, interrompiamo il primo stream
+                    if finish_reason == "tool_calls":
+                        tool_calls_detected = True
+                        if not tc_delta:
+                            tool_calls_stream_acc.append(chunk)
+                        # Invia eventuale flush del buffer safe stream
+                        _flush = safe_stream.flush()
+                        if _flush:
+                            cleaned_content = (cleaned_content + _flush) if cleaned_content else _flush
+                        break
 
+                    # Gestione flush a finish_reason (non-tool_calls)
+                    if finish_reason:
+                        _flush = safe_stream.flush()
+                        if _flush:
+                            cleaned_content = (cleaned_content + _flush) if cleaned_content else _flush
+
+                    # T2: Stream SUBITO il contenuto al client
+                    # IMPORTANT: NEVER yield finish_reason from the first stream.
+                    # The model returns finish_reason="stop" even when there's a
+                    # <tool_call> embedded in content. If we yield "stop" here,
+                    # the client closes the connection before we process the tool
+                    # call and generate the second stream.
                     if not role_sent:
                         role_sent = True
                         yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
@@ -249,12 +323,89 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                             yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': {'content': cleaned_content}, 'finish_reason': None}]})}\n\n"
                     else:
                         delta_dict = {"content": cleaned_content} if cleaned_content else {}
-                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': delta_dict, 'finish_reason': finish_reason}]})}\n\n"
+                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': delta_dict, 'finish_reason': None}]})}\n\n"
 
                     if content:
                         full_chunks.append(content)
                     if finish_reason:
                         break
+
+            # CRITICO: Chiudere l'async generator per rilasciare PriorityLock,
+            # altrimenti la seconda chiamata LLM (gen2) si blocca in deadlock.
+            await gen.aclose()
+
+            # ── T1+T2: Tool-calling handling ──
+            # Also check for XML tool calls in content (model outputs XML, not delta.tool_calls)
+            _otc = None
+            if not tool_calls_detected:
+                _full_text_tc = "".join(full_chunks)
+                if _full_text_tc:
+                    from core.llm_engine import parse_qwen_tool_calls
+                    _otc = parse_qwen_tool_calls(_full_text_tc)
+                    if _otc:
+                        tool_calls_detected = True
+            if tool_calls_detected:
+                if _otc:
+                    tool_calls = _otc
+                    first_text = "".join(full_chunks)
+                    import re as _re
+                    first_text = _re.sub(
+                        r'<tool_call[^>]*>.*?</tool_call\s*>\s*', '',
+                        first_text, flags=_re.DOTALL
+                    ).strip()
+                else:
+                    tool_calls = _reconstruct_tool_calls(tool_calls_stream_acc)
+                    first_text = "".join(full_chunks)
+
+                # Costruisce assistant message con contenuto catturato + tool_calls
+                assistant_msg = {"role": "assistant", "content": first_text}
+                if tool_calls:
+                    assistant_msg["tool_calls"] = tool_calls
+                enriched.append(assistant_msg)
+
+                # T1: Esecuzione tool IN PARALLELO
+                if confirmation_mgr is None:
+                    confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
+
+                async def _exec_one_tool(tc):
+                    _res = await execute_tool_call(tc, confirmation_mgr=confirmation_mgr)
+                    return {"role": "tool", "content": _res, "name": tc.get("function", {}).get("name", "unknown")}
+
+                tool_msgs = await asyncio.gather(*[_exec_one_tool(tc) for tc in tool_calls])
+                enriched.extend(tool_msgs)
+
+                # Rimuovi tool_choice forzato per non interferire con risposta finale
+                options.pop("tool_choice", None)
+
+                # Seconda chiamata LLM in streaming (continuazione dopo tool)
+                gen2 = await engine.generate_chat_with_router(
+                    enriched, tools=tools, options=options, stream=True,
+                    grammar=grammar, preferred_provider=body.get("provider"),
+                )
+
+                if not (isinstance(gen2, dict) and "error" in gen2):
+                    # Second stream: text answer after tool execution.
+                    # No TagSafeStream — Qwen wraps its response in <think>...</think>
+                    # after tool calls, and TagSafeStream would consume it all.
+                    async for chunk in gen2:
+                        if "choices" in chunk and len(chunk["choices"]) > 0:
+                            delta2 = chunk["choices"][0].get("delta", {})
+                            content2 = delta2.get("content", "")
+                            fr2 = chunk["choices"][0].get("finish_reason")
+
+                            cleaned2 = content2 if content2 else ""
+
+                            if cleaned2:
+                                if not role_sent:
+                                    role_sent = True
+                                    yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': cleaned2}, 'finish_reason': None}]})}\n\n"
+                                else:
+                                    yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': {'content': cleaned2}, 'finish_reason': fr2}]})}\n\n"
+
+                            if content2:
+                                full_chunks.append(content2)
+                            if fr2:
+                                break
 
             full_text = "".join(full_chunks)
 
