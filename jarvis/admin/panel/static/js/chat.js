@@ -1,18 +1,21 @@
 // ═══════════════════════════════════════════════════
-// NeuroNet Admin Panel — Chat (SSE streaming, markdown, images)
+// NeuroNet Admin Panel — Chat v3 (interattiva)
 // ═══════════════════════════════════════════════════
 
+// ── State ──
 let chatImages = [];
 let isChatStreaming = false;
 let chatConvId = 'dashboard_default';
 let abortController = null;
 let currentSessionId = 'dashboard_default';
+let isManuallyScrolled = false;
+let _lastUserMessageText = '';
 
-// Mermaid initialized inside DOMContentLoaded below
-
-function showChatView(show) {
-    switchView(show ? 'chat' : 'monitor');
-}
+// Streaming state machine (mutalmente esclusivo con isChatStreaming)
+let _streamBubble = null;
+let _streamFullContent = '';
+let _streamEnded = false;
+let _msgCounter = 0;
 
 // ── Session Management ──
 
@@ -24,9 +27,9 @@ async function loadSessionList() {
         list.innerHTML = '';
         let found = false;
         for (const s of data.sessions || []) {
-            const item = document.createElement('div');
             const isActive = s.conversation_id === currentSessionId;
             if (isActive) found = true;
+            const item = document.createElement('div');
             item.className = 'session-item' + (isActive ? ' active' : '');
             const title = s.title || s.conversation_id;
             const dt = s.last_activity ? new Date(s.last_activity * 1000).toLocaleString() : '';
@@ -41,7 +44,6 @@ async function loadSessionList() {
             };
             list.appendChild(item);
         }
-        // Always show current session if not in list (legacy session)
         if (!found && currentSessionId) {
             const item = document.createElement('div');
             item.className = 'session-item active';
@@ -68,49 +70,59 @@ async function createNewSession() {
 }
 
 async function switchSession(convId) {
-    // Clear current messages
     const container = document.getElementById('chat-messages');
     const emptyState = document.getElementById('chat-empty-state');
     container.querySelectorAll('.msg-bubble, .typing-indicator').forEach(m => m.remove());
     currentSessionId = convId;
     chatConvId = convId;
     emptyState.style.display = 'flex';
-    // Reload session list to update active highlight
+    _streamBubble = null;
+    _streamFullContent = '';
+    _streamEnded = false;
     await loadSessionList();
-    // Load messages
     await loadChatHistory();
     scrollChat();
+    isManuallyScrolled = false;
+    hideScrollDownBtn();
 }
 
 async function loadChatHistory() {
     try {
-        // Try ChatSessionStore first
         const resp = await fetchWithTimeout('/api/dashboard/sessions/' + encodeURIComponent(currentSessionId) + '/messages', {}, 15000);
         const data = await resp.json();
         const container = document.getElementById('chat-messages');
         const emptyState = document.getElementById('chat-empty-state');
-        const msgs = container.querySelectorAll('.msg-bubble, .typing-indicator');
-        msgs.forEach(m => m.remove());
+        container.querySelectorAll('.msg-bubble, .typing-indicator').forEach(m => m.remove());
 
-        if (!data.messages || data.messages.length === 0) {
-            // Fallback to legacy chat-history
-            const resp2 = await fetchWithTimeout('/api/dashboard/chat-history?conversation_id=' + encodeURIComponent(chatConvId), {}, 15000);
-            const data2 = await resp2.json();
-            if (data2.messages && data2.messages.length > 0) {
-                emptyState.style.display = 'none';
-                for (const msg of data2.messages) {
-                    appendMessage(msg.role, msg.content, false, msg.metrics, msg.timestamp);
-                }
-                scrollChat();
-                return;
+        let messages = data.messages;
+        // Fallback: legacy chat-history endpoint
+        if (!messages || messages.length === 0) {
+            try {
+                const resp2 = await fetchWithTimeout('/api/dashboard/chat-history?conversation_id=' + encodeURIComponent(chatConvId), {}, 15000);
+                const data2 = await resp2.json();
+                messages = data2.messages;
+            } catch {
+                messages = null;
             }
+        }
+
+        if (!messages || messages.length === 0) {
             emptyState.style.display = 'flex';
             return;
         }
+
         emptyState.style.display = 'none';
-        for (const msg of data.messages) {
-            // Convert ChatSessionStore format to metrics display format
-            const ts = msg.timestamp ? msg.timestamp * 1000 : null; // Unix → JS timestamp
+        for (let i = 0; i < messages.length; i++) {
+            const msg = messages[i];
+            // Timestamp: supporta number (unix sec) o string (ISO)
+            let ts = null;
+            if (msg.timestamp != null) {
+                const d = typeof msg.timestamp === 'number'
+                    ? new Date(msg.timestamp * 1000)
+                    : new Date(msg.timestamp);
+                if (!isNaN(d.getTime())) ts = d.getTime();
+            }
+            // Metrics
             const promptTok = msg.prompt_tokens || 0;
             const completionTok = msg.completion_tokens || 0;
             const durationMs = msg.duration_ms || 0;
@@ -119,15 +131,11 @@ async function loadChatHistory() {
                 const tokPerSec = durationMs > 0
                     ? Math.round((completionTok / (durationMs / 1000)) * 10) / 10
                     : 0;
-                metrics = {
-                    ttft_ms: durationMs,
-                    tok_per_sec: tokPerSec,
-                    tokens: promptTok + completionTok,
-                };
+                metrics = { ttft_ms: durationMs, tok_per_sec: tokPerSec, tokens: promptTok + completionTok };
             }
-            appendMessage(msg.role, msg.content, false, metrics, ts);
+            const modelName = msg.model || null;
+            appendMessage(msg.role, msg.content, { metrics, timestamp: ts, index: i, modelName });
         }
-        scrollChat();
     } catch (e) {
         console.error('Failed to load chat history', e);
     }
@@ -138,7 +146,6 @@ async function deleteSession(convId) {
     try {
         const resp = await fetchWithTimeout('/api/dashboard/sessions/' + encodeURIComponent(convId), { method: 'DELETE' }, 10000);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        // If deleting the currently active session, create a new one
         if (convId === currentSessionId) {
             await createNewSession();
         } else {
@@ -157,79 +164,60 @@ function escHtml(str) {
     return div.innerHTML;
 }
 
-function appendMessage(role, content, isStreaming, metrics, timestamp) {
+// ── Auto-scroll management ──
+
+function scrollChat() {
     const container = document.getElementById('chat-messages');
-    const emptyState = document.getElementById('chat-empty-state');
-    emptyState.style.display = 'none';
-
-    // Remove typing indicator if present
-    const typingEl = container.querySelector('.typing-indicator');
-    if (typingEl) typingEl.remove();
-
-    let bubble = container.querySelector('.msg-bubble.streaming');
-    if (isStreaming && role === 'assistant') {
-        if (bubble) {
-            bubble.innerHTML = renderMarkdown(content);
-            bubble.dataset.fullContent = (bubble.dataset.fullContent || '') + content;
-            applyCodeCopy(bubble);
-            return bubble;
-        }
+    if (!container) return;
+    if (!isManuallyScrolled) {
+        container.scrollTop = container.scrollHeight;
     }
-
-    bubble = document.createElement('div');
-    bubble.className = 'msg-bubble ' + role;
-    if (isStreaming) {
-        bubble.classList.add('streaming');
-        bubble.dataset.fullContent = content || '';
-    }
-
-    const contentDiv = document.createElement('div');
-    contentDiv.className = 'msg-content';
-    contentDiv.innerHTML = renderMarkdown(content || '');
-    bubble.appendChild(contentDiv);
-
-    // Determine display timestamp
-    let timeStr;
-    if (timestamp) {
-        const d = new Date(timestamp);
-        if (!isNaN(d.getTime())) {
-            timeStr = d.toLocaleTimeString();
-        } else {
-            // Could be a formatted string like "2024-01-15 10:30:00"
-            const parsed = new Date(timestamp.replace(' ', 'T'));
-            timeStr = !isNaN(parsed.getTime()) ? parsed.toLocaleTimeString() : timestamp;
-        }
-    } else {
-        timeStr = new Date().toLocaleTimeString();
-    }
-
-    const meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    if (role === 'assistant' && metrics && metrics.ttft_ms != null) {
-        const tokStr = (metrics.tok_per_sec != null)
-            ? `<span style="color:var(--primary);font-family:'JetBrains Mono',monospace;font-size:0.65rem;">TTFT ${metrics.ttft_ms}ms · ${metrics.tok_per_sec} tok/s · ${metrics.tokens || '?'} tok</span>`
-            : `<span style="color:var(--text-muted);font-size:0.65rem;">TTFT ${metrics.ttft_ms}ms</span>`;
-        meta.innerHTML = `${timeStr} · ${tokStr}`;
-    } else {
-        meta.textContent = timeStr;
-    }
-    bubble.appendChild(meta);
-    container.appendChild(bubble);
-
-    if (!isStreaming) {
-        applyCodeCopy(bubble);
-        runMermaid(bubble);
-    }
-    scrollChat();
-    return bubble;
 }
+
+function onChatScroll() {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    const threshold = 80;
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+    if (atBottom) {
+        isManuallyScrolled = false;
+        hideScrollDownBtn();
+    } else {
+        isManuallyScrolled = true;
+    }
+}
+
+function showScrollDownBtn() {
+    const btn = document.getElementById('scroll-down-btn');
+    if (btn) btn.classList.add('visible');
+}
+
+function hideScrollDownBtn() {
+    const btn = document.getElementById('scroll-down-btn');
+    if (btn) btn.classList.remove('visible');
+}
+
+function scrollToBottom() {
+    isManuallyScrolled = false;
+    scrollChat();
+    hideScrollDownBtn();
+}
+
+// ── Markdown Rendering Pipeline ──
+// Renderizza markdown → HTML safe via DOMPurify.
+// CRITICO: breaks=false — lascia che markdown gestisca i paragrafi
+// naturalmente (doppio \n = <p>, singolo \n = spazio). breaks:true
+// convertiva ogni \n in <br>, distruggendo liste/code/header.
 
 function renderMarkdown(text) {
     if (!text) return '';
-    let html = marked.parse(text, { breaks: true, gfm: true });
-    html = DOMPurify.sanitize(html, { ADD_TAGS: ['svg', 'path', 'circle', 'rect', 'g', 'defs', 'linearGradient', 'stop', 'text', 'tspan', 'marker', 'polygon', 'polyline', 'ellipse', 'line'], ADD_ATTR: ['viewBox', 'xmlns', 'd', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'cx', 'cy', 'r', 'x', 'y', 'width', 'height', 'rx', 'ry', 'points', 'transform', 'style', 'class', 'id', 'ref', 'marker-end', 'marker-start', 'marker-mid', 'orient', 'refX', 'refY', 'pathLength'] });
-    // Wrap tables for responsive
-    html = html.replace(/<table>/g, '<div style="overflow-x:auto"><table>').replace(/<\/table>/g, '</table></div>');
+    let html = marked.parse(text, { gfm: true, breaks: false });
+    html = DOMPurify.sanitize(html, {
+        ADD_TAGS: ['svg', 'path', 'circle', 'rect', 'g', 'defs', 'linearGradient', 'stop', 'text', 'tspan', 'marker', 'polygon', 'polyline', 'ellipse', 'line'],
+        ADD_ATTR: ['viewBox', 'xmlns', 'd', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'cx', 'cy', 'r', 'x', 'y', 'width', 'height', 'rx', 'ry', 'points', 'transform', 'style', 'class', 'id', 'ref', 'marker-end', 'marker-start', 'marker-mid', 'orient', 'refX', 'refY', 'pathLength']
+    });
+    // Tables: wrap in scrollable container
+    html = html.replace(/<table>/g, '<div class="table-wrap"><table>').replace(/<\/table>/g, '</table></div>');
     return html;
 }
 
@@ -256,7 +244,6 @@ function runMermaid(container) {
     container.querySelectorAll('.mermaid').forEach((el) => {
         try { mermaid.run({ nodes: [el] }); } catch (e) { console.warn('Mermaid render failed', e); }
     });
-    // Also handle ```mermaid code blocks
     container.querySelectorAll('pre code.language-mermaid').forEach((codeBlock) => {
         const pre = codeBlock.closest('pre');
         if (!pre || pre.querySelector('.mermaid-rendered')) return;
@@ -268,55 +255,208 @@ function runMermaid(container) {
     });
 }
 
-function updateStreamingMessage(content) {
+// ── Message DOM Construction ──
+
+function createMessageBubble(role, content, opts = {}) {
+    const {
+        isStreaming = false,
+        metrics = null,
+        timestamp = null,
+        index = null,
+        modelName = null,
+    } = opts;
+
+    _msgCounter++;
+    const mid = 'msg-' + _msgCounter;
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble ' + role;
+    bubble.id = mid;
+    if (index !== null) bubble.dataset.msgIndex = index;
+    bubble.dataset.fullContent = content || '';
+
+    // Content
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'msg-content';
+    bubble.appendChild(contentDiv);
+
+    // Actions toolbar
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
+    if (role === 'user') {
+        actions.innerHTML = `
+            <button class="msg-action-btn" data-action="edit" title="Edit">✏️</button>
+            <button class="msg-action-btn" data-action="delete" title="Delete">🗑️</button>
+        `;
+    } else {
+        const modelBadge = modelName ? `<span class="msg-model-badge">${escHtml(modelName)}</span>` : '';
+        actions.innerHTML = `
+            <button class="msg-action-btn" data-action="copy" title="Copy">📋</button>
+            <button class="msg-action-btn" data-action="regenerate" title="Regenerate">🔄</button>
+            <button class="msg-action-btn" data-action="delete" title="Delete">🗑️</button>
+            ${modelBadge}
+        `;
+    }
+    actions.addEventListener('click', (e) => {
+        const btn = e.target.closest('.msg-action-btn');
+        if (!btn) return;
+        handleMessageAction(btn.dataset.action, bubble);
+    });
+    bubble.appendChild(actions);
+
+    // Meta (timestamp + metrics)
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    let timeStr;
+    if (timestamp) {
+        const d = new Date(timestamp);
+        timeStr = !isNaN(d.getTime()) ? d.toLocaleTimeString() : new Date().toLocaleTimeString();
+    } else {
+        timeStr = new Date().toLocaleTimeString();
+    }
+    if (role === 'assistant' && metrics && metrics.ttft_ms != null) {
+        const tokStr = (metrics.tok_per_sec != null)
+            ? `<span class="msg-metrics">TTFT ${metrics.ttft_ms}ms · ${metrics.tok_per_sec} tok/s · ${metrics.tokens || '?'} tok</span>`
+            : `<span class="msg-metrics">TTFT ${metrics.ttft_ms}ms</span>`;
+        meta.innerHTML = `${timeStr} · ${tokStr}`;
+    } else {
+        meta.textContent = timeStr;
+    }
+    bubble.appendChild(meta);
+
+    // Render content
+    if (isStreaming) {
+        bubble.classList.add('streaming');
+        // Content rendered by _renderStreamingContent()
+    } else {
+        contentDiv.innerHTML = renderMarkdown(content);
+        applyCodeCopy(bubble);
+        runMermaid(bubble);
+    }
+
+    return bubble;
+}
+
+function appendMessage(role, content, opts = {}) {
     const container = document.getElementById('chat-messages');
-    let bubble = container.querySelector('.msg-bubble.streaming');
-    if (!bubble) {
-        bubble = appendMessage('assistant', '', true);
+    const emptyState = document.getElementById('chat-empty-state');
+    emptyState.style.display = 'none';
+
+    // Remove typing indicator
+    const typingEl = container.querySelector('.typing-indicator');
+    if (typingEl) typingEl.remove();
+
+    const bubble = createMessageBubble(role, content, opts);
+    container.appendChild(bubble);
+    scrollChat();
+    return bubble;
+}
+
+// ── Streaming State Machine ──
+
+function _ensureStreamingBubble() {
+    if (_streamEnded) return null;
+    if (_streamBubble && _streamBubble.parentNode) {
+        return _streamBubble;
     }
-    const fullContent = (bubble.dataset.fullContent || '') + content;
-    bubble.dataset.fullContent = fullContent;
-    const contentDiv = bubble.querySelector('.msg-content');
-    if (contentDiv) {
-        contentDiv.innerHTML = renderMarkdown(fullContent);
-    }
-    applyCodeCopy(bubble);
+
+    const container = document.getElementById('chat-messages');
+    const emptyState = document.getElementById('chat-empty-state');
+    emptyState.style.display = 'none';
+
+    const typingEl = container.querySelector('.typing-indicator');
+    if (typingEl) typingEl.remove();
+
+    _streamFullContent = '';
+    _streamBubble = createMessageBubble('assistant', '', { isStreaming: true });
+    container.appendChild(_streamBubble);
+    scrollChat();
+    return _streamBubble;
+}
+
+function _renderStreamingContent() {
+    if (!_streamBubble) return;
+    const contentDiv = _streamBubble.querySelector('.msg-content');
+    if (!contentDiv) return;
+
+    contentDiv.innerHTML = renderMarkdown(_streamFullContent);
+    applyCodeCopy(_streamBubble);
     scrollChat();
 }
 
-function finishStreamingMessage(fullText, ttftMs, tokPerSec, tokens, durationMs) {
-    const container = document.getElementById('chat-messages');
-    let bubble = container.querySelector('.msg-bubble.streaming');
-    if (bubble) {
-        bubble.classList.remove('streaming');
-        const contentDiv = bubble.querySelector('.msg-content');
-        if (contentDiv) {
-            contentDiv.innerHTML = renderMarkdown(fullText || bubble.dataset.fullContent || '');
-        }
-        delete bubble.dataset.fullContent;
-        applyCodeCopy(bubble);
-        runMermaid(bubble);
-        // Add metrics to meta
-        const meta = bubble.querySelector('.msg-meta');
-        if (meta && ttftMs != null) {
-            const timeStr = new Date().toLocaleTimeString();
-            const metricsStr = (tokPerSec != null)
-                ? `<span style="color:var(--primary);font-family:'JetBrains Mono',monospace;font-size:0.65rem;">TTFT ${ttftMs}ms · ${tokPerSec} tok/s · ${tokens} tok</span>`
-                : `<span style="color:var(--text-muted);font-size:0.65rem;">TTFT ${ttftMs}ms</span>`;
-            meta.innerHTML = `${timeStr} · ${metricsStr}`;
-        }
-    }
+function updateStreamingMessage(content) {
+    if (_streamEnded) return;
+    _streamFullContent += content;
+    const bubble = _ensureStreamingBubble();
+    if (!bubble) return; // ended
+    bubble.dataset.fullContent = _streamFullContent;
+    _renderStreamingContent();
 }
 
-function scrollChat() {
-    const container = document.getElementById('chat-messages');
-    if (container) container.scrollTop = container.scrollHeight;
+function finishStreamingMessage(fullText, ttftMs, tokPerSec, tokens, durationMs, reasoning) {
+    _streamEnded = true;
+
+    const bubble = _streamBubble;
+    _streamBubble = null;
+
+    if (!bubble || !bubble.parentNode) {
+        // No streaming bubble exists — create static message if we have text
+        if (fullText) {
+            appendMessage('assistant', fullText);
+        }
+        _streamFullContent = '';
+        return;
+    }
+
+    // Determine final display text
+    const displayText = fullText || _streamFullContent || '';
+    bubble.dataset.fullContent = displayText;
+    bubble.classList.remove('streaming');
+
+    const contentDiv = bubble.querySelector('.msg-content');
+    if (contentDiv) {
+        let displayHtml = '';
+
+        // Reasoning box (markdown-rendered, non escHtml)
+        if (reasoning) {
+            displayHtml += '<details class="msg-reasoning">' +
+                '<summary>🧠 Pensiero (Ragionamento)</summary>' +
+                '<div class="msg-reasoning-content">' + renderMarkdown(reasoning) + '</div>' +
+                '</details>';
+        }
+
+        // Main content
+        displayHtml += renderMarkdown(displayText);
+        contentDiv.innerHTML = displayHtml;
+
+        if (reasoning) {
+            bubble.dataset.reasoning = reasoning;
+        }
+    }
+
+    // Update metrics
+    const meta = bubble.querySelector('.msg-meta');
+    if (meta && ttftMs != null) {
+        const timeStr = new Date().toLocaleTimeString();
+        const metricsStr = (tokPerSec != null)
+            ? `<span class="msg-metrics">TTFT ${ttftMs}ms · ${tokPerSec} tok/s · ${tokens} tok</span>`
+            : `<span class="msg-metrics">TTFT ${ttftMs}ms</span>`;
+        meta.innerHTML = `${timeStr} · ${metricsStr}`;
+    }
+
+    // Post-render hooks
+    applyCodeCopy(bubble);
+    runMermaid(bubble);
+    reindexMessages();
+    scrollChat();
+
+    _streamFullContent = '';
 }
+
+// ── Typing indicator ──
 
 function addTypingIndicator() {
     const container = document.getElementById('chat-messages');
-    const typingEl = container.querySelector('.typing-indicator');
-    if (typingEl) return;
+    if (container.querySelector('.typing-indicator')) return;
     const div = document.createElement('div');
     div.className = 'typing-indicator';
     div.innerHTML = '<span></span><span></span><span></span>';
@@ -324,16 +464,197 @@ function addTypingIndicator() {
     scrollChat();
 }
 
+function removeTypingIndicator() {
+    const container = document.getElementById('chat-messages');
+    const el = container.querySelector('.typing-indicator');
+    if (el) el.remove();
+}
+
+// ── Message Actions ──
+
+async function handleMessageAction(action, bubble) {
+    switch (action) {
+        case 'copy':
+            const fullContent = bubble.dataset.fullContent || bubble.querySelector('.msg-content')?.textContent || '';
+            try {
+                await navigator.clipboard.writeText(fullContent);
+                showToast('📋 Copied to clipboard');
+            } catch {
+                showToast('Failed to copy', 'error');
+            }
+            break;
+        case 'edit':
+            startEditMessage(bubble);
+            break;
+        case 'delete':
+            await deleteMessage(bubble);
+            break;
+        case 'regenerate':
+            await regenerateResponse(bubble);
+            break;
+    }
+}
+
+async function deleteMessage(bubble) {
+    const index = bubble.dataset.msgIndex;
+    if (index !== undefined) {
+        try {
+            await fetchWithTimeout(
+                `/api/dashboard/sessions/${encodeURIComponent(currentSessionId)}/messages/${index}`,
+                { method: 'DELETE' },
+                5000
+            );
+        } catch (e) {
+            console.warn('Backend delete failed, removing from DOM only', e);
+        }
+    }
+    bubble.remove();
+    reindexMessages();
+}
+
+function reindexMessages() {
+    const container = document.getElementById('chat-messages');
+    const bubbles = container.querySelectorAll('.msg-bubble:not(.streaming)');
+    bubbles.forEach((b, i) => {
+        b.dataset.msgIndex = i;
+    });
+}
+
+function startEditMessage(bubble) {
+    if (bubble.classList.contains('streaming')) return;
+    const contentDiv = bubble.querySelector('.msg-content');
+    const currentText = bubble.dataset.fullContent || contentDiv?.textContent || '';
+    const actions = bubble.querySelector('.msg-actions');
+
+    contentDiv.style.display = 'none';
+    if (actions) actions.style.display = 'none';
+
+    const editor = document.createElement('div');
+    editor.className = 'msg-edit-container';
+    editor.innerHTML = `
+        <textarea class="msg-edit-textarea">${escHtml(currentText)}</textarea>
+        <div class="msg-edit-actions">
+            <button class="btn btn-xs msg-edit-save">Save & Resend</button>
+            <button class="btn btn-xs btn-outline msg-edit-cancel">Cancel</button>
+        </div>
+    `;
+    bubble.appendChild(editor);
+
+    const textarea = editor.querySelector('.msg-edit-textarea');
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+
+    editor.querySelector('.msg-edit-save').onclick = async () => {
+        const newText = textarea.value.trim();
+        if (!newText) return;
+
+        const index = parseInt(bubble.dataset.msgIndex);
+        if (!isNaN(index)) {
+            try {
+                await fetchWithTimeout(
+                    `/api/dashboard/sessions/${encodeURIComponent(currentSessionId)}/messages/${index}/edit`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content: newText }),
+                    },
+                    5000
+                );
+            } catch (e) {
+                console.warn('Backend edit failed', e);
+            }
+        }
+
+        // Remove all messages after this one
+        let next = bubble.nextElementSibling;
+        while (next) {
+            const toRemove = next;
+            next = next.nextElementSibling;
+            if (toRemove.classList.contains('msg-bubble') || toRemove.classList.contains('typing-indicator')) {
+                toRemove.remove();
+            }
+        }
+
+        // Update this bubble
+        bubble.dataset.fullContent = newText;
+        contentDiv.innerHTML = renderMarkdown(newText);
+        contentDiv.style.display = '';
+        editor.remove();
+        if (actions) actions.style.display = '';
+        applyCodeCopy(bubble);
+        runMermaid(bubble);
+        reindexMessages();
+        _lastUserMessageText = newText; // ← FIX: update last user text for regenerate
+        await sendRawMessage(newText);
+    };
+
+    editor.querySelector('.msg-edit-cancel').onclick = () => {
+        contentDiv.style.display = '';
+        editor.remove();
+        if (actions) actions.style.display = '';
+    };
+}
+
+async function regenerateResponse(bubble) {
+    if (isChatStreaming) return;
+    if (!_lastUserMessageText) {
+        let prev = bubble.previousElementSibling;
+        while (prev) {
+            if (prev.classList.contains('msg-bubble') && prev.classList.contains('user')) {
+                _lastUserMessageText = prev.dataset.fullContent || prev.querySelector('.msg-content')?.textContent || '';
+                break;
+            }
+            prev = prev.previousElementSibling;
+        }
+    }
+    if (!_lastUserMessageText) return;
+
+    // Remove this bubble and all after it
+    let next = bubble.nextElementSibling;
+    while (next) {
+        const toRemove = next;
+        next = next.nextElementSibling;
+        if (toRemove.classList.contains('msg-bubble') || toRemove.classList.contains('typing-indicator')) {
+            toRemove.remove();
+        }
+    }
+    bubble.remove();
+
+    // Truncate session at this point
+    const index = parseInt(bubble.dataset.msgIndex);
+    if (!isNaN(index)) {
+        try {
+            await fetchWithTimeout(
+                `/api/dashboard/sessions/${encodeURIComponent(currentSessionId)}/truncate`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ from_index: index }),
+                },
+                5000
+            );
+        } catch (e) {
+            console.warn('Backend truncate failed', e);
+        }
+    }
+
+    reindexMessages();
+    await sendRawMessage(_lastUserMessageText);
+}
+
+// ── Send message ──
+
 async function sendChatMessage() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text && chatImages.length === 0) return;
     if (isChatStreaming) return;
 
-    // Show user message
-    appendMessage('user', text, false);
+    _lastUserMessageText = text;
+    appendMessage('user', text, {});
 
-    // Clear input
     input.value = '';
     input.style.height = 'auto';
 
@@ -341,12 +662,23 @@ async function sendChatMessage() {
     chatImages = [];
     updateImagePreviews();
 
-    // Show typing indicator
+    await sendRawMessage(text, imagesToSend);
+}
+
+async function sendRawMessage(text, images = []) {
     addTypingIndicator();
 
+    // Reset streaming state
+    _streamBubble = null;
+    _streamFullContent = '';
+    _streamEnded = false;
+
     isChatStreaming = true;
-    document.getElementById('chat-send-btn').disabled = true;
+    document.getElementById('chat-send-btn').style.display = 'none';
+    document.getElementById('chat-stop-btn').style.display = 'flex';
     abortController = new AbortController();
+
+    let streamError = false;
 
     try {
         const resp = await fetch('/api/dashboard/chat/stream', {
@@ -355,7 +687,7 @@ async function sendChatMessage() {
             body: JSON.stringify({
                 message: text,
                 conversation_id: chatConvId,
-                images: imagesToSend.length > 0 ? imagesToSend : undefined
+                images: images.length > 0 ? images : undefined
             }),
             signal: abortController.signal
         });
@@ -372,40 +704,67 @@ async function sendChatMessage() {
 
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
+            buffer = lines.pop() || ''; // keep incomplete line in buffer
 
             for (const line of lines) {
                 if (!line.startsWith('data: ')) continue;
-                const data = JSON.parse(line.slice(6));
-                if (data.error) {
-                    console.error('Chat error:', data.error);
-                    finishStreamingMessage('');
-                    appendMessage('assistant', '⚠️ Error: ' + data.error, false);
-                    break;
-                }
-                if (data.content) {
-                    updateStreamingMessage(data.content);
-                }
-                if (data.done) {
-                    finishStreamingMessage(data.full_text || '', data.ttft_ms, data.tok_per_sec, data.tokens, data.duration_ms);
+                try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.error) {
+                        console.error('Chat error:', data.error);
+                        streamError = true;
+                        finishStreamingMessage('');
+                        appendMessage('assistant', '⚠️ Error: ' + data.error, {});
+                        break;
+                    }
+                    if (data.content) {
+                        updateStreamingMessage(data.content);
+                    }
+                    if (data.done) {
+                        finishStreamingMessage(
+                            data.full_text || '',
+                            data.ttft_ms,
+                            data.tok_per_sec,
+                            data.tokens,
+                            data.duration_ms,
+                            data.reasoning
+                        );
+                    }
+                } catch (e) {
+                    console.warn('Parse error in stream chunk', e);
                 }
             }
         }
     } catch (e) {
         if (e.name !== 'AbortError') {
             console.error('Chat stream failed:', e);
+            streamError = true;
             finishStreamingMessage('');
-            appendMessage('assistant', '⚠️ Connection error: ' + e.message, false);
+            if (!_streamBubble) {
+                appendMessage('assistant', '⚠️ Connection error: ' + e.message, {});
+            }
         }
     } finally {
         isChatStreaming = false;
-        document.getElementById('chat-send-btn').disabled = false;
+        document.getElementById('chat-send-btn').style.display = 'flex';
+        document.getElementById('chat-stop-btn').style.display = 'none';
         abortController = null;
-        const container = document.getElementById('chat-messages');
-        const typingEl = container.querySelector('.typing-indicator');
-        if (typingEl) typingEl.remove();
+        removeTypingIndicator();
+        reindexMessages();
         scrollChat();
     }
+}
+
+function stopGeneration() {
+    if (abortController) {
+        abortController.abort();
+        abortController = null;
+    }
+    finishStreamingMessage(''); // finalize with accumulated stream content
+    isChatStreaming = false;
+    document.getElementById('chat-send-btn').style.display = 'flex';
+    document.getElementById('chat-stop-btn').style.display = 'none';
+    removeTypingIndicator();
 }
 
 function sendSuggested(text) {
@@ -418,13 +777,13 @@ function handleInputKeydown(e) {
         e.preventDefault();
         sendChatMessage();
     }
-    // Auto-resize
     const el = e.target;
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
 
 // ── Image handling ──
+
 function handleFileSelect(e) {
     const files = e.target.files;
     for (const file of files) {
@@ -458,12 +817,20 @@ function removeImage(index) {
     updateImagePreviews();
 }
 
-// ── All event listeners registered on DOMContentLoaded ──
+// ── Init ──
+
 document.addEventListener('DOMContentLoaded', () => {
-    // Init mermaid
     mermaid.initialize({ startOnLoad: false, theme: 'dark', themeVariables: { primaryColor: '#00ffcc', primaryTextColor: '#f8fafc', primaryBorderColor: '#00ffcc', lineColor: '#00b8ff', secondaryColor: '#7b2cbf', tertiaryColor: '#05070a' } });
 
-    // Handle paste (images from clipboard)
+    // Chat scroll
+    const chatMessages = document.getElementById('chat-messages');
+    if (chatMessages) {
+        chatMessages.addEventListener('scroll', onChatScroll);
+    }
+
+    document.getElementById('scroll-down-btn')?.addEventListener('click', scrollToBottom);
+
+    // Paste images
     document.addEventListener('paste', (e) => {
         if (!document.getElementById('view-chat').classList.contains('active')) return;
         const items = e.clipboardData.items;
@@ -482,7 +849,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Handle drag-and-drop on chat input area
+    // Drag-drop
     const chatInputContainer = document.getElementById('chat-input-container');
     if (chatInputContainer) {
         chatInputContainer.addEventListener('dragover', (e) => {
@@ -514,7 +881,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Focus input when pressing / anywhere
+    // Focus input on /
     document.addEventListener('keydown', (e) => {
         if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
             if (document.getElementById('view-chat').classList.contains('active')) {

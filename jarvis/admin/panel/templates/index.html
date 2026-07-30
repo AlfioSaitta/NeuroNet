@@ -122,6 +122,9 @@
         <button class="sidebar-item admin-only" data-view="projects" onclick="switchView('projects')">
             <span class="si-icon">📁</span><span class="si-label">Projects</span>
         </button>
+        <button class="sidebar-item admin-only" data-view="mcpservers" onclick="switchView('mcpservers')">
+            <span class="si-icon">🔌</span><span class="si-label">MCP Servers</span>
+        </button>
 
         <span class="sidebar-spacer"></span>
         <div class="sidebar-footer">
@@ -446,7 +449,7 @@
                 <div id="chat-session-list"></div>
             </div>
             <!-- ── Chat Area ── -->
-            <div class="flex-col flex-1" style="overflow:hidden;">
+            <div class="flex-col flex-1 chat-area-wrap">
                 <div id="chat-messages">
                     <div class="chat-empty-state" id="chat-empty-state">
                         <div class="icon">✦</div>
@@ -460,6 +463,7 @@
                         </div>
                     </div>
                 </div>
+                <button id="scroll-down-btn" title="New messages below">↓</button>
                 <div id="chat-input-container">
                     <div id="chat-image-previews" class="flex gap-8 flex-wrap mb-8"></div>
                     <div id="chat-input-row" class="flex gap-10 items-end">
@@ -468,6 +472,7 @@
                             <input type="file" accept="image/*" multiple class="hidden" onchange="handleFileSelect(event)">
                         </label>
                         <textarea id="chat-input" placeholder="Ask anything..." rows="1"></textarea>
+                        <button id="chat-stop-btn" onclick="stopGeneration()" title="Stop generating">■</button>
                         <button id="chat-send-btn" onclick="sendChatMessage()" title="Send">↑</button>
                     </div>
                 </div>
