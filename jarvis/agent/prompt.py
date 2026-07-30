@@ -181,6 +181,24 @@ CAVEMAN_GEMMA_SYSTEM_ADDENDUM = (
 )
 
 
+# ────────────────────────────────────────────────────────────────
+# General conversation system prompt (for greeting + general intents)
+# ────────────────────────────────────────────────────────────────
+# Qwen3.5-4B tende a produrre ragionamento interno in inglese come testo piatto
+# quando non ha istruzioni esplicite. Questo prompt minimalista previene la fuga
+# di CoT e forza risposte dirette nella lingua dell'utente.
+GENERAL_CONVERSATION_SYSTEM = (
+    "You are Jarvis, a direct and friendly assistant.\n\n"
+    "CRITICAL — You MUST follow these rules without exception:\n"
+    "- Answer IMMEDIATELY. Do NOT analyze, reason, or think out loud before responding.\n"
+    "- NEVER describe what you're going to do. JUST RESPOND.\n"
+    '- NEVER start with "the user", "user", or any meta-analysis of the request.\n'
+    "- NEVER narrate your thought process or internal instructions.\n"
+    "- Respond in the SAME LANGUAGE as the user.\n"
+    "- No thinking tags, no XML tags of any kind.\n"
+    "- Be concise but warm.\n"
+)
+
 # ════════════════════════════════════════════════════════════════
 # FUNZIONI DI SUPPORTO (estratte da build_omniscient_prompt)
 # ════════════════════════════════════════════════════════════════
@@ -193,6 +211,29 @@ async def _keyword_bypass(user_message: str, context: dict) -> GatekeeperResult 
     msg_lower = user_message.lower().strip()
     if len(msg_lower) < 3:
         return GatekeeperResult(intent="general", confidence=1.0)
+
+    # ── Pure greeting detection (0 LLM, short-circuit per saluti) ──
+    # Rileva messaggi composti solo da parole di saluto (max 2 parole)
+    # Gestisce sia singole parole ("ciao") che multi-parola ("buona sera", "good morning")
+    PURE_GREETINGS = frozenset({'ciao', 'hello', 'hi', 'hey', 'buongiorno', 'buonasera',
+                                 'buona sera', 'buon pomeriggio', 'salve', 'saluti', 'buondì',
+                                 'good morning', 'good evening', 'good afternoon'})
+    if len(msg_lower) < 30:
+        # Direct match on full message (handles multi-word greetings like "buona sera")
+        if msg_lower.strip() in PURE_GREETINGS:
+            logger.info(f"👋 Bypass: GREETING (saluto puro: '{msg_lower}')")
+            return GatekeeperResult(intent="greeting", confidence=1.0)
+        # Word-by-word check: every word must be a known greeting word
+        _greeting_words = set(re.findall(r'\b\w+\b', msg_lower))
+        if _greeting_words and len(_greeting_words) <= 2:
+            _all_pure = True
+            for w in _greeting_words:
+                if w not in PURE_GREETINGS:
+                    _all_pure = False
+                    break
+            if _all_pure:
+                logger.info(f"👋 Bypass: GREETING (saluto puro: '{msg_lower}')")
+                return GatekeeperResult(intent="greeting", confidence=1.0)
 
     # ── Cherry Studio / client JSON conversation dump detection ──
     # I client a volte inviano la cronologia chat come JSON array.
@@ -713,19 +754,39 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             logger.warning(f"Errore memory add: {e}")
 
     # ════════════════════════════════════════════════════
-    # EARLY RETURNS: general / meta
+    # EARLY RETURNS: greeting / general / meta
     # ════════════════════════════════════════════════════
+    if gk.intent == "greeting":
+        logger.info(f"👋 Intento GREETING: saluto puro, skip LLM, messaggio originale preservato")
+        tracer.step("context_gathering", status="skipped", details={"reason": "greeting_intent"})
+        tracer.step("caveman_compression", status="skipped", details={"reason": "greeting_intent"})
+        # Remove datetime context same as general intent, inject minimal system prompt
+        if messages:
+            messages[:] = [m for m in messages if not (m.get("role") == "system" and "Current date" in m.get("content", ""))]
+            for m in messages:
+                if m["role"] == "user" and m.get("content", "").startswith("[Current date/time:"):
+                    m["content"] = m["content"].split("\n\n", 1)[1] if "\n\n" in m["content"] else m["content"]
+            # Inject system prompt to prevent CoT leakage
+            messages.insert(0, {"role": "system", "content": GENERAL_CONVERSATION_SYSTEM})
+        if finalize_trace:
+            tracer.finish()
+        return (messages, gk)
+
     if gk.intent == "general":
         logger.info("🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
         tracer.step("context_gathering", status="skipped", details={"reason": "general_intent"})
         tracer.step("caveman_compression", status="skipped", details={"reason": "general_intent"})
         # Remove datetime context for clean general conversation — non serve far
         # ragionare il modello sulla data per un saluto o chiacchiera
+        # Inietta system prompt minimo per prevenire leakage di CoT (Qwen)
         if messages:
             messages[:] = [m for m in messages if not (m.get("role") == "system" and "Current date" in m.get("content", ""))]
             for m in messages:
                 if m["role"] == "user" and m.get("content", "").startswith("[Current date/time:"):
                     m["content"] = m["content"].split("\n\n", 1)[1] if "\n\n" in m["content"] else m["content"]
+            # Inject system prompt to prevent CoT leakage — Qwen3.5 genera
+            # ragionamento in inglese come testo piatto se non ha istruzioni
+            messages.insert(0, {"role": "system", "content": GENERAL_CONVERSATION_SYSTEM})
         if finalize_trace:
             tracer.finish()
         return (messages, gk)

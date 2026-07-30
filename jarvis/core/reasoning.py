@@ -161,7 +161,7 @@ def configura_richiesta_agente(
     else:
         # Intento generale/saluti o modello senza supporto reasoning
         content_prompt = f"{meta['no_think_prefix']}{user_input}"
-        chat_template_kwargs = {"enable_thinking": False} if profile.thinking_support else {}
+        chat_template_kwargs = {"enable_thinking": False}
 
         # Blocco fisico del token di pensiero tramite logit_basis
         # per modelli nativamente reasoning (es. Gemma 4, DeepSeek)

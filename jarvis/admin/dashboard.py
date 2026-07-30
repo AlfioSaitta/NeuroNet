@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import time
 import struct
 import json
@@ -1015,6 +1016,90 @@ async def delete_dashboard_session(conversation_id: str):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@dashboard_router.post("/api/dashboard/sessions/{conversation_id}/truncate")
+async def truncate_session_messages(conversation_id: str, request: Request):
+    """Truncate all messages from a given index onwards."""
+    body = await request.json()
+    from_index = body.get("from_index", 0)
+    store = getattr(state, 'chat_session_store', None)
+
+    # Truncate persistent store
+    if store:
+        try:
+            store.truncate_session(conversation_id, from_index)
+            store.persist("./data/sessions.json")
+        except Exception as e:
+            logger.warning(f"Error truncating session {conversation_id}: {e}")
+
+    # Truncate in-memory deque
+    try:
+        session = _get_session(conversation_id)
+        turns = list(session)
+        if 0 <= from_index < len(turns):
+            _chat_sessions[conversation_id] = deque(turns[:from_index], maxlen=MAX_HISTORY)
+    except Exception as e:
+        logger.warning(f"Error truncating memory deque: {e}")
+
+    return JSONResponse({"status": "ok", "truncated_from": from_index})
+
+
+@dashboard_router.post("/api/dashboard/sessions/{conversation_id}/messages/{index}/edit")
+async def edit_session_message(conversation_id: str, index: int, request: Request):
+    """Edit a message at a given index and truncate all after it."""
+    body = await request.json()
+    new_content = body.get("content", "")
+    if not new_content:
+        return JSONResponse({"error": "Missing 'content' in body"}, status_code=400)
+
+    store = getattr(state, 'chat_session_store', None)
+
+    # Update persistent store + truncate
+    if store:
+        try:
+            store.update_message(conversation_id, index, new_content)
+            store.truncate_session(conversation_id, index + 1)  # Remove everything after the edited message
+            store.persist("./data/sessions.json")
+        except Exception as e:
+            logger.warning(f"Error editing message in session store: {e}")
+
+    # Update in-memory deque
+    try:
+        session = _get_session(conversation_id)
+        turns = list(session)
+        if 0 <= index < len(turns):
+            turns[index]["content"] = new_content
+            _chat_sessions[conversation_id] = deque(turns[:index + 1], maxlen=MAX_HISTORY)
+    except Exception as e:
+        logger.warning(f"Error editing message in memory deque: {e}")
+
+    return JSONResponse({"status": "ok", "index": index, "content": new_content})
+
+
+@dashboard_router.delete("/api/dashboard/sessions/{conversation_id}/messages/{index}")
+async def delete_session_message(conversation_id: str, index: int):
+    """Delete a single message at a given index."""
+    store = getattr(state, 'chat_session_store', None)
+
+    if store:
+        try:
+            store.delete_message(conversation_id, index)
+            store.persist("./data/sessions.json")
+        except Exception as e:
+            logger.warning(f"Error deleting message from session store: {e}")
+
+    # Delete from in-memory deque
+    try:
+        session = _get_session(conversation_id)
+        turns = list(session)
+        if 0 <= index < len(turns):
+            turns.pop(index)
+            _chat_sessions[conversation_id] = deque(turns, maxlen=MAX_HISTORY)
+    except Exception as e:
+        logger.warning(f"Error deleting message from memory deque: {e}")
+
+    return JSONResponse({"status": "ok", "deleted_index": index})
+
+
 @dashboard_router.get("/api/dashboard/chat-history")
 async def get_chat_history(conversation_id: str = "dashboard_default"):
     """Return message history for the dashboard chat."""
@@ -1060,13 +1145,79 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
     request_id = str(uuid.uuid4())[:12]
 
     try:
-        enhanced_messages, _ = await build_omniscient_prompt(
+        enhanced_messages, gk_result = await build_omniscient_prompt(
             raw_messages, user_id=current_user_id,
             conversation_id=conversation_id, concise=False,
             request_id=request_id
         )
     except Exception:
         enhanced_messages = raw_messages
+        gk_result = None
+
+    # ── Reasoning config: GatekeeperResult + ModelProfile → /no_think prefix + logit_bias ──
+    # Previene la fuga di ragionamento inglese come testo piatto (Qwen3.5)
+    _think_settings: dict = {}
+    _last_user_msg = ""
+    for m in reversed(enhanced_messages):
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            _last_user_msg = m["content"]
+            break
+    if gk_result and _last_user_msg:
+        try:
+            from core.reasoning import configura_richiesta_agente
+            _content_prompt, _chat_kwargs, _think_settings = configura_richiesta_agente(
+                MODEL_PROFILE, gk_result, _last_user_msg,
+            )
+            # Inject /no_think prefix nell'ultimo messaggio utente
+            if _content_prompt and _content_prompt != _last_user_msg:
+                for m in reversed(enhanced_messages):
+                    if m.get("role") == "user" and isinstance(m.get("content"), str):
+                        m["content"] = _content_prompt
+                        break
+                logger.debug(f"🔇 /no_think prefix injected for intent={gk_result.intent}")
+        except Exception as e:
+            logger.warning(f"configura_richiesta_agente failed (non critico): {e}")
+
+    # ── Greeting short-circuit: saluti puri bypassano LLM ──
+    if gk_result and gk_result.intent == "greeting":
+        greeting_responses = [
+            "Ciao! 👋 Come posso aiutarti oggi?",
+            "Ehilà! In cosa posso esserti utile?",
+            "Ciao! Dimmi tutto, come posso aiutarti?",
+        ]
+        import random as _random
+        greeting_text = _random.choice(greeting_responses)
+
+        # Store assistant response
+        session.append({
+            "role": "assistant",
+            "content": greeting_text,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "metrics": {"ttft_ms": 0, "tok_per_sec": 0, "tokens": 0, "chars": len(greeting_text)},
+        })
+
+        # Save to persistent ChatSessionStore
+        try:
+            store = getattr(state, 'chat_session_store', None)
+            if store:
+                from session.store import MessageTurn
+                user_turn = MessageTurn(role="user", content=payload.message,
+                    timestamp=time.time(), request_id=request_id,
+                    conversation_id=conversation_id, user_id=current_user_id)
+                store.add_turn(user_turn)
+                asst_turn = MessageTurn(role="assistant", content=greeting_text,
+                    timestamp=time.time(), request_id=request_id,
+                    conversation_id=conversation_id, user_id=current_user_id,
+                    prompt_tokens=0, completion_tokens=0, duration_ms=0)
+                store.add_turn(asst_turn)
+                store.persist("./data/sessions.json")
+        except Exception as e:
+            logger.warning(f"Failed to save greeting to ChatSessionStore: {e}")
+
+        async def greeting_generator():
+            yield f"data: {json.dumps({'content': greeting_text})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'full_text': greeting_text, 'ttft_ms': 0, 'tok_per_sec': 0, 'tokens': 0, 'duration_ms': 0})}\n\n"
+        return StreamingResponse(greeting_generator(), media_type="text/event-stream")
 
     async def sse_generator():
         full_text_chunks = []
@@ -1075,8 +1226,22 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
         first_token_time = None
 
         try:
+            # Use proper generation options from model profile instead of empty defaults
+            _gen_opts = {
+                "temperature": MODEL_PROFILE.default_temperature,
+                "repeat_penalty": MODEL_PROFILE.default_repeat_penalty,
+                "top_p": MODEL_PROFILE.default_top_p,
+            }
+            # Merge chat_template_kwargs (es. enable_thinking=False) da configura_richiesta_agente
+            if _chat_kwargs:
+                _gen_opts["chat_template_kwargs"] = _chat_kwargs
+                logger.debug(f"🔇 chat_template_kwargs applied: {_chat_kwargs}")
+            # Merge logit_bias from reasoning config (blocca token <think> per Qwen)
+            if _think_settings.get("logit_bias"):
+                _gen_opts["logit_bias"] = _think_settings["logit_bias"]
+                logger.debug(f"🔇 logit_bias applied: {_think_settings['logit_bias']}")
             gen = await engine.generate_chat_with_router(
-                enhanced_messages, tools=None, options={}, stream=True
+                enhanced_messages, tools=None, options=_gen_opts, stream=True
             )
 
             if isinstance(gen, dict) and "error" in gen:
@@ -1106,13 +1271,54 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
 
         stream_end_time = time.monotonic()
         full_text = "".join(full_text_chunks)
-        clean_text = strip_action_tags(full_text, model_family=MODEL_PROFILE.family) if full_text else ""
 
-        # Compute metrics
+        # ── Extract reasoning from the raw response BEFORE stripping ──
+        # Cerca blocchi <think>...</think> e li separa dal contenuto visibile
+        # NOTA: Qwen talvolta emette </think> senza <think> di apertura;
+        #       in tal caso tutto ciò che precede </think> è considerato reasoning.
+        reasoning_text = ""
+        _display_text = full_text
+        if full_text:
+            # 1) <think>...</think> pairs (standard, includes <|think|> Qwen format)
+            for _open_pat in [r'<think>', r'<\|think\|>']:
+                _think_pair_pat = re.compile(rf'{_open_pat}(.*?)</think>', re.DOTALL | re.IGNORECASE)
+                _paired = _think_pair_pat.findall(full_text)
+                if _paired:
+                    reasoning_text = "\n\n".join(m.strip() for m in _paired)
+                    _display_text = _think_pair_pat.sub("", full_text).strip()
+                    logger.debug(f"🧠 Extracted {len(_paired)} {_open_pat} pair(s): {len(reasoning_text)} chars")
+                    break
+            # 2) </think> WITHOUT opening <think> (Qwen quirk)
+            # ATTENZIONE: se </think> è alla fine (niente dopo), è un tag stray
+            # da rimuovere e basta — NON estrarre reasoning.
+            if not reasoning_text and '</think>' in full_text.lower():
+                _idx = full_text.lower().rfind('</think>')
+                if _idx > 0:
+                    _before = full_text[:_idx].strip()
+                    _after = full_text[_idx + 8:].strip()  # len('</think>') == 8
+                    if _before and _after:
+                        reasoning_text = _before
+                        _display_text = _after
+                        logger.debug(f"🧠 Extracted reasoning from lone </think>: {len(reasoning_text)} chars")
+                    elif _before and not _after:
+                        # </think> alla fine — tag stray, rimuovilo e basta
+                        _display_text = _before
+                        logger.debug(f"🧹 Stripped trailing </think> from response ({len(_display_text)} chars)")
+            # 3) stray <think> (no close) — rest of text is reasoning
+            if not reasoning_text:
+                _stray_open = re.search(r'<think>(.*)', full_text, re.DOTALL | re.IGNORECASE)
+                if _stray_open:
+                    reasoning_text = _stray_open.group(1).strip()
+                    _display_text = full_text[:_stray_open.start()].strip()
+                    logger.debug(f"🧠 Extracted reasoning from stray <think>: {len(reasoning_text)} chars")
+
+        clean_text = strip_action_tags(_display_text, model_family=MODEL_PROFILE.family) if _display_text else ""
+
+        # Compute metrics — usa clean_text chars (senza reasoning/tags)
         total_duration_ms = round((stream_end_time - stream_start_time) * 1000, 1)
         ttft_ms = round((first_token_time - stream_start_time) * 1000, 1) if first_token_time else total_duration_ms
-        char_count = len(full_text)
-        estimated_tokens = max(1, char_count // 4)
+        clean_char_count = len(clean_text)
+        estimated_tokens = max(1, clean_char_count // 4)
         elapsed_sec = max(0.001, stream_end_time - stream_start_time)
         tok_per_sec = round(estimated_tokens / elapsed_sec, 1)
 
@@ -1122,7 +1328,7 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
                 "role": "assistant",
                 "content": clean_text,
                 "timestamp": datetime.now(UTC).isoformat(),
-                "metrics": {"ttft_ms": ttft_ms, "tok_per_sec": tok_per_sec, "tokens": estimated_tokens, "chars": char_count}
+                "metrics": {"ttft_ms": ttft_ms, "tok_per_sec": tok_per_sec, "tokens": estimated_tokens, "chars": len(full_text)}
             })
 
         # Save to persistent ChatSessionStore
@@ -1171,7 +1377,17 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
             except Exception:
                 pass
 
-        yield f"data: {json.dumps({'done': True, 'full_text': clean_text, 'ttft_ms': ttft_ms, 'tok_per_sec': tok_per_sec, 'tokens': estimated_tokens, 'duration_ms': total_duration_ms})}\n\n"
+        done_payload = {
+            'done': True,
+            'full_text': clean_text,
+            'ttft_ms': ttft_ms,
+            'tok_per_sec': tok_per_sec,
+            'tokens': estimated_tokens,
+            'duration_ms': total_duration_ms,
+        }
+        if reasoning_text:
+            done_payload['reasoning'] = reasoning_text
+        yield f"data: {json.dumps(done_payload)}\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
@@ -1550,6 +1766,64 @@ async def get_inference_analytics():
         "history": history,
         "gatekeeper": gk_data,
     })
+
+
+# ── MCP Server Management ──
+
+@dashboard_router.get("/api/dashboard/mcp/servers")
+async def get_mcp_servers():
+    """List registered MCP servers with status and tool count."""
+    try:
+        from api.mcp.client import get_mcp_manager
+        manager = get_mcp_manager()
+        servers = []
+        for name in manager.list_servers():
+            client = manager.get_server(name)
+            info = {"name": name, "tools": 0, "status": "unknown"}
+            if client:
+                # Determine type
+                info["type"] = "stdio" if hasattr(client, "_process") else "remote"
+                info["status"] = "connected" if getattr(client, "_initialized", False) or getattr(client, "_process", None) else "disconnected"
+                # Count tools registered for this server
+                tool_count = sum(1 for v in manager._tools.values() if v[0] == name)
+                info["tools"] = tool_count
+            servers.append(info)
+        return JSONResponse({"servers": servers, "total": len(servers)})
+    except ImportError:
+        return JSONResponse({"servers": [], "total": 0, "error": "MCP module not available"})
+    except Exception as e:
+        logger.warning(f"Error listing MCP servers: {e}")
+        return JSONResponse({"servers": [], "total": 0, "error": str(e)})
+
+
+@dashboard_router.post("/api/dashboard/mcp/refresh")
+async def refresh_mcp_servers():
+    """Re-initialize all MCP servers and discover tools."""
+    try:
+        from api.mcp.client import get_mcp_manager, init_mcp_from_config
+        from core.config import MCP_CONFIG_PATHS
+        manager = get_mcp_manager()
+
+        # Close existing servers first
+        await manager.close_all()
+
+        # Re-init from config
+        config_paths = None
+        if MCP_CONFIG_PATHS:
+            config_paths = [p.strip() for p in MCP_CONFIG_PATHS.split(",") if p.strip()]
+
+        count = await init_mcp_from_config(config_paths)
+
+        return JSONResponse({
+            "status": "ok",
+            "servers_loaded": count,
+            "message": f"Loaded {count} MCP server(s)",
+        })
+    except ImportError:
+        return JSONResponse({"status": "error", "message": "MCP module not available"})
+    except Exception as e:
+        logger.warning(f"Error refreshing MCP servers: {e}")
+        return JSONResponse({"status": "error", "message": str(e)})
 
 
 # Lazy import for tag processing
