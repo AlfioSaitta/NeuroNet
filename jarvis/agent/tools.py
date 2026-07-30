@@ -18,7 +18,7 @@ import json
 import logging
 import subprocess
 from typing import Optional
-from core.config import DOC_DIR
+from core.config import DOC_DIR, EXEC_READONLY_COMMANDS, EXEC_ALLOWED_COMMANDS
 
 logger = logging.getLogger(__name__)
 
@@ -788,25 +788,10 @@ async def _tool_run_shell_command(args, confirmation_mgr):
     timeout = min(args.get("timeout", 60), 300)
     target_dir = resolve_path(rel_dir) if rel_dir else DOC_DIR
 
-    READONLY_COMMANDS = [
-        "ls", "find", "cat", "head", "tail", "grep", "pwd", "echo",
-        "date", "whoami", "id", "uname", "df", "du", "ps", "uptime",
-        "which", "file", "stat", "diff", "sort", "cut", "wc", "printenv",
-        "python3 -c", "python3 -m", "pip list", "pip show",
-    ]
     base_cmd = cmd.strip().split()[0] if cmd.strip() else ""
-    is_readonly = any(cmd.strip().startswith(ro) for ro in READONLY_COMMANDS)
+    is_readonly = any(cmd.strip().startswith(ro) for ro in EXEC_READONLY_COMMANDS)
 
-    ALLOWED_COMMANDS = [
-        "ls", "find", "cat", "head", "tail", "grep", "pwd", "echo",
-        "date", "whoami", "id", "uname", "df", "du", "ps", "uptime",
-        "which", "file", "stat", "diff", "sort", "cut", "wc", "printenv",
-        "git", "mkdir", "touch", "rm", "mv", "cp", "chmod", "chown",
-        "python3", "pip", "node", "npm", "go", "cargo", "rustc",
-        "docker", "docker-compose",
-    ]
-
-    if base_cmd not in ALLOWED_COMMANDS and not is_readonly:
+    if base_cmd not in EXEC_ALLOWED_COMMANDS and not is_readonly:
         return f"❌ Comando '{base_cmd}' non consentito."
 
     if not is_readonly:

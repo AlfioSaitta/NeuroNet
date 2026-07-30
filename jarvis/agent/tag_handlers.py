@@ -12,6 +12,7 @@ import subprocess
 from typing import Optional
 
 from agent.tags import TagDef, TagContext
+from core.config import EXEC_READONLY_COMMANDS
 
 logger = logging.getLogger(__name__)
 
@@ -299,11 +300,8 @@ async def handle_exec(tag: TagDef, content: str, ctx: TagContext) -> Optional[st
     except (ValueError, IndexError):
         timeout = 30
         command = content.strip()
-    # Safe command whitelist
-    allowed_prefixes = ("ls", "cat", "head", "tail", "echo", "date", "whoami",
-                        "pwd", "df", "du", "ps", "uptime", "free", "uname",
-                        "git status", "git log", "git diff")
-    if not any(command.startswith(p) for p in allowed_prefixes):
+    # Safe command whitelist — da config.py, settabile da Admin Panel
+    if not any(command.startswith(p) for p in EXEC_READONLY_COMMANDS):
         return f"⚠️ **Comando non consentito**: solo comandi readonly. Usa SSH per esecuzione remota."
     try:
         result = subprocess.run(

@@ -467,6 +467,33 @@ except ImportError:
     pass
 
 # ==============================================================================
+# EXEC — WHITELIST COMANDI SHELL
+# ==============================================================================
+# Elenchi separati da virgola di comandi shell permessi.
+# EXEC_READONLY_COMMANDS: eseguiti senza conferma (ls, cat, tree, grep, ...)
+# EXEC_ALLOWED_COMMANDS:  superset che include anche comandi con conferma (git, mkdir, rm, ...)
+_EXEC_READONLY_DEFAULTS = (
+    "ls", "find", "cat", "head", "tail", "grep", "pwd", "echo",
+    "date", "whoami", "id", "uname", "df", "du", "ps", "uptime",
+    "free", "which", "file", "stat", "diff", "sort", "cut", "wc",
+    "printenv", "tree", "python3 -c", "python3 -m", "pip list", "pip show",
+    "git status", "git log", "git diff",
+)
+EXEC_READONLY_COMMANDS: tuple[str, ...] = tuple(
+    c.strip() for c in os.getenv("EXEC_READONLY_COMMANDS", ",".join(_EXEC_READONLY_DEFAULTS)).split(",")
+    if c.strip()
+)
+_EXEC_ALLOWED_DEFAULTS = _EXEC_READONLY_DEFAULTS + (
+    "git", "mkdir", "touch", "rm", "mv", "cp", "chmod", "chown",
+    "python3", "pip", "node", "npm", "go", "cargo", "rustc",
+    "docker", "docker-compose",
+)
+EXEC_ALLOWED_COMMANDS: tuple[str, ...] = tuple(
+    c.strip() for c in os.getenv("EXEC_ALLOWED_COMMANDS", ",".join(_EXEC_ALLOWED_DEFAULTS)).split(",")
+    if c.strip()
+)
+
+# ==============================================================================
 # PROVIDER ESTERNI (Gemini, Claude, ecc.)
 # ==============================================================================
 

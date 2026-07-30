@@ -622,6 +622,26 @@ SETTINGS_META: dict[str, dict] = {
     },
 
     # ═══════════════════════════════════════════
+    # 🔒 Sicurezza (EXEC whitelist)
+    # ═══════════════════════════════════════════
+    "EXEC_READONLY_COMMANDS": {
+        "type": "text", "editable": True,
+        "label": "Readonly Commands", "category": "🔒 Sicurezza",
+        "description": "Comandi shell readonly (nessuna conferma). Separati da virgola.",
+        "options": None, "unit": None, "min": None, "max": None, "step": None,
+        "restart_required": False, "sensitive": False,
+        "basic": True,
+    },
+    "EXEC_ALLOWED_COMMANDS": {
+        "type": "text", "editable": True,
+        "label": "Allowed Commands", "category": "🔒 Sicurezza",
+        "description": "Tutti i comandi shell permessi (superset di readonly, includi anche quelli con conferma). Separati da virgola.",
+        "options": None, "unit": None, "min": None, "max": None, "step": None,
+        "restart_required": False, "sensitive": False,
+        "basic": True,
+    },
+
+    # ═══════════════════════════════════════════
     # Hidden (non mostrati in UI — label vuota)
     # ═══════════════════════════════════════════
     "N_GPU_LAYERS":         {"type": "number", "editable": False, "label": "", "category": "", "description": "", "options": None, "unit": None, "min": None, "max": None, "step": None, "restart_required": False, "sensitive": False, "basic": False},
