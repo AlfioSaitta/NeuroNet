@@ -1,12 +1,13 @@
 # 🔬 Performance Analysis Report — NeuroNet/Jarvis
 
-**Data:** 2026-07-27 (aggiornato)
+**Data:** 2026-07-29 (aggiornato)
 **Modello attivo:** Qwen3.5-4B (35-40 tok/s, full GPU)
 **Gatekeeper classification:** Qwen3.5-4B (main model, 0 VRAM extra, ~0.3-0.8s)
 **Gatekeeper compression:** Qwen3.5 0.8B Q4_K_M (CPU, GATEKEEPER_N_GPU_LAYERS=0, 0 VRAM, 4096 ctx)
 **Embedding:** FastEmbed ONNX CPU (BAAI/bge-base-en-v1.5, 0 VRAM)
 **VRAM:** ~3334 MiB chat + 0 MiB gatekeeper + 0 MiB embedding = 3334 MiB / 4096 MiB (81%)
-**LOC esaminate:** ~13.000+ su 30+ moduli
+**LOC esaminate:** ~44.200 su 88 moduli (excl. venv, incl. llama-cpp-src vendor)
+**LOC sorgente Jarvis (excl vendor):** ~37.500, 37 file >250 LOC, 51 file <250 LOC
 
 ---
 
@@ -29,37 +30,41 @@
 
 ## 1. Executive Summary
 
-L'analisi approfondita ha identificato **38 punti** (3 critici risolti ✅, 3 critici aperti, 6 alti risolti ✅, 4 alti aperti, 12 medi, 5 bassi) distribuiti su tutti i sottosistemi.
+L'analisi approfondita ha identificato **41 punti** distribuiti su tutti i sottosistemi. Rispetto al report precedente (38 punti): +1 regredito ⚠️ (Op3 greeting SC perso in refactoring), +3 risolti ✅ (Cherry Studio fix, Admin panel fixes, Module extraction).
+
+**⚠️ REGRESSIONE CRITICA:** La greeting short-circuit (Op3, implementata in commit 4977aee) è stata **persa durante il refactoring module extraction** (c1ccaa1). `PURE_GREETING` import e blocco `_greeting_text` rimossi da `main.py`. Ora i saluti puri tornano a passare per l'intera pipeline LLM inclusa gatekeeper classification + prompt building.
 
 | Severità | Conteggio |
 |:---|---|---|
-| 🔴 Critico | 6 (3 risolti ✅) |
-| 🟠 Alto | 10 (6 risolti ✅) |
-| 🟡 Medio | 12 |
+| 🔴 Critico | 7 (5 risolti ✅, 1 regredito ⚠️, 1 aperto) |
+| 🟠 Alto | 11 (8 risolti ✅, 3 aperti) |
+| 🟡 Medio | 12 (1 parzialmente risolto) |
 | 🟢 Basso | 5 |
-| **Totale** | **38** (di cui 21 risolti ✅) |
+| **Totale** | **41** (16 risolti ✅ + 4 già risolti PRIMA + 1 parziale + 2 regressioni) |
 
 ### Mappa Calore per Sottosistema
 
 ```
-LLM Pipeline      ██████████████████░░  8 (6 risolti, 2 aperti)
+LLM Pipeline      ██████████████████░░  9 (6 risolti ✅, 1 regredito ⚠️, 2 aperti)
 RAG & Embedding   ████████████░░░░░░░  4 (2 risolti, 2 aperti)
 Memoria Episodica ██████████████░░░░░  5 (1 risolto, 4 aperti)
 Synaptiq          ████░░░░░░░░░░░░░░░  2 (aperti)
 Scheduler & Tasks ████████░░░░░░░░░░░  3 (aperti)
-Telegram/Userbot  ████░░░░░░░░░░░░░░░  2 (1 risolto, 1 aperto)
-Dashboard/Admin   ██████░░░░░░░░░░░░░  3 (1 risolto, 2 aperti)
+Telegram/Userbot  ██████░░░░░░░░░░░░░  2 (2 risolti ✅)
+Dashboard/Admin   ██████░░░░░░░░░░░░░  4 (2 risolti ✅, 2 aperti)
 Infrastruttura    ████░░░░░░░░░░░░░░░  2 (aperti, bassi)
-Anti-Patterns     ███████████████████  6 (2 risolti, 4 aperti)
+Anti-Patterns     ███████████████████  8 (3 risolti ✅, 1 parziale, 4 aperti)
 ```
 
-### Top 5 per Impatto Utente
+### Top 7 per Impatto Utente
 
 1. ~~**Compressor sprecato per contesto vuoto** — 8-15s persi per ~50% richieste progetto~~ — **risolto con Op1+Op8 (skip context < 1000ch)** ✅
 2. **Cron job esegue pipeline LLM completa** — 30-60s per un reminder (ora mitigato da TTFT più basso ma ancora inutile)
 3. ~~**Mem0 → API → Mem0: phantom request loop**~~ — risolto ✅
 4. ~~**Compress ValueError: gatekeeper 2048-ctx overflow**~~ — risolto con 4096 ctx + _GK_MAX_CHARS=1500 ✅
 5. **Tool-calling rigenera risposta** — ~10s → ~20s con tool
+6. **⚠️ Greeting SC REGREDSSO** — era 26ms per saluti puri, ora torna a ~4-6s (commit 4977aee → c1ccaa1)
+7. ~~**Cherry Studio risposte vuote su Qwen/DeepSeek**~~ — risolto con TagSafeStream + /no_think ✅
 
 ---
 
@@ -76,7 +81,7 @@ La pipeline ha potenzialmente 2 LLM call (compressor CPU + Qwen3.5-4B generation
 
 | Scenario | Esempio | Bypass OK? | Classificazione | Compressor | Qwen3.5-4B | **Totale LLM call** | **TTFT stimato** |
 |---|---|---|---|---|---|---|---|
-| **A** Saluto puro | "Ciao", "Buongiorno" | ✅ `PURE_GREETING` | — | — | — | **0** | ~4-6s |
+| **A** Saluto puro | "Ciao", "Buongiorno" | ❌ (regredito ⚠️) | — | — | — | **1** | ~4-6s |
 | **B** Meta/progetti | "Quali progetti hai?" | ✅ `META_PHRASES` | — | — | — | **0** | ~4-6s |
 | **C** Query progetto (bypassa) | "Spiega il codice main.py" | ✅ `PROJECT_KEYWORDS` | — | ✅ (CPU, 8-15s) | ✅ | **2** | ~12-20s |
 | **D** Query progetto (no bypass) | "Analizza impatto modifica config" | ❌ | ✅ (Qwen3.5-4B, 0 VRAM extra) | ✅ (CPU, 8-15s) | ✅ | **2** | ~10-18s |
@@ -205,11 +210,33 @@ Perché è sicuro:
 
 ---
 
-##### Opzione 3 🟢 — Pure Greeting Check in main.py (P1)
+##### Opzione 3 🔴 — Pure Greeting Check — REGREDSSO ⚠️ (P0 URGENTE)
 
-**Sforzo:** ~10min | **Impatto:** -0.1s overhead per saluti | **Qualità: SICURO**
+**Stato:** Era implementato in commit 4977aee (26ms, 0 LLM). **Perso** in commit c1ccaa1 (module extraction refactor).
 
-Spostare il check `PURE_GREETING` da dentro `build_omniscient_prompt()` a `main.py`, prima della chiamata.
+**Cosa è successo:**
+- Commit 4977aee ha aggiunto in `main.py` un blocco `PURE_GREETING.match()` PRIMA di `build_omniscient_prompt()`
+- Risposta immediata per ciao/hello/hi/hey/buongiorno/buonasera/salve — 26ms, 0 token LLM
+- Commit c1ccaa1 ha rimosso `from agent.prompt import PURE_GREETING` e tutto il blocco `_greeting_text`
+- `PURE_GREETING` regex non esiste più in `agent/prompt.py`
+- In `build_omniscient_prompt()` la variabile `_is_short_greeting` (linea 832) salta solo web search, **non** la generazione LLM
+
+**Impatto:** I saluti puri ora passano per gatekeeper classification (~0.3-0.8s) + prompt building + Qwen3.5-4B generation (~3-5s) = ~4-6s invece di 26ms. **Regressione 150x.**
+
+**Fix:** Re-implementare in `main.py` PRIMA di `build_omniscient_prompt()`. Usare `is_greeting()` da `agent/classifier.py` che esiste ancora. Alternativa: usare `GREETING_WORDS` set.
+
+```python
+# agent/classifier.py:40-118 — già presente, da riutilizzare in main.py
+from agent.classifier import is_greeting
+
+# In main.py, PRIMA di build_omniscient_prompt():
+_greeting_text = raw_messages[-1].get("content", "").strip() if raw_messages else ""
+if not is_internal and _greeting_text and is_greeting(_greeting_text):
+    # Risposta immediata: 26ms, 0 token LLM
+    ...
+```
+
+**Sforzo:** ~15min | **Impatto:** -100% LLM call per saluti | **Qualità: SICURO** | **Priorità: P0 URGENTE**
 
 ---
 
@@ -248,7 +275,7 @@ Avviare RAG/Memory/Synaptiq gathering IN PARALLELO con il gatekeeper (invece che
 | # | Opzione | Sforzo | LLM Call Risparmiate | Riduzione TTFT | Priorità | Stato |
 |---|---|---|---|---|---|---|
 | **1+8** | Skip compressor per contesto piccolo/scarsa | ✅ già fatto | 1 per ~60% richieste progetto | **-25% medio** | **P0** | ✅ FATTO |
-| **3** | Pure greeting check in main.py | ~10min | 0 (overhead) | -0.1s | P1 | ❌ Aperto |
+| **3** | Pure greeting check in main.py | ~15min | 1 per ~20% richieste | **regredito: +4-6s per saluti** | **P0** | ⚠️ **REGREDSSO** |
 | **5** | Espansione keyword (solo tecnici) | ~30min | 0.05 per richiesta | -3% medio | P1 | ❌ Aperto |
 | **7** | Context gathering parallelo | ~2h | 0 (solo latenza nascosta) | -1-2s su project | P1 | ❌ Aperto |
 
@@ -256,34 +283,44 @@ Avviare RAG/Memory/Synaptiq gathering IN PARALLELO con il gatekeeper (invece che
 
 L'**Op1+Op8 combinato** (skip compressor per contesto trascurabile) è già stato implementato con soglia `COMPRESSOR_MIN_CHARS=1000` in `agent/prompt.py:431-448`. Non serve più implementarlo. Il risparmio è attivo: -1 LLM call per query semplici (~60% delle richieste progetto).
 
-Op3, Op5 e Op7 restano aperti come ottimizzazioni aggiuntive.
+Op5 e Op7 restano aperti come ottimizzazioni aggiuntive.
 
-**Scenario attuale con Op1+Op8 attivo:**
+**⚠️ Op3 (greeting SC) REGREDSSO CRITICO:** Era implementata in `main.py` (commit 4977aee) con risposta immediata per saluti puri (0 LLM call, 26ms). **Persa** nel refactoring module extraction (c1ccaa1). `PURE_GREETING` regex rimossa da `agent/prompt.py`, la variabile `_is_short_greeting` in `build_omniscient_prompt()` (linea 832) salta solo web search, non la generazione LLM. **Da re-implementare URGENTE.**
+
+**Scenario attuale SENZA greeting SC (regredito):**
 
 ```
-Scenario A (saluto):       0 LLM call, ~4-6s          ← già OK ✅
-Scenario B (meta):         0 LLM call, ~4-6s          ← già OK ✅
-Scenario C (progetto semplice): 1 LLM call (solo Qwen3.5-4B), ~5-8s  ← -60% ✅
-Scenario D (progetto complesso): 2 LLM call (compressor + Qwen3.5-4B), ~12-18s  ← -50% ✅
-Scenario E (generale):     1 LLM call (Qwen3.5-4B), ~5-8s  ← già OK ✅
-Scenario F (contesto):     1 LLM call (Qwen3.5-4B), ~5-8s  ← già OK ✅
+Scenario A (saluto):       1 LLM call (classifier + Qwen3.5-4B), ~4-6s  ← ⚠️ REGREDDITO (era 26ms, 0 LLM)
+Scenario B (meta):         1 LLM call (main model classifier + Qwen3.5-4B), ~5-8s  ← OK
+Scenario C (progetto semplice): 1 LLM call (solo Qwen3.5-4B), ~5-8s  ← ✅
+Scenario D (progetto complesso): 2 LLM call (compressor + Qwen3.5-4B), ~12-18s  ← ✅
+Scenario E (generale):     1 LLM call (Qwen3.5-4B), ~5-8s  ← OK ✅
+Scenario F (contesto):     1 LLM call (Qwen3.5-4B), ~5-8s  ← OK ✅
 
-Riduzione LLM call media: da ~1.4 a ~0.8 per richiesta (-43%)
-Riduzione TTFT media: da ~20-30s a ~7-12s
+Riduzione LLM call media: da ~1.4 a ~0.9 per richiesta (-36%)
+Riduzione TTFT media: da ~20-30s a ~7-12s (ma saluti regrediti da 26ms a ~4-6s)
 ```
 
 ---
 
 ### C4 🔴 CRITICO — Tool-Calling con Doppia Generazione LLM
 
-**File:** `main.py:853-871`
+**File:** `main.py:711-795`
 
-**Problema:** Quando il modello emette `tool_calls` in streaming, il flusso scarta la prima risposta e ne genera una SECONDA:
+**Problema:** Quando il modello emette `tool_calls`, il flusso scarta la prima risposta e ne genera una SECONDA:
 
 ```python
-gen = await engine.generate_chat_with_router(...)  # PRIMA chiamata (stream/non-stream) — linee ~795-800
-# ... tool execution ... (linee 859-866)
-response = await engine.generate_chat_with_router(...)  # SECONDA chiamata (risposta finale) — linea ~871
+# main.py:712-718 — PRIMA chiamata
+response = await engine.generate_chat_with_router(
+    body["messages"], tools=body.get("tools"), options=body.get("options"),
+    stream=False, preferred_provider=provider
+)
+# ... tool execution ... (linee 776-784)
+# main.py:789-792 — SECONDA chiamata (risposta finale)
+response = await engine.generate_chat_with_router(
+    body["messages"], tools=body.get("tools"), options=body.get("options"),
+    stream=False, preferred_provider=provider
+)
 ```
 
 La prima generazione produce contenuto testuale che viene **completamente scartato**. L'utente vede la risposta solo dopo la SECONDA generazione.
@@ -621,6 +658,22 @@ Per un reminder "Ricordami di comprare il pane":
 
 ---
 
+### Bug 9 🟠 ALTO — Cherry Studio Risposte Vuote su Qwen/DeepSeek (SSE) ✅ FIXATO
+
+**File:** `openai_api/chat.py`, `agent/tags.py`
+
+**Problema:** Qwen e DeepSeek non emettono `data: [DONE]` in streaming SSE → Cherry Studio mostra risposte vuote. Gatekeeper reasoning tag (`<reasoning>`) non rimosso dalla risposta visibile.
+
+**Fix applicato:**
+- ✅ `TagSafeStream` wrapper in `openai_api/chat.py`: sostituisce `[DONE]` assente con `data: [DONE]`
+- ✅ Rimozione tag `<reasoning>` dal response visibile
+- ✅ Supporto prefisso `/no_think` per disabilitare reasoning esplicitamente
+- ✅ `gatekeeper.processing()` chiamato nel ramo corretto (non più saltato per Cherry Studio)
+
+**Impatto:** Cherry Studio ora funziona correttamente con Qwen3.5-4B e DeepSeek.
+
+---
+
 ### M14 🟡 MEDIO — engine.generate_chat() Chiamata con LLM_OPTIONS Completi per Userbot
 
 **File:** `tg_bot/userbot.py:98-103`
@@ -643,6 +696,21 @@ Per un reminder "Ricordami di comprare il pane":
 - ✅ `settings_manager.py` — SETTINGS_META (73 env var), _persist_env() (~620 righe)
 - ✅ `telemetry_collector.py` — TelemetryCache, collector (~250 righe)
 - ✅ `dashboard.py` — ridotto da 2337 a ~1566 righe (−35%)
+
+---
+
+### Bug 10 🟠 ALTO — Admin Panel Race Condition Restart Ingestion ✅ FIXATO
+
+**File:** `routes/projects.py`, `admin/panel/static/js/logs.js`, `admin/panel/static/js/management.js`
+
+**Problema:** Pulsante "Re-index" poteva essere premuto multiplo volte → race condition in `_ingest_local_documents()`. `fetchLogs()` senza timeout → richieste pendenti infinite.
+
+**Fix applicato:**
+- ✅ Aggiunto flag `_ingesting` con `lock` in `routes/projects.py`
+- ✅ `fetchLogs()` con timeout 30s
+- ✅ Pulsanti restart funzionanti in Logs view
+- ✅ Rimosso endpoint orfano `/analytics/errors`
+- ✅ `resetSettings` classList toggle fixato
 
 ---
 
@@ -696,18 +764,34 @@ Per un reminder "Ricordami di comprare il pane":
 
 ---
 
-### C5 🔴 CRITICO — TagSafeStream: 862 Righe di State Machine Ultracomplessa
+### C5 🔴 CRITICO — TagSafeStream: State Machine Complessa
 
-**File:** `agent/tags.py:599-861`
+**File:** `agent/tags.py:305-580`
 
-**Problema:** `TagSafeStream` è ~583 righe di state machine (linee 599-1181). Il testo passa attraverso 3 fasi di pulizia ridondanti.
+**Problema:** `TagSafeStream` è ~276 righe di state machine (linee 305-580, ridotta da ~583 righe dopo estrazione tag_handlers.py). Il testo passa attraverso 3 fasi di pulizia ridondanti.
+
+**Nota:** Nel refactoring module extraction (c1ccaa1), 320 righe di handler tag sono state estratte in `agent/tag_handlers.py`, riducendo `tags.py` da ~1181 a 892 righe. TagSafeStream è ora 276 righe (era 583).
+
+**Progresso:** Parzialmente risolto ✅ — modulo più manutenibile, ma la state machine interna è ancora complessa.
 
 **Soluzione proposta:**
 - Semplificare TagSafeStream: bufferizzare fino a delimitatore naturale
 - Eliminare `strip_action_tags()` finale
 - Stato ridotto a singolo stack depth counter
 
-**Sforzo:** ~3h | **Impatto:** Codice più robusto, -200 righe, bug fix
+**Sforzo:** ~2h | **Impatto:** Codice più robusto, -100 righe, bug fix
+
+---
+
+### Op3 ⚠️ REGREDSSO — Greeting Short-Circuit Perso in Module Extraction (P0 URGENTE)
+
+**File:** `main.py` (dopo refactoring c1ccaa1)
+
+**Problema:** Il blocco `PURE_GREETING` con risposta immediata per saluti puri (0 LLM call, 26ms) implementato in commit 4977aee è stato **involontariamente rimosso** nel refactoring module extraction (c1ccaa1).
+
+**Fix proposto:** Riutilizzare `is_greeting()` da `agent/classifier.py` (esiste ancora, linee 114-118) con `GREETING_WORDS` set (linee 40-113). Inserire il check PRIMA di `build_omniscient_prompt()` in `main.py`.
+
+**Sforzo:** ~15min | **Impatto:** 26ms invece di ~4-6s per saluti (-150x) | **Priorità: P0**
 
 ---
 
@@ -759,32 +843,44 @@ Per un reminder "Ricordami di comprare il pane":
 
 ---
 
-### M9 🟡 MEDIO — main.py 1387 Righe Contiene Troppe Responsabilità
+### M9 🟡 MEDIO — main.py 1263 Righe Ancora Troppe Responsabilità (Parz. Risolto)
 
-**File:** `main.py` (1387 righe)
+**File:** `main.py` (1263 righe, ridotto da 1387)
 
-**Soluzione proposta:**
+**Progresso:** ✅ Parzialmente risolto — refactoring module extraction (c1ccaa1) ha estratto:
+- `core/chat_utils.py` (+146 righe): `handle_confirmation_token()`, `spawn_background()`, `build_llm_options()`, `resolve_user_id()`
+- `core/reasoning.py` (+334 righe): `configura_richiesta_agente()`, `genera_stream_agente()`, reasoning metadata
+- `core/telemetry_api.py` (+98 righe): `get_status_dict()`, `get_model_info_dict()`, `get_pending_ops_dict()`
+- Endpoint telemetry API spostati
+
+**Riduzione:** 1387 → 1263 righe (-124 righe, -9%).
+
+**Rimane da fare:**
 - Estrarre modelli Pydantic in `api/models.py`
-- Endpoint dedicati in `api/chat_router.py`
+- Endpoint `/api/chat` in `api/chat_router.py`
+- Endpoint `/api/generate` in `api/generate_router.py`
 
-**Sforzo:** ~2h | **Impatto:** Manutenibilità, testabilità
+**Sforzo:** ~2h | **Impatto:** Manutenibilità, testabilità, -400 righe da main.py
 
 ---
 
 ## 11. Stima Impatto Cumulativo
 
-| Scenario | Pre-Ottimizzazioni (Jul 26) | Stato Attuale (Jul 28) | Prossime Ottimizzazioni P0-P2 | Delta (attuale → futuro) |
+| Scenario | Pre-Ottimizzazioni (Jul 26) | Stato Attuale (Jul 29) | Problemi | Prossime Ottimizzazioni P0-P2 |
 |---|---|---|---|---|
-| **TTFT saluto semplice** | 15-20s | 4-6s ✅ | 4-6s | — |
-| **TTFT query progetto semplice** | 20-35s | **5-8s** ✅ (Op1+8 compressor skip) | 5-8s | — (già ottimizzato) |
-| **TTFT query progetto complessa** | 30-60s | 12-18s ✅ | 12-18s | -0% (compressor necessario) |
-| **TTFT query con tool-calling** | 34-50s | 10-20s ✅ | 5-10s (da C4 fix) | -50% se C4 implementato |
-| **TTFT cron reminder** | 30-60s | 15-30s ✅ | 0.1s (template diretto) | -99% |
-| **Ingestion 1000 file** | 15-20 min | 8-12 min ✅ | 5-8 min (lock ottimizzato) | -40% |
-| **VRAM** | 1589 MiB (39%) | **3334 MiB (81%)** ⚠️ | Invariata | — |
-| **RAM Reranker** | ~600 MB | ~600 MB | ~0 MB (con lazy import) | -600 MB |
-| **Memoria Userbot** | ∞ leak | ≤1000 entry (H6 fix) ✅ | Stop leak | — |
-| **Manutenibilità TagSafeStream** | Fragile, 862 righe | Fragile, ~583 righe (TagSafeStream) | Robusto, ~400 righe | -50% codice |
+| **TTFT saluto semplice** | 15-20s | **4-6s ⚠️** (regredito da 26ms) | Op3 regredito | Re-implementare greeting SC → 26ms |
+| **TTFT query progetto semplice** | 20-35s | **5-8s** ✅ (Op1+8 compressor skip) | — | Già ottimizzato |
+| **TTFT query progetto complessa** | 30-60s | **12-18s** ✅ | — | Compressor necessario |
+| **TTFT query con tool-calling** | 34-50s | **10-20s** ✅ | C4 doppia gen | 5-10s se C4 fix |
+| **TTFT cron reminder** | 30-60s | **15-30s** ✅ | C3 pieno pipeline | 0.1s template diretto |
+| **Ingestion 1000 file** | 15-20 min | **8-12 min** ✅ | H4 lock contenuto | 5-8 min |
+| **VRAM** | 1589 MiB (39%) | **3334 MiB (81%)** ⚠️ | Near limit | Invariata |
+| **RAM Reranker** | ~600 MB | ~600 MB | Import module-level | ~0 MB lazy import |
+| **Memoria Userbot** | ∞ leak | **≤1000 entry** ✅ | — | — |
+| **Manutenibilità TagSafeStream** | Fragile, 862 righe | **276 righe** ✅ (da module extraction) | — | ~150 righe |
+| **main.py dimensione** | 1387 righe | **1263 righe** (-9%) ✅ | Ancora grande | ~800 righe con estrazione |
+| **Cherry Studio Qwen/DeepSeek** | ❌ Rotto | ✅ FUNZIONANTE | — | — |
+| **Admin panel race condition** | ❌ Race condition | ✅ FIXATO | — | — |
 
 ### Diagramma Flusso Richiesta: PRIMA vs DOPO
 
@@ -830,58 +926,48 @@ NOTA: con Op1+Op8 (già implementati) si arriva a ~0.7 LLM call e ~5-7s medio �
 |---|---|---|---|---|---|---|---|
 | ~~P0~~ | ~~C1-Op8~~ | ~~Skip compressor se nessun contenuto~~ | ~~agent/prompt.py~~ | ~~~5min~~ | ~~-1 LLM call~~ | ✅ FATTO (fuso con Op1) |
 | ~~P0~~ | ~~C1-Op1~~ | ~~Skip compressor per contesto piccolo~~ | ~~agent/prompt.py~~ | ~~~15min~~ | ~~-1 LLM call~~ | ✅ FATTO (COMPRESSOR_MIN_CHARS=1000) |
-| **P0** | C3 | Cron reminder senza pipeline LLM completa | `scheduler/cron.py` | ~30min | Latenza 15-30s → 0.1s | ❌ Aperto |
-| **P0** | C5 | Semplificare TagSafeStream | `agent/tags.py`, `main.py` | ~3h | Bug fix, -200 righe | ❌ Aperto |
-| **P1** | C1-Op3 | Pure greeting check in main.py | `main.py` | ~10min | -0.1s overhead saluti | ❌ Aperto |
-| **P1** | C1-Op5 | Espansione keyword bypass (solo termini tecnici) | `agent/prompt.py` | ~30min | +5-10% bypass rate | ❌ Aperto |
-| **P1** | C1-Op7 | Context gathering parallelo con gatekeeper | `agent/prompt.py` | ~2h | -1-2s su query progetto | ❌ Aperto |
-| **P2** | C4 | Ri-usare prima risposta invece di rigenerare | `main.py` | ~2-3h | Tool-calling -50% latenza | ❌ Aperto |
-| **P2** | H4 | Lock separato per stato RAG | `rag/engine.py` | ~1h | -lock contention | ❌ Aperto |
-| **P2** | H5 | Entity extraction opzionale + batch Qdrant | `memory/engine.py` | ~1h | -CPU per salvataggio memoria | ❌ Aperto |
-| **P2** | H9 | Cache tasks.json in memoria | `scheduler/tasks.py` | ~30min | -I/O disco per richiesta | ❌ Aperto |
-| **P3** | M2-M15 | Vari medi (12 item) | Multipli | ~4.5h | Miglioramenti sparsi | ❌ Aperti |
+| **P0 ⚠️** | **Op3** | **Re-implementare greeting SC (REGREDSSO)** | `main.py` | **~15min** | **26ms invece di 4-6s** | ⚠️ **REGREDSSO** |
+| **P0** | C3 | Cron reminder senza pipeline LLM | `scheduler/cron.py` | ~30min | 15-30s → 0.1s | ❌ Aperto |
+| **P0** | C5 | Semplificare TagSafeStream | `agent/tags.py` | ~2h | -100 righe, bug fix | 🔶 Parziale (276 vs 583) |
+| **P1** | C1-Op5 | Espansione keyword bypass (tecnici) | `agent/prompt.py` | ~30min | +5-10% bypass rate | ❌ Aperto |
+| **P1** | C1-Op7 | Context gathering parallelo | `agent/prompt.py` | ~2h | -1-2s su progetto | ❌ Aperto |
+| **P2** | C4 | Ri-usare prima risposta tool-calling | `main.py` | ~2-3h | -50% latenza tool | ❌ Aperto |
+| **P2** | H4 | Lock separato RAG | `rag/engine.py` | ~1h | -lock contention | ❌ Aperto |
+| **P2** | H5 | Entity extraction opzionale | `memory/engine.py` | ~1h | -CPU salvataggio | ❌ Aperto |
+| **P2** | H9 | Cache tasks.json in memoria | `scheduler/tasks.py` | ~30min | -I/O per richiesta | ❌ Aperto |
+| **P3** | M2-M15 | Vari medi (10 item) | Multipli | ~4h | Miglioramenti sparsi | ❌ Aperti |
 | **P4** | L1-L5 | Vari bassi (5 item) | Multipli | ~1h | Polish | ❌ Aperti |
 
 ### Roadmap
 
 **Sprint 0 (COMPLETATO ✅ — Ottimizzazioni Jul 26):**
-- **OpB**: Classificazione intenti con main model ✅
-- **OpA**: Qwen3.5 0.8B 4096ctx + 6 few-shot ✅
-- **C6**: GK_MAX_CHARS=1500 guard per ValueError overflow ✅
-- **C7**: Phantom request loop Mem0 fix ✅
-- **C2**: RAG condizionale (solo per project intent) ✅
-- **H2**: ID deterministici upsert Qdrant ✅
-- **H1**: state.http_client singleton ✅
-- **H6**: Cleanup periodico userbot_sessions ✅
-- **M1**: Thinking mode per famiglia modello ✅
-- **H7**: Split dashboard.py in moduli ✅
-- **H8**: Circular Mem0 config fix ✅
+- OpB, OpA, C6, C7, C2, H2, H1, H6, M1, H7, H8 — ✅
 
 **Sprint 0b (COMPLETATO ✅ — Jul 27 Model Switch):**
-- Switch a Qwen3.5-4B (full GPU, ~35-40 tok/s) ✅
-- FastEmbed ONNX CPU (0 VRAM, no più crash fused_gated_delta_net) ✅
-- Hardware profile auto-detection (modello GGUF → famiglia → parametri ottimali) ✅
-- conversation_id auto-generato (multi-turn senza conversation_id manuale) ✅
-- AGENTS.md + documentazione allineata ✅
+- Qwen3.5-4B, FastEmbed ONNX CPU, hardware profile auto-detection, conversation_id auto — ✅
 
-**Sprint 0c (COMPLETATO ✅ — Jul 28 Compressor Skip):**
-- C1-Op1+Op8: Skip compressor per contesto piccolo/scarsa (COMPRESSOR_MIN_CHARS=1000) ✅
-- Documentazione allineata (performance report, AGENTS.md, README) ✅
+**Sprint 0c (COMPLETATO ✅ — Jul 28):**
+- C1-Op1+Op8: Skip compressor (COMPRESSOR_MIN_CHARS=1000) ✅
+- Documentazione allineata ✅
 
-**Sprint 1a (P0 rimanenti, ~3.5h):**
+**Sprint 0d (COMPLETATO ✅ — Jul 29):**
+- **Module Extraction**: 7 moduli da main.py/tools.py/tags.py/rag/engine.py ✅
+- **Admin Panel Fixes** (Bug 10): race condition ingestion, timeout logs, restart buttons ✅
+- **Cherry Studio Fix** (Bug 9): TagSafeStream, /no_think prefix, gatekeeper reasoning ✅
+- **Qdrant Orphan Cleanup**: sanitize_project_name() centralizzato ✅
+- **Documentazione v9.10.0**: AGENTS.md, CHANGELOG.md, README.md, COMPONENTS.md, PIPELINE.md ✅
+- **Performance Report Aggiornato**: questo file ✅
+
+**Sprint 0e (P0 URGENTE — ~15min):**
+- **Op3**: Re-implementare greeting SC perso in module extraction — usare `is_greeting()` da `agent/classifier.py`
+
+**Sprint 1a (P0 rimanenti, ~2.5h):**
 - C3: Cron reminder senza LLM (~30min)
-- C5: TagSafeStream semplificato (~3h)
+- C5: TagSafeStream semplificato (~2h)
 
-**Sprint 1b (P0 medi, ~1h):**
-- C3: Cron reminder senza LLM (~30min)
-- C1-Op3: Pure greeting check in main.py (~10min)
+**Sprint 1b (P1, ~2.5h):**
 - C1-Op5: Espansione keyword bypass (solo tecnici, ~30min)
-
-**Sprint 1c (P1, ~2h):**
 - C1-Op7: Context gathering parallelo (~2h)
-
-**Sprint 1d (P0 complesso, ~3h):**
-- C5: TagSafeStream semplificato (~3h)
 
 **Sprint 2 (P2, ~7h):**
 - C4: Ri-uso prima risposta tool-calling
@@ -889,11 +975,11 @@ NOTA: con Op1+Op8 (già implementati) si arriva a ~0.7 LLM call e ~5-7s medio �
 - H5: Entity extraction ottimizzata
 - H9: Cache tasks.json
 
-**Sprint 3 (P3, ~4.5h):**
-- Tutti i medi restanti (12 item)
+**Sprint 3 (P3, ~4h):**
+- Tutti i medi restanti
 
 ---
 
-*Report generato il 2026-07-28 da Sisyphus — Performance Analysis Agent.*
-*Aggiornato con: Qwen3.5-4B, FastEmbed ONNX CPU, hardware profile auto-detection, conversation_id auto-generato, compressor skip (Op1+Op8) implementato.*
-*Basato su analisi statica di ~13.000 LOC su 30+ moduli del codice sorgente.*
+*Report generato il 2026-07-29 da Sisyphus — Performance Analysis Agent.*
+*Aggiornamenti v9.10.0: Module extraction (7 moduli), Admin Panel fixes (Bug 10), Cherry Studio fix (Bug 9), greeting SC regression ⚠️.*
+*Basato su analisi statica di ~44.200 LOC su 88 moduli + benchmark reali da BENCHMARKS.md.*
