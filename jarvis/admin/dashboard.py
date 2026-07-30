@@ -1272,47 +1272,14 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
         stream_end_time = time.monotonic()
         full_text = "".join(full_text_chunks)
 
-        # ── Extract reasoning from the raw response BEFORE stripping ──
-        # Cerca blocchi <think>...</think> e li separa dal contenuto visibile
-        # NOTA: Qwen talvolta emette </think> senza <think> di apertura;
-        #       in tal caso tutto ciò che precede </think> è considerato reasoning.
-        reasoning_text = ""
-        _display_text = full_text
-        if full_text:
-            # 1) <think>...</think> pairs (standard, includes <|think|> Qwen format)
-            for _open_pat in [r'<think>', r'<\|think\|>']:
-                _think_pair_pat = re.compile(rf'{_open_pat}(.*?)</think>', re.DOTALL | re.IGNORECASE)
-                _paired = _think_pair_pat.findall(full_text)
-                if _paired:
-                    reasoning_text = "\n\n".join(m.strip() for m in _paired)
-                    _display_text = _think_pair_pat.sub("", full_text).strip()
-                    logger.debug(f"🧠 Extracted {len(_paired)} {_open_pat} pair(s): {len(reasoning_text)} chars")
-                    break
-            # 2) </think> WITHOUT opening <think> (Qwen quirk)
-            # ATTENZIONE: se </think> è alla fine (niente dopo), è un tag stray
-            # da rimuovere e basta — NON estrarre reasoning.
-            if not reasoning_text and '</think>' in full_text.lower():
-                _idx = full_text.lower().rfind('</think>')
-                if _idx > 0:
-                    _before = full_text[:_idx].strip()
-                    _after = full_text[_idx + 8:].strip()  # len('</think>') == 8
-                    if _before and _after:
-                        reasoning_text = _before
-                        _display_text = _after
-                        logger.debug(f"🧠 Extracted reasoning from lone </think>: {len(reasoning_text)} chars")
-                    elif _before and not _after:
-                        # </think> alla fine — tag stray, rimuovilo e basta
-                        _display_text = _before
-                        logger.debug(f"🧹 Stripped trailing </think> from response ({len(_display_text)} chars)")
-            # 3) stray <think> (no close) — rest of text is reasoning
-            if not reasoning_text:
-                _stray_open = re.search(r'<think>(.*)', full_text, re.DOTALL | re.IGNORECASE)
-                if _stray_open:
-                    reasoning_text = _stray_open.group(1).strip()
-                    _display_text = full_text[:_stray_open.start()].strip()
-                    logger.debug(f"🧠 Extracted reasoning from stray <think>: {len(reasoning_text)} chars")
-
-        clean_text = strip_action_tags(_display_text, model_family=MODEL_PROFILE.family) if _display_text else ""
+        # ── Clean response: strip thinking/reasoning tags ──
+        # NOTA: NON estraiamo reasoning separato per la dashboard perché
+        # Qwen3.5 mette spesso la risposta FINALE dentro il blocco <|think|>,
+        # causando duplicazione (response inside reasoning box + main content).
+        # TagSafeStream già filtra i tag thinking durante lo streaming,
+        # quindi il frontend vede il contenuto pulito in tempo reale.
+        # strip_action_tags rimuove eventuali residui di tag thinking/blocchi.
+        clean_text = strip_action_tags(full_text, model_family=MODEL_PROFILE.family) if full_text else ""
 
         # Compute metrics — usa clean_text chars (senza reasoning/tags)
         total_duration_ms = round((stream_end_time - stream_start_time) * 1000, 1)
@@ -1385,8 +1352,6 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
             'tokens': estimated_tokens,
             'duration_ms': total_duration_ms,
         }
-        if reasoning_text:
-            done_payload['reasoning'] = reasoning_text
         yield f"data: {json.dumps(done_payload)}\n\n"
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
