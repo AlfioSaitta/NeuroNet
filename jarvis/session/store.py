@@ -178,6 +178,76 @@ class ChatSessionStore:
         logger.info(f"🗑️ SessionStore: eliminata sessione {conv_id}")
         return True
 
+    def update_message(self, conv_id: str, index: int, new_content: str) -> bool:
+        """Update a message at a given index (0-based) in a session.
+
+        Args:
+            conv_id: conversation ID.
+            index: 0-based index of the message to update.
+            new_content: new content for the message.
+
+        Returns:
+            True if the message was updated.
+        """
+        if conv_id not in self._sessions:
+            return False
+        turns = list(self._sessions[conv_id])
+        if index < 0 or index >= len(turns):
+            return False
+        turn = turns[index]
+        turn.content = new_content
+        # Rebuild deque
+        self._sessions[conv_id] = deque(turns, maxlen=self.max_turns_per_session)
+        logger.debug(f"✏️ SessionStore: message {index} updated in {conv_id}")
+        return True
+
+    def truncate_session(self, conv_id: str, from_index: int) -> bool:
+        """Remove all messages from ``from_index`` (0-based) onwards.
+
+        Args:
+            conv_id: conversation ID.
+            from_index: first index to remove (0-based). All messages at
+                this index and after are deleted.
+
+        Returns:
+            True if the session was truncated.
+        """
+        if conv_id not in self._sessions:
+            return False
+        turns = list(self._sessions[conv_id])
+        if from_index < 0 or from_index >= len(turns):
+            return False
+        self._sessions[conv_id] = deque(turns[:from_index], maxlen=self.max_turns_per_session)
+        # Update metadata
+        meta = self._session_meta.get(conv_id, {})
+        meta["turn_count"] = len(self._sessions[conv_id])
+        meta["last_activity"] = time.time()
+        logger.debug(f"✂️ SessionStore: truncated {conv_id} from index {from_index}")
+        return True
+
+    def delete_message(self, conv_id: str, index: int) -> bool:
+        """Delete a single message at a given index (0-based).
+
+        Args:
+            conv_id: conversation ID.
+            index: 0-based index of the message to delete.
+
+        Returns:
+            True if the message was deleted.
+        """
+        if conv_id not in self._sessions:
+            return False
+        turns = list(self._sessions[conv_id])
+        if index < 0 or index >= len(turns):
+            return False
+        turns.pop(index)
+        self._sessions[conv_id] = deque(turns, maxlen=self.max_turns_per_session)
+        meta = self._session_meta.get(conv_id, {})
+        meta["turn_count"] = len(self._sessions[conv_id])
+        meta["last_activity"] = time.time()
+        logger.debug(f"🗑️ SessionStore: deleted message {index} from {conv_id}")
+        return True
+
     def search_sessions(
         self, query: str, user_id: Optional[str] = None,
         limit: int = 20,
