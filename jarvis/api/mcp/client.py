@@ -12,6 +12,7 @@ Supporta:
 import os
 import json
 import asyncio
+import itertools
 import logging
 import subprocess
 from typing import Dict, List, Any, Optional, Callable
@@ -22,15 +23,19 @@ logger = logging.getLogger(__name__)
 # JSON-RPC Helpers
 # ──────────────────────────────────────────────
 
-_next_id = 0
+_jsonrpc_id_counter = itertools.count(1)
+
+
+def _next_id() -> int:
+    """Thread-safe JSON-RPC request ID generator."""
+    return next(_jsonrpc_id_counter)
 
 
 def _jsonrpc_request(method: str, params: Optional[dict] = None) -> str:
-    global _next_id
-    _next_id += 1
+    req_id = _next_id()
     req = {
         "jsonrpc": "2.0",
-        "id": _next_id,
+        "id": req_id,
         "method": method,
     }
     if params is not None:
@@ -158,11 +163,21 @@ class StdioMcpClient(BaseMcpClient):
         self._process.stdin.write(payload.encode())
         await self._process.stdin.drain()
 
-        # Read response line
-        line = await self._process.stdout.readline()
-        if not line:
-            raise RuntimeError(f"MCP [{self.name}] closed stdout unexpectedly")
-        return json.loads(line.decode().strip())
+        # Read until we have a complete JSON object (handles multi-line responses)
+        buffer = ""
+        while True:
+            line = await self._process.stdout.readline()
+            if not line:
+                raise RuntimeError(f"MCP [{self.name}] closed stdout unexpectedly")
+            decoded = line.decode("utf-8", errors="replace")
+            buffer += decoded
+            stripped = buffer.strip()
+            if stripped:
+                try:
+                    return json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue  # Need more data to form complete JSON
+        raise RuntimeError(f"MCP [{self.name}] incomplete JSON response")
 
     async def _send_notification(self, method: str, params: Optional[dict] = None):
         msg = {"jsonrpc": "2.0", "method": method}
@@ -174,22 +189,12 @@ class StdioMcpClient(BaseMcpClient):
             await self._process.stdin.drain()
 
     async def list_tools(self) -> List[dict]:
-        resp = await self._send_recv({
-            "jsonrpc": "2.0",
-            "id": _jsonrpc_request("tools/list").split("\n")[0],
-            "method": "tools/list",
-            "params": {}
-        })
-        # Fix the id since we use a fake one above — just parse response
-        # Actually we need to properly track IDs. Let me rewrite.
-        # Simple approach: fresh request with sequential ID
-        return self._list_tools_impl()
+        return await self._list_tools_impl()
 
     async def _list_tools_impl(self) -> List[dict]:
-        msg_id = id(self)  # unique-ish
         resp = await self._send_recv({
             "jsonrpc": "2.0",
-            "id": msg_id,
+            "id": _next_id(),
             "method": "tools/list",
             "params": {}
         })
@@ -200,10 +205,9 @@ class StdioMcpClient(BaseMcpClient):
         return result.get("tools", [])
 
     async def call_tool(self, name: str, arguments: dict) -> Any:
-        msg_id = id(self) + hash(name) % (2 ** 31)
         resp = await self._send_recv({
             "jsonrpc": "2.0",
-            "id": msg_id,
+            "id": _next_id(),
             "method": "tools/call",
             "params": {
                 "name": name,
@@ -264,7 +268,7 @@ class HttpMcpClient(BaseMcpClient):
                     self.url,
                     json={
                         "jsonrpc": "2.0",
-                        "id": 1,
+                        "id": _next_id(),
                         "method": "initialize",
                         "params": {
                             "protocolVersion": "2024-11-05",
@@ -296,7 +300,7 @@ class HttpMcpClient(BaseMcpClient):
                     self.url,
                     json={
                         "jsonrpc": "2.0",
-                        "id": 2,
+                        "id": _next_id(),
                         "method": "tools/list",
                         "params": {}
                     },
@@ -319,7 +323,7 @@ class HttpMcpClient(BaseMcpClient):
                     self.url,
                     json={
                         "jsonrpc": "2.0",
-                        "id": 3,
+                        "id": _next_id(),
                         "method": "tools/call",
                         "params": {"name": name, "arguments": arguments}
                     },

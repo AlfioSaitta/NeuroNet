@@ -723,6 +723,20 @@ async def chat(payload: ChatRequest, request: Request):
             })
         tracer.end_step("build_omniscient_prompt")
 
+    # ── Greeting short-circuit: pure greetings skip LLM ──
+    if gatekeeper_result and gatekeeper_result.intent == "greeting":
+        greeting_text = "Ciao! 👋 Come posso aiutarti?"
+        if tracer:
+            tracer.finish()
+        return JSONResponse(status_code=200, content={
+            "id": f"chatcmpl-{request_id or uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": MODEL_ID,
+            "conversation_id": str(conversation_id),
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": greeting_text}, "finish_reason": "stop"}],
+        })
+
     # ── Reasoning config: GatekeeperResult + ModelProfile → generation options ──
     _last_user_msg = ""
     for m in reversed(body.get("messages", [])):
@@ -1489,7 +1503,7 @@ app.include_router(openai_router)
 # ═══════════════════════════════════════════
 
 try:
-    from api.mcp.server_v2 import handle_mcp_post
+    from api.mcp.server_v2 import handle_mcp_post, handle_mcp_sse
 
     @app.post("/api/mcp/v2")
     async def mcp_v2(request: Request):
@@ -1499,9 +1513,12 @@ try:
             from starlette.responses import JSONResponse as _JR
             return _JR({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}}, status_code=400)
 
-        resp = await handle_mcp_post(body) if hasattr(handle_mcp_post, '__call__') else handle_mcp_post(body)
+        # Check for session_id from query params or header
+        session_id = request.query_params.get("session_id") or request.headers.get("X-Session-Id")
 
-        # Se è una notifica, rispondi 202 Accepted
+        resp = await handle_mcp_post(body, session_id=session_id) if hasattr(handle_mcp_post, '__call__') else handle_mcp_post(body)
+
+        # Se è una notifica o response inviata via SSE, rispondi 202 Accepted
         if not resp or resp == {}:
             from starlette.responses import Response as _Resp
             return _Resp(status_code=202)
@@ -1509,7 +1526,11 @@ try:
         from starlette.responses import JSONResponse as _JR2
         return _JR2(resp)
 
-    logger.info("MCP Server v2 su /api/mcp/v2 (Streamable HTTP)")
+    @app.get("/api/mcp/v2/sse")
+    async def mcp_v2_sse(request: Request):
+        return await handle_mcp_sse(request)
+
+    logger.info("MCP Server v2 su /api/mcp/v2 (Streamable HTTP + SSE)")
 except Exception as exc:
     logger.warning(f"MCP Server v2 non disponibile — installa 'mcp' package: pip install mcp ({exc})")
 

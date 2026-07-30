@@ -26,6 +26,8 @@ from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from starlette.responses import StreamingResponse
+
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
@@ -154,13 +156,19 @@ async def chat_send(message: str, user_id: str = "mcp_user") -> str:
 
         # ── Build enriched messages ──
         raw_messages = [{"role": "user", "content": message}]
-        enriched, _ = await build_omniscient_prompt(
+        enriched, gk_result = await build_omniscient_prompt(
             raw_messages,
             user_id=user_id,
             conversation_id="mcp",
             request_id=tracer.request_id,
             finalize_trace=False,
         )
+
+        # ── Greeting short-circuit: pure greetings skip LLM ──
+        if gk_result and gk_result.intent == "greeting":
+            greeting_text = "Ciao! 👋 Come posso aiutarti?"
+            tracer.finish()
+            return _json_text({"response": greeting_text, "trace_id": tracer.request_id, "model": "greeting"})
 
         # ── Generazione LLM ──
         tracer.start_step("gemma_generation")
@@ -229,6 +237,216 @@ async def code_intelligence(query: str, project: str = "") -> str:
         return "Nessun contesto trovato per la query specificata."
     except Exception as e:
         logger.exception(f"code_intelligence error")
+        return _json_text({"error": str(e)})
+
+
+# ──────────────────────────────────────────────
+# Jarvis Core Tools
+# ──────────────────────────────────────────────
+
+
+@mcp.tool(name="jarvis_chat", description="Invia un messaggio alla pipeline chat completa di Jarvis (RAG + memoria + Synaptiq + web search). Restituisce risposta testuale e trace_id per debug.")
+async def jarvis_chat(message: str, user_id: str = "mcp_user") -> str:
+    """Wraps chat_send with the full Jarvis pipeline."""
+    try:
+        from core.telemetry import PipelineTracer
+        from agent.prompt import build_omniscient_prompt
+        from core.llm_engine import engine
+
+        tracer = PipelineTracer.begin(user_message=message[:200], user_id=user_id)
+        raw_messages = [{"role": "user", "content": message}]
+        enriched, gk_result = await build_omniscient_prompt(
+            raw_messages, user_id=user_id, conversation_id="mcp",
+            request_id=tracer.request_id, finalize_trace=False,
+        )
+
+        # ── Greeting short-circuit: pure greetings skip LLM ──
+        if gk_result and gk_result.intent == "greeting":
+            greeting_text = "Ciao! 👋 Come posso aiutarti?"
+            tracer.finish()
+            return _json_text({"response": greeting_text, "trace_id": tracer.request_id, "model": "greeting"})
+
+        tracer.start_step("jarvis_chat")
+        response = await engine.generate_chat_with_router(
+            enriched, tools=None, options={"temperature": 0.7}, stream=False
+        )
+        if "error" in response:
+            tracer.set_error(response["error"])
+            tracer.finish()
+            return _json_text({"error": response["error"], "trace_id": tracer.request_id})
+
+        usage = response.get("usage", {})
+        from core.telemetry import LlmCallRecord
+        tracer.add_llm_call(LlmCallRecord(
+            model="chat", step="jarvis_chat", duration_ms=0,
+            tokens_prompt=usage.get("prompt_tokens", 0),
+            tokens_completion=usage.get("completion_tokens", 0),
+            temperature=0.7,
+        ))
+
+        choice = response["choices"][0]["message"]
+        content = choice.get("content", "")
+        tracer.set_llm_response(content)
+        tracer.end_step("jarvis_chat", details={
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "char_count": len(content),
+        })
+        tracer.finish()
+
+        return _json_text({
+            "response": content,
+            "trace_id": tracer.request_id,
+            "model": response.get("model", "unknown"),
+        })
+    except Exception as e:
+        logger.exception("jarvis_chat error")
+        return _json_text({"error": str(e)})
+
+
+@mcp.tool(name="jarvis_exec", description="Esegue un comando shell whitelisted su Jarvis. Solo comandi in EXEC_ALLOWED_COMMANDS. I comandi readonly (EXEC_READONLY_COMMANDS) non richiedono conferma.")
+async def jarvis_exec(command: str, args: str = "") -> str:
+    """Execute a whitelisted shell command via Jarvis."""
+    import asyncio as _asyncio
+
+    try:
+        from core.config import EXEC_READONLY_COMMANDS, EXEC_ALLOWED_COMMANDS
+        full_cmd = f"{command} {args}".strip() if args else command
+
+        # Check whitelist
+        cmd_first = command.split()[0] if command else ""
+        is_allowed = any(full_cmd.startswith(c) or cmd_first == c for c in EXEC_ALLOWED_COMMANDS)
+        if not is_allowed:
+            return _json_text({"error": f"Comando non autorizzato: {command}. Comandi permessi: {', '.join(EXEC_ALLOWED_COMMANDS[:10])}..."})
+
+        is_readonly = any(full_cmd.startswith(c) or cmd_first == c for c in EXEC_READONLY_COMMANDS)
+
+        proc = await _asyncio.create_subprocess_shell(
+            full_cmd,
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await _asyncio.wait_for(proc.communicate(), timeout=30)
+        except _asyncio.TimeoutError:
+            proc.kill()
+            return _json_text({"error": "Timeout 30s", "command": full_cmd})
+
+        return _json_text({
+            "command": full_cmd,
+            "stdout": stdout.decode("utf-8", errors="replace")[-5000:],
+            "stderr": stderr.decode("utf-8", errors="replace")[-1000:],
+            "returncode": proc.returncode,
+            "readonly": is_readonly,
+        })
+    except Exception as e:
+        logger.exception("jarvis_exec error")
+        return _json_text({"error": str(e)})
+
+
+@mcp.tool(name="jarvis_rag_search", description="Cerca nel RAG (Qdrant) documenti e codice semanticamente simili alla query. Opzionale: filtra per progetto. Restituisce chunk di codice con punteggi di similarità.")
+async def jarvis_rag_search(query: str, project: str = "", top_k: int = 5) -> str:
+    """Search RAG (Qdrant) for semantically similar documents and code."""
+    try:
+        from rag.engine import hybrid_search
+        from core.config import RAG_CONFIG
+
+        k = min(max(1, top_k), 20)
+        results = await hybrid_search(
+            query=query,
+            project_name=project if project else None,
+            top_k=k,
+        )
+        if not results:
+            return _json_text({"query": query, "results": [], "count": 0})
+
+        formatted = []
+        for r in results[:k]:
+            formatted.append({
+                "project": r.get("project", ""),
+                "file_path": r.get("file_path", r.get("path", "")),
+                "score": round(r.get("score", 0), 4),
+                "snippet": r.get("content", r.get("text", ""))[:300],
+            })
+
+        return _json_text({"query": query, "results": formatted, "count": len(formatted)})
+    except Exception as e:
+        logger.exception("jarvis_rag_search error")
+        return _json_text({"error": str(e)})
+
+
+@mcp.tool(name="jarvis_memory_search", description="Cerca nella memoria episodica (Mem0) per user_id. Restituisce ricordi recenti e ricorrenti ordinati per rilevanza.")
+async def jarvis_memory_search(query: str, user_id: str = "mcp_user") -> str:
+    """Search episodic memory (Mem0) for relevant memories."""
+    try:
+        from memory.engine import search_memories
+
+        results = await search_memories(
+            query=query,
+            user_id=user_id,
+            limit=10,
+        )
+        if not results:
+            return _json_text({"query": query, "memories": [], "count": 0})
+
+        formatted = []
+        for mem in results:
+            formatted.append({
+                "id": mem.get("id", ""),
+                "content": mem.get("memory", mem.get("content", ""))[:300],
+                "score": round(mem.get("score", 0), 4),
+                "created_at": str(mem.get("created_at", "")),
+            })
+
+        return _json_text({"query": query, "memories": formatted, "count": len(formatted)})
+    except Exception as e:
+        logger.exception("jarvis_memory_search error")
+        return _json_text({"error": str(e)})
+
+
+@mcp.tool(name="jarvis_synaptiq_query", description="Analisi strutturale del codice via Synaptiq: simboli, callers, blast radius. Restituisce analisi del grafo delle dipendenze del codice.")
+async def jarvis_synaptiq_query(query: str, project: str = "") -> str:
+    """Structural code analysis via Synaptiq (symbols, callers, blast radius)."""
+    try:
+        from graph.synaptiq_bridge import hybrid_code_search
+
+        ctx = await hybrid_code_search(
+            query,
+            is_project_query=bool(project),
+            project_name=project if project else None,
+            user_message=query,
+        )
+        if ctx and ctx.strip():
+            return ctx
+        return _json_text({"query": query, "result": "Nessun contesto trovato.", "count": 0})
+    except Exception as e:
+        logger.exception("jarvis_synaptiq_query error")
+        return _json_text({"error": str(e)})
+
+
+@mcp.tool(name="jarvis_web_search", description="Ricerca web via SearXNG. Restituisce snippet e URL dei risultati. Opzionale: specifica numero risultati (max 20).")
+async def jarvis_web_search(query: str, num_results: int = 5) -> str:
+    """Web search via SearXNG metasearch engine."""
+    try:
+        from rag.web_search import web_search
+
+        n = min(max(1, num_results), 20)
+        results = await web_search(query, num_results=n)
+
+        if not results:
+            return _json_text({"query": query, "results": [], "count": 0})
+
+        formatted = []
+        for r in results[:n]:
+            formatted.append({
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "snippet": r.get("content", r.get("snippet", ""))[:300],
+            })
+
+        return _json_text({"query": query, "results": formatted, "count": len(formatted)})
+    except Exception as e:
+        logger.exception("jarvis_web_search error")
         return _json_text({"error": str(e)})
 
 
@@ -494,6 +712,64 @@ def export_session(conversation_id: str, format: str = "json") -> str:
 
 
 # ──────────────────────────────────────────────
+# Active SSE sessions
+# ──────────────────────────────────────────────
+
+_sse_sessions: dict[str, asyncio.Queue] = {}
+
+
+async def handle_mcp_sse(request):
+    """SSE transport for MCP Streamable HTTP.
+
+    Client connects to GET /api/mcp/v2/sse, receives session_id,
+    then uses POST /api/mcp/v2 with session_id for JSON-RPC.
+    """
+    session_id = str(uuid.uuid4())
+    queue: asyncio.Queue = asyncio.Queue()
+    _sse_sessions[session_id] = queue
+
+    endpoint_url = str(request.url).replace("/sse", "")
+
+    async def event_generator():
+        try:
+            yield f"event: endpoint\ndata: {json.dumps({'url': endpoint_url, 'session_id': session_id})}\n\n"
+            while True:
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=30)
+                    if msg is None:
+                        break
+                    event = msg.get("event", "message")
+                    data = msg.get("data", "")
+                    yield f"event: {event}\ndata: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _sse_sessions.pop(session_id, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+def _send_sse_event(session_id: str, event: str, data: str):
+    """Send event to an active SSE session."""
+    queue = _sse_sessions.get(session_id)
+    if queue:
+        try:
+            queue.put_nowait({"event": event, "data": data})
+        except asyncio.QueueFull:
+            logger.warning(f"SSE session {session_id}: queue full, dropping event")
+
+
+# ──────────────────────────────────────────────
 # FastAPI route handler — MCP Streamable HTTP
 # ──────────────────────────────────────────────
 # Implementazione diretta su route FastAPI per evitare
@@ -564,8 +840,11 @@ _RESOURCE_HANDLERS: dict[str, callable] = {
 }
 
 
-async def handle_mcp_post(body: dict) -> dict:
+async def handle_mcp_post(body: dict, session_id: str = None) -> dict:
     """Processa una richiesta JSON-RPC MCP e restituisce la risposta.
+
+    Se session_id è fornito e corrisponde a una sessione SSE attiva,
+    la risposta viene inviata via SSE invece di essere restituita direttamente.
 
     Usata dalla route FastAPI POST /api/mcp/v2 in main.py.
     """
@@ -576,26 +855,37 @@ async def handle_mcp_post(body: dict) -> dict:
     method = body.get("method", "")
     params = body.get("params")
 
+    # Se session_id fornito, estrai dal body se non passato come arg
+    if not session_id and params and isinstance(params, dict):
+        session_id = params.get("session_id") or body.get("session_id")
+
     if method == "initialize":
         proto = (params or {}).get("protocolVersion", "2025-11-05")
         result = {
             "protocolVersion": proto,
-            "serverInfo": {"name": "jarvis-telemetry", "version": "1.0.0"},
+            "serverInfo": {"name": "jarvis", "version": "2.0.0"},
             "capabilities": {
                 "tools": {"listChanged": False},
                 "resources": {"subscribe": False, "listChanged": False},
+                "streaming": {"transport": "sse"},
             },
         }
-        return {"jsonrpc": "2.0", "id": req_id, "result": result}
+        resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
+        if session_id and session_id in _sse_sessions:
+            _send_sse_event(session_id, "message", json.dumps(resp))
+            return {}
+        return resp
 
     if method == "notifications/initialized":
         return {}
 
     if method == "ping":
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"status": "ok"}}
+        resp = {"jsonrpc": "2.0", "id": req_id, "result": {"status": "ok"}}
+        return _sse_or_direct(resp, session_id)
 
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": await _get_tools_list()}}
+        resp = {"jsonrpc": "2.0", "id": req_id, "result": {"tools": await _get_tools_list()}}
+        return _sse_or_direct(resp, session_id)
 
     if method == "tools/call":
         tool_name = (params or {}).get("name", "")
@@ -613,7 +903,8 @@ async def handle_mcp_post(body: dict) -> dict:
             except Exception:
                 pass
         if not handler:
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}}
+            resp = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}}
+            return _sse_or_direct(resp, session_id)
         try:
             # I tool registrati su FastMCP (es. chat_send) hanno firme con keyword args.
             # I tool in _TOOL_HANDLERS accettano un singolo dict `args`.
@@ -631,14 +922,17 @@ async def handle_mcp_post(body: dict) -> dict:
                 text = data
             else:
                 text = _json_text(data)
-            is_err = isinstance(data, dict) and data.get("error") == "not found"
-            return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": text}], "isError": is_err}}
+            is_err = isinstance(data, dict) and (data.get("error") == "not found" or "error" in data)
+            resp = {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": text}], "isError": is_err}}
+            return _sse_or_direct(resp, session_id)
         except Exception as e:
             logger.exception(f"Tool '{tool_name}' error")
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(e)}}
+            resp = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(e)}}
+            return _sse_or_direct(resp, session_id)
 
     if method == "resources/list":
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"resources": await _get_resources_list()}}
+        resp = {"jsonrpc": "2.0", "id": req_id, "result": {"resources": await _get_resources_list()}}
+        return _sse_or_direct(resp, session_id)
 
     if method == "resources/read":
         uri = (params or {}).get("uri", "")
@@ -652,12 +946,25 @@ async def handle_mcp_post(body: dict) -> dict:
                 if turns:
                     handler = lambda: {"conversation_id": _conv_id, "turns": turns, "turn_count": len(turns)}
         if not handler:
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": f"Unknown resource: {uri}"}}
+            resp = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": f"Unknown resource: {uri}"}}
+            return _sse_or_direct(resp, session_id)
         try:
             data = handler()
-            return {"jsonrpc": "2.0", "id": req_id, "result": {"contents": [{"uri": uri, "mimeType": "application/json", "text": _json_text(data)}]}}
+            resp = {"jsonrpc": "2.0", "id": req_id, "result": {"contents": [{"uri": uri, "mimeType": "application/json", "text": _json_text(data)}]}}
+            return _sse_or_direct(resp, session_id)
         except Exception as e:
             logger.exception(f"Resource '{uri}' error")
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(e)}}
+            resp = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(e)}}
+            return _sse_or_direct(resp, session_id)
 
-    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
+    resp = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
+    return _sse_or_direct(resp, session_id)
+
+
+def _sse_or_direct(resp: dict, session_id: str = None) -> dict:
+    """If an SSE session is active, send response via SSE and return empty.
+    Otherwise return the response dict directly."""
+    if session_id and session_id in _sse_sessions:
+        _send_sse_event(session_id, "message", json.dumps(resp))
+        return {}
+    return resp
