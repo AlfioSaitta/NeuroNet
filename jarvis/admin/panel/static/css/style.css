@@ -636,6 +636,17 @@ select.form-input { cursor: pointer; }
 .setting-control input.modified { border-color: var(--warning); box-shadow: 0 0 0 3px rgba(var(--warning-rgb), 0.1); }
 
 /* Settings: select dropdown */
+.setting-control textarea.setting-textarea {
+    width: 320px; min-height: 120px;
+    padding: 8px 12px;
+    background: var(--input-bg); border: 1px solid var(--glass-border);
+    border-radius: 6px; color: var(--text-main);
+    font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+    outline: none; transition: border-color 0.2s;
+    resize: vertical; line-height: 1.5;
+    white-space: pre;
+}
+.setting-control textarea.setting-textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.12); }
 .setting-control select {
     width: 160px; padding: 8px 12px;
     background: var(--input-bg); border: 1px solid var(--glass-border);

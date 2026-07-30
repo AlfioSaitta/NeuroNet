@@ -517,6 +517,9 @@ async function loadSettingsData() {
                     html += `</select>`;
                 } else if (item.type === 'secret') {
                     html += `<div style="display:flex;gap:4px;align-items:center;"><input type="password" id="set-${item.key}" value="${escapeHtml(String(item.value ?? ''))}" oninput="markSettingsDirty()" class="mono text-sm" style="flex:1;min-width:100px;"><button type="button" onclick="toggleSecret('set-${item.key}')" style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:0.8rem;padding:4px;" title="Show/Hide">👁️</button></div>`;
+                } else if (item.type === 'textarea') {
+                    const taValue = (item.value || '').split(',').join('\n');
+                    html += `<textarea id="set-${item.key}" oninput="markSettingsDirty()" class="mono text-sm setting-textarea" rows="10" spellcheck="false">${escapeHtml(taValue)}</textarea>`;
                 } else {
                     html += `<input type="text" id="set-${item.key}" value="${escapeHtml(String(item.value ?? ''))}" oninput="markSettingsDirty()" class="mono text-sm">`;
                 }
@@ -580,6 +583,9 @@ window.saveSettings = async function() {
             payload[key] = el.value;
         } else if (el.type === 'number') {
             payload[key] = el.value !== '' ? parseFloat(el.value) : null;
+        } else if (el.tagName === 'TEXTAREA') {
+            // Textarea: unisci righe con virgole, rimuovi righe vuote
+            payload[key] = el.value.split('\n').map(s => s.trim()).filter(Boolean).join(',');
         } else {
             payload[key] = el.value;
         }

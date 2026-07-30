@@ -625,17 +625,17 @@ SETTINGS_META: dict[str, dict] = {
     # 🔒 Sicurezza (EXEC whitelist)
     # ═══════════════════════════════════════════
     "EXEC_READONLY_COMMANDS": {
-        "type": "text", "editable": True,
+        "type": "textarea", "editable": True,
         "label": "Readonly Commands", "category": "🔒 Sicurezza",
-        "description": "Comandi shell readonly (nessuna conferma). Separati da virgola.",
+        "description": "Comandi shell readonly (nessuna conferma). Un comando per riga.",
         "options": None, "unit": None, "min": None, "max": None, "step": None,
         "restart_required": False, "sensitive": False,
         "basic": True,
     },
     "EXEC_ALLOWED_COMMANDS": {
-        "type": "text", "editable": True,
+        "type": "textarea", "editable": True,
         "label": "Allowed Commands", "category": "🔒 Sicurezza",
-        "description": "Tutti i comandi shell permessi (superset di readonly, includi anche quelli con conferma). Separati da virgola.",
+        "description": "Tutti i comandi shell permessi (superset di readonly). Un comando per riga.",
         "options": None, "unit": None, "min": None, "max": None, "step": None,
         "restart_required": False, "sensitive": False,
         "basic": True,
