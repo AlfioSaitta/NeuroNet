@@ -1277,19 +1277,37 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
         # <|think|>, con </think> alla fine. In tal caso _display_text = "" e il
         # fallback va a _streamFullContent (già filtrato da TagSafeStream).
         # Se la risposta finale è DENTRO il reasoning (duplicata), la deduplica.
+        # NOTA: il confronto usa RAW text (non strip_action_tags) perché
+        # strip_action_tags normalizza \n{3,}→\n\n rompendo endswith.
         reasoning_text = ""
         _display_text = full_text
+        _dedup_clean: str | None = None  # cleaned version used for dedup (fallback)
         if full_text:
-            _think_pair_pat = re.compile(r'<\|think\|>(.*?)</think>', re.DOTALL | re.IGNORECASE)
+            # Matcha sia <|think|> (Qwen pipe) che <think> (Qwen plain)
+            _think_pair_pat = re.compile(
+                r'<(?:' + re.escape('|think|') + r'|think)>(.*?)</think>',
+                re.DOTALL | re.IGNORECASE,
+            )
             _paired = _think_pair_pat.findall(full_text)
             if _paired:
                 reasoning_text = "\n\n".join(m.strip() for m in _paired)
                 _display_text = _think_pair_pat.sub("", full_text).strip()
-                logger.debug(f"🧠 Extracted {len(_paired)} <|think|> pair(s): {len(reasoning_text)} chars")
-                # Deduplica: se la risposta finale è in coda al reasoning, rimuovila
+                logger.debug(f"🧠 Extracted {len(_paired)} think pair(s): {len(reasoning_text)} chars")
+                # Deduplica raw: confronto diretto sulla striscia di _display_text
                 if _display_text and reasoning_text.endswith(_display_text):
                     reasoning_text = reasoning_text[:-len(_display_text)].strip()
                     logger.debug(f"🧹 Deduplicated response from reasoning tail ({len(_display_text)} chars)")
+                else:
+                    # Fallback dedup: ripulisci action tags da entrambi e riprova
+                    # (cattura casi in cui _display_text ha action tag extra come <MEMORY>)
+                    _dt_clean = strip_action_tags(_display_text, model_family=MODEL_PROFILE.family) if _display_text else ""
+                    _rt_clean = strip_action_tags(reasoning_text, model_family=MODEL_PROFILE.family) if reasoning_text else ""
+                    if _dt_clean and _rt_clean.endswith(_dt_clean):
+                        _rt_clean = _rt_clean[:-len(_dt_clean)].strip()
+                        if _rt_clean:
+                            reasoning_text = _rt_clean
+                            _dedup_clean = _dt_clean
+                            logger.debug(f"🧹 Deduplicated (tag-aware) response from reasoning tail ({len(_dt_clean)} chars)")
             # fallback: lone </think> all'inizio o alla fine
             if not reasoning_text and '</think>' in full_text.lower():
                 _idx = full_text.lower().rfind('</think>')
@@ -1300,6 +1318,20 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
                         reasoning_text = _before
                         _display_text = _after
                         logger.debug(f"🧠 Extracted reasoning from lone </think>: {len(reasoning_text)} chars")
+                        # Deduplica raw: confronto diretto
+                        if _after and reasoning_text.endswith(_after):
+                            reasoning_text = reasoning_text[:-len(_after)].strip()
+                            logger.debug(f"🧹 Deduplicated response from reasoning tail (lone, {len(_after)} chars)")
+                        else:
+                            # Fallback: strip_action_tags su entrambi
+                            _at_clean = strip_action_tags(_after, model_family=MODEL_PROFILE.family) if _after else ""
+                            _rt_clean = strip_action_tags(reasoning_text, model_family=MODEL_PROFILE.family) if reasoning_text else ""
+                            if _at_clean and _rt_clean.endswith(_at_clean):
+                                _rt_clean = _rt_clean[:-len(_at_clean)].strip()
+                                if _rt_clean:
+                                    reasoning_text = _rt_clean
+                                    _dedup_clean = _at_clean
+                                    logger.debug(f"🧹 Deduplicated (tag-aware) response from reasoning tail (lone, {len(_at_clean)} chars)")
 
         clean_text = strip_action_tags(_display_text, model_family=MODEL_PROFILE.family) if _display_text else ""
 
