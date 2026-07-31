@@ -108,6 +108,19 @@ def get_reasoning_meta(family: str) -> dict:
 # CONFIGURAZIONE RICHIESTA AGENTE
 # ════════════════════════════════════════════════════════════════
 
+def _is_web_requiring_query(user_input: str) -> bool:
+    """True se la richiesta richiede dati live/web (meteo, news, prezzi).
+
+    Import lazy + try/except per sicurezza (convenzione codebase): nessun
+    modulo RAG deve poter impedire il caricamento di core.reasoning.
+    """
+    try:
+        from rag.web_search import is_web_requiring_query
+        return is_web_requiring_query(user_input)
+    except Exception:
+        return False
+
+
 def configura_richiesta_agente(
     profile: ModelProfile,
     gatekeeper: Optional[GatekeeperResult],
@@ -118,10 +131,16 @@ def configura_richiesta_agente(
     Il ragionamento viene attivato SOLO se:
     - il modello lo supporta (profile.thinking_support == True)
     - E l'intento dell'utente è strutturato ("project" o "meta")
+    - OPPURE la richiesta richiede dati live/web (meteo, news, prezzi)
 
     Se l'intento è "general", il ragionamento viene spento per evitare
     cicli inutili su saluti e chiacchiere. Il blocco fisico avviene tramite
     logit_bias[stop_token_id] = -100 per i modelli nativamente reasoning.
+
+    ECCEZIONE: le web queries (dati live) mantengono il reasoning attivo e
+    NON ricevono il prefisso /no_think: il modello deve sintetizzare il
+    contesto [WEB] fresco invece di rispondere dalla conoscenza interna
+    stantia.
 
     Args:
         profile: Profilo del modello attualmente caricato.
@@ -140,8 +159,12 @@ def configura_richiesta_agente(
     meta = get_reasoning_meta(profile.family)
     intent = gatekeeper.intent if gatekeeper else "general"
 
+    # Le web queries trasportano contesto [WEB] fresco nel prompt: il
+    # reasoning va mantenuto attivo per sintetizzare i dati live.
+    web_query = _is_web_requiring_query(user_input)
+
     # Decisione architetturale basata sul Gatekeeper
-    with_reasoning = profile.thinking_support and intent in ("project", "meta")
+    with_reasoning = profile.thinking_support and (intent in ("project", "meta") or web_query)
 
     if with_reasoning:
         # Configurazione "Calda" per ragionamento logico strutturato
@@ -155,12 +178,14 @@ def configura_richiesta_agente(
             "logit_bias": {},
         }
         logger.info(
-            "🧠 Reasoning ATTIVO (intent=%s, family=%s): T=1.0, top_p=0.95",
-            intent, profile.family,
+            "🧠 Reasoning ATTIVO (intent=%s, family=%s, web_query=%s): T=1.0, top_p=0.95",
+            intent, profile.family, web_query,
         )
     else:
-        # Intento generale/saluti o modello senza supporto reasoning
-        content_prompt = f"{meta['no_think_prefix']}{user_input}"
+        # Intento generale/saluti o modello senza supporto reasoning.
+        # Le web queries non ricevono MAI il prefisso /no_think: porterebbe
+        # il modello a ignorare il contesto [WEB] e rispondere dalla memoria.
+        content_prompt = user_input if web_query else f"{meta['no_think_prefix']}{user_input}"
         chat_template_kwargs = {"enable_thinking": False}
 
         # Blocco fisico del token di pensiero tramite logit_basis
@@ -181,8 +206,8 @@ def configura_richiesta_agente(
             "logit_bias": logit_bias,
         }
         logger.info(
-            "🔇 Reasoning SPENTO (intent=%s, family=%s): T=%s, logit_bias=%s",
-            intent, profile.family, profile.default_temperature,
+            "🔇 Reasoning SPENTO (intent=%s, family=%s, web_query=%s): T=%s, logit_bias=%s",
+            intent, profile.family, web_query, profile.default_temperature,
             bool(logit_bias),
         )
 

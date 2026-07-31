@@ -20,7 +20,7 @@ from core.config import logger, BOT_NAME, LLM_OPTIONS, MODEL_PROFILE, DOC_DIR
 from rag.engine import search_documents, generate_project_tree, list_rag_projects, detect_project_in_conversation, GitignoreFilter
 from rag.cache import search_web_knowledge, save_web_knowledge
 from memory.engine import extract_memories, save_to_memory
-from rag.web_search import perform_web_search_and_crawl
+from rag.web_search import perform_web_search_and_crawl, is_web_requiring_query, clean_web_query
 from agent.tags import build_tag_instructions
 from scheduler.tasks import get_open_tasks
 from core.llm_engine import engine, extract_content, GatekeeperResult
@@ -776,6 +776,38 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         logger.info("🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
         tracer.step("context_gathering", status="skipped", details={"reason": "general_intent"})
         tracer.step("caveman_compression", status="skipped", details={"reason": "general_intent"})
+
+        # ── Web-aware general: query che richiedono dati live (meteo, news, prezzi) ──
+        # Normalmente il branch general risponde immediatamente SENZA contesto, e il
+        # modello usa la conoscenza interna (stantia). Se la query richiede dati
+        # attuali, esegue una web search e inietta i risultati nel prompt.
+        web_ctx_general = ""
+        if is_web_requiring_query(clean_msg):
+            tracer.start_step("web_general_search")
+            try:
+                search_query = clean_web_query(clean_msg)
+                web_ctx_general = await search_web_knowledge(search_query)
+                if not web_ctx_general:
+                    web_ctx_general, _ = await asyncio.wait_for(
+                        perform_web_search_and_crawl(clean_msg, force=True),
+                        timeout=45.0,
+                    )
+                    if web_ctx_general and web_ctx_general != "Nessun risultato online.":
+                        sources = [line[5:] for line in web_ctx_general.split("\n") if line.startswith("URL: ")]
+                        await save_web_knowledge(search_query, web_ctx_general, sources)
+                        tracer._web_search_performed = True
+                        async def _bg_save_web_general():
+                            summary = f"[Web Knowledge] Query: {clean_msg[:200]}\nFonti: {', '.join(sources[:3])}\nRisultati: {web_ctx_general[:600]}"
+                            await save_to_memory(summary, user_id=current_user_id)
+                        task = asyncio.create_task(_bg_save_web_general())
+                        state.background_tasks.add(task)
+                        task.add_done_callback(state.background_tasks.discard)
+                if web_ctx_general:
+                    logger.info(f"🌐 Web context per general query: {len(web_ctx_general)} chars")
+            except Exception as e:
+                logger.warning(f"Web search fallita in branch general (non critico): {e}")
+            tracer.end_step("web_general_search", details={"web_len": len(web_ctx_general or "")})
+
         # Remove datetime context for clean general conversation — non serve far
         # ragionare il modello sulla data per un saluto o chiacchiera
         # Inietta system prompt minimo per prevenire leakage di CoT (Qwen)
@@ -784,9 +816,23 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             for m in messages:
                 if m["role"] == "user" and m.get("content", "").startswith("[Current date/time:"):
                     m["content"] = m["content"].split("\n\n", 1)[1] if "\n\n" in m["content"] else m["content"]
-            # Inject system prompt to prevent CoT leakage — Qwen3.5 genera
-            # ragionamento in inglese come testo piatto se non ha istruzioni
-            messages.insert(0, {"role": "system", "content": GENERAL_CONVERSATION_SYSTEM})
+            if web_ctx_general:
+                # Web context iniettato: system prompt dedicato + user content con [WEB]
+                web_system = GENERAL_CONVERSATION_SYSTEM + (
+                    "\n\n[WEB DATA]\nThe user's request requires current/live information. "
+                    "Use the web search results below (labeled [WEB]) as your ONLY source "
+                    "for factual data. If the results don't answer the question, say so "
+                    "honestly instead of guessing or using outdated knowledge.\n"
+                )
+                messages.insert(0, {"role": "system", "content": web_system})
+                for m in reversed(messages):
+                    if m["role"] == "user":
+                        m["content"] = f"[WEB]\n{web_ctx_general}\n\nQuery: {m['content']}"
+                        break
+            else:
+                # Inject system prompt to prevent CoT leakage — Qwen3.5 genera
+                # ragionamento in inglese come testo piatto se non ha istruzioni
+                messages.insert(0, {"role": "system", "content": GENERAL_CONVERSATION_SYSTEM})
         if finalize_trace:
             tracer.finish()
         return (messages, gk)
