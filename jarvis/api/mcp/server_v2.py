@@ -327,28 +327,18 @@ async def jarvis_exec(command: str, args: str = "") -> str:
 async def jarvis_rag_search(query: str, project: str = "", top_k: int = 5) -> str:
     """Search RAG (Qdrant) for semantically similar documents and code."""
     try:
-        from rag.engine import hybrid_search
-        from core.config import RAG_CONFIG
+        from rag.engine import search_documents
 
         k = min(max(1, top_k), 20)
-        results = await hybrid_search(
-            query=query,
+        context = await search_documents(
+            query,
+            is_project_query=bool(project),
             project_name=project if project else None,
-            top_k=k,
         )
-        if not results:
+        if not context:
             return _json_text({"query": query, "results": [], "count": 0})
 
-        formatted = []
-        for r in results[:k]:
-            formatted.append({
-                "project": r.get("project", ""),
-                "file_path": r.get("file_path", r.get("path", "")),
-                "score": round(r.get("score", 0), 4),
-                "snippet": r.get("content", r.get("text", ""))[:300],
-            })
-
-        return _json_text({"query": query, "results": formatted, "count": len(formatted)})
+        return _json_text({"query": query, "results": context, "count": 1, "format": "markdown"})
     except Exception as e:
         logger.exception("jarvis_rag_search error")
         return _json_text({"error": str(e)})
@@ -358,24 +348,33 @@ async def jarvis_rag_search(query: str, project: str = "", top_k: int = 5) -> st
 async def jarvis_memory_search(query: str, user_id: str = "mcp_user") -> str:
     """Search episodic memory (Mem0) for relevant memories."""
     try:
-        from memory.engine import search_memories
+        from functools import partial
 
-        results = await search_memories(
-            query=query,
-            user_id=user_id,
-            limit=10,
-        )
-        if not results:
+        s = _import_state()
+        if not s.memory:
             return _json_text({"query": query, "memories": [], "count": 0})
 
+        loop = asyncio.get_running_loop()
+        gen_search = partial(
+            s.memory.search,
+            query=query,
+            filters={"user_id": user_id},
+            limit=10,
+        )
+        gen_res = await loop.run_in_executor(s.mem0_executor, gen_search)
+        if not gen_res:
+            return _json_text({"query": query, "memories": [], "count": 0})
+
+        raw_list = gen_res.get("results", gen_res) if isinstance(gen_res, dict) else gen_res
         formatted = []
-        for mem in results:
-            formatted.append({
-                "id": mem.get("id", ""),
-                "content": mem.get("memory", mem.get("content", ""))[:300],
-                "score": round(mem.get("score", 0), 4),
-                "created_at": str(mem.get("created_at", "")),
-            })
+        for mem in raw_list[:10]:
+            if isinstance(mem, dict):
+                formatted.append({
+                    "id": mem.get("id", ""),
+                    "content": mem.get("memory", mem.get("content", ""))[:300],
+                    "score": round(mem.get("score", 0), 4),
+                    "created_at": str(mem.get("created_at", "")),
+                })
 
         return _json_text({"query": query, "memories": formatted, "count": len(formatted)})
     except Exception as e:
@@ -407,16 +406,27 @@ async def jarvis_synaptiq_query(query: str, project: str = "") -> str:
 async def jarvis_web_search(query: str, num_results: int = 5) -> str:
     """Web search via SearXNG metasearch engine."""
     try:
-        from rag.web_search import web_search
+        from core.config import SEARXNG_HOST
+
+        s = _import_state()
+        if not s.http_client:
+            return _json_text({"query": query, "results": [], "count": 0})
 
         n = min(max(1, num_results), 20)
-        results = await web_search(query, num_results=n)
+        searx_resp = await s.http_client.get(
+            f"{SEARXNG_HOST}/search",
+            params={"q": query, "format": "json"},
+            timeout=30.0,
+        )
+        if searx_resp.status_code != 200:
+            return _json_text({"query": query, "results": [], "count": 0})
 
+        results = searx_resp.json().get("results", [])[:n]
         if not results:
             return _json_text({"query": query, "results": [], "count": 0})
 
         formatted = []
-        for r in results[:n]:
+        for r in results:
             formatted.append({
                 "title": r.get("title", ""),
                 "url": r.get("url", ""),

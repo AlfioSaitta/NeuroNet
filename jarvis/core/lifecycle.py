@@ -39,6 +39,7 @@ from rag.engine import (
 )
 from memory.engine import init_mem0_delayed
 from core.llm_engine import engine
+from core.hardware import detect_hardware, get_hardware_block
 from tg_bot.service import init_telegram, start_userbots, stop_telegram
 
 if WATCHDOG_ENABLED:
@@ -116,6 +117,18 @@ async def lifespan(app: FastAPI):
             logger.warning(f"⚠️ Warm-up chat eccezione: {e}")
 
     await _warmup_chat()
+
+    # Rilevamento hardware all'avvio (identità del sistema per il prompt LLM)
+    try:
+        await asyncio.to_thread(detect_hardware)
+        _hw = get_hardware_block()
+        if _hw:
+            _first = next((l.strip() for l in _hw.splitlines() if l.strip().startswith("-")), "")
+            logger.info("🖥️ Hardware rilevato: %s", _first or "ok")
+        else:
+            logger.info("🖥️ Rilevamento hardware: nessun dato disponibile")
+    except Exception as e:
+        logger.warning(f"⚠️ Rilevamento hardware fallito (non critico): {e}")
 
     # Inizializzazione provider esterni (Gemini, ecc.)
     try:

@@ -62,7 +62,7 @@
 
 | Endpoint | Metodo | Funzione |
 |---|---|---|
-| `/api/mcp/v2` | POST | Endpoint MCP Streamable HTTP (JSON-RPC) — 8 tool + 7 resources |
+| `/api/mcp/v2` | POST | Endpoint MCP Streamable HTTP (JSON-RPC) — 24 tool + 8 resources |
 
 ### Pipeline Telemetry
 
@@ -120,7 +120,7 @@
 - **Ring buffer 500 trace**: ultimi 500 trace completati sempre disponibili in memoria
 - **HTTP REST**: 8 endpoint `/api/telemetry/*` per query diretta
 - **MCP stdio**: server esterno per Claude Code / Cursor via `.mcp.json`
-- **MCP v2**: endpoint Streamable HTTP `/api/mcp/v2` — 8 tool + 7 resources
+- **MCP v2**: endpoint Streamable HTTP `/api/mcp/v2` — 24 tool + 8 resources
 
 ---
 
@@ -195,11 +195,25 @@ curl -X POST http://localhost:8000/api/mcp/v2 \
 | `get_recent_traces` | Ultimi N pipeline trace completati | `limit` (int, default 10) |
 | `get_active_traces` | Trace correntemente in esecuzione | nessuno |
 | `get_trace_by_id` | Cerca un trace completato per request_id | `request_id` (stringa, required) |
+| `get_trace_full` | Trace completo con testi dei prompt intermedi (system, RAG, compressione, risposta LLM) | `request_id` (stringa, required) |
 | `get_intent_stats` | Statistiche cumulative classificatore intenti | nessuno |
 | `get_errors` | Contatori di errore per diagnostica | nessuno |
 | `get_status` | Stato sistema: uptime, richieste, token | nessuno |
 | `get_model_info` | Info modello LLM: family, GPU layers | nessuno |
 | `get_pending_ops` | Operazioni pendenti: background tasks, coda watchdog | nessuno |
+| `chat_send` | Invia messaggio alla pipeline chat (gatekeeper + RAG + compressione), restituisce trace_id | `message`, `user_id` |
+| `code_intelligence` | Ricerca ibrida RAG + Synaptiq (contesto semantico + analisi strutturale) | `query`, `project` |
+| `jarvis_chat` | Pipeline chat completa (RAG + memoria + Synaptiq + web search), restituisce trace_id | `message`, `user_id` |
+| `jarvis_exec` | Esegue comando shell whitelisted (EXEC_ALLOWED_COMMANDS); readonly senza conferma | `command`, `args` |
+| `jarvis_rag_search` | Ricerca RAG (Qdrant) documenti/codice semanticamente simili. **Fix 03/08:** → `rag.engine.search_documents` | `query`, `project`, `top_k` (max 20) |
+| `jarvis_memory_search` | Ricerca memoria episodica (Mem0) per user_id. **Fix 03/08:** → `state.memory.search` via `mem0_executor` | `query`, `user_id` |
+| `jarvis_synaptiq_query` | Analisi strutturale codice via Synaptiq (simboli, callers, blast radius) | `query`, `project` |
+| `jarvis_web_search` | Ricerca web via SearXNG. **Fix 03/08:** → richiesta diretta `state.http_client` + `SEARXNG_HOST` | `query`, `num_results` (max 20) |
+| `benchmark_raw` | Test raw LLM speed senza pipeline (TTFT, tok/s) | `prompt`, `max_tokens` |
+| `benchmark_pipeline` | Test LLM via pipeline completa (misura overhead) | `prompt`, `max_tokens` |
+| `list_sessions` | Lista sessioni chat con metadati | `limit`, `sort_by`, `user_id` |
+| `get_session` | Recupera sessione chat completa per conversation_id | `conversation_id` |
+| `search_sessions` | Cerca testo in tutte le sessioni chat | `query`, `user_id`, `limit` |
 
 ### Risorse MCP (resources)
 
@@ -212,6 +226,7 @@ curl -X POST http://localhost:8000/api/mcp/v2 \
 | `jarvis://system/status` | Uptime, richieste, token |
 | `jarvis://model/info` | Informazioni modello LLM |
 | `jarvis://system/pending_ops` | Operazioni pendenti |
+| `jarvis://sessions/list` | Lista sessioni chat con metadati |
 
 ### Esempio di Utilizzo
 

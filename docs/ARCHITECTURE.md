@@ -71,6 +71,8 @@ jarvis:8000
   ├── Memoria: ricordi da Mem0 (Qdrant)
   ├── Synaptiq: grafo strutturale del codice
   ├── Web: SearXNG + Crawl4AI (se richiesto)
+  ├── Hardware Identity: core/hardware.py (nvidia-smi, /proc/cpuinfo,
+  │     /proc/meminfo, hostname) → [HARDWARE IDENTITY] nel system prompt
   └── Super-prompt XML → risposta LLM → loop tool-calling
 ```
 

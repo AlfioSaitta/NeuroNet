@@ -4,6 +4,42 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 
 ---
 
+### v9.12.0 (2026-08-03) — Hardware Identity Block + Fix MCP tool imports
+
+- **`core/hardware.py` (NUOVO):** Rilevamento identità hardware del server via comandi di sistema, **solo stdlib** (testabile standalone, nessuna catena di import pesante):
+  - GPU + VRAM + driver via `nvidia-smi --query-gpu=name,memory.total,memory.free,driver_version`
+  - CPU model via `/proc/cpuinfo` + threads via `os.cpu_count()`
+  - RAM totale/disponibile via `/proc/meminfo` (kB → GiB), fallback `os.sysconf`
+  - Hostname via `socket.gethostname()`
+  - Cache `_HW_CACHE`, mai eccezioni (fallback "n/d" / "non rilevata"). API: `detect_hardware()`, `get_hardware_info()`, `get_hardware_block()`
+- **`core/lifecycle.py`:** `detect_hardware()` eseguito all'avvio post-warmup (`await asyncio.to_thread`) con log `🖥️ Hardware rilevato:` — non bloccante, try/except, mai critico
+- **`agent/prompt.py` — Hardware Identity Block:** Nuovo helper `_hardware_identity_block()` (concatenato a runtime, non nelle costanti module-level valutate all'import) che genera il blocco:
+  ```
+  [HARDWARE IDENTITY — REAL hardware of the Jarvis server]
+  - Hostname / GPU / CPU / RAM
+  If the user asks about your hardware, models, or setup, answer using THESE real values above. Never invent, never deflect.
+  ```
+  Iniettato in **8 rami** del system prompt: `_build_final_prompt` is_raw e non-raw, concise pipeline, greeting, web (con [WEB DATA]), general senza web, e **meta** (fix)
+- **Fix ramo meta (trace `d2811fb00043`):** "Che hardware hai?" veniva classificato come intent `meta` e quel ramo non iniettava alcun system prompt → il modello vedeva solo datetime + lista progetti e inventava ("Apple M2 Pro Mac"). Ora il ramo meta inietta `GENERAL_CONVERSATION_SYSTEM` + hardware block, come greeting/general/concise
+- **Fix MCP tool imports (`api/mcp/server_v2.py`):** 3 tool MCP con import rotti riparati:
+  - `jarvis_rag_search` → `rag.engine.search_documents` (era `hybrid_search` inesistente)
+  - `jarvis_memory_search` → `state.memory.search` via `mem0_executor` (era `memory.engine.search_memories` inesistente)
+  - `jarvis_web_search` → SearXNG diretto via `state.http_client` + `SEARXNG_HOST` (era `rag.web_search.web_search` inesistente)
+- **Verifica live post-riavvio (trace `4c7b101fa70b`):** risposta con RTX 3050 Ti / i5-11300H / 15.4 GiB reali, `system_prompt` contiene `HARDWARE IDENTITY`, `prompt_tokens` 175→552. Test standalone ramo meta (mock intent=meta) PASS. py_compile OK su hardware.py/lifecycle.py/prompt.py/server_v2.py
+- **Documentazione:** AGENTS.md (nuovo modulo core, sezione cronologia 03/08, tabella completato), README.md, COMPONENTS.md, PIPELINE.md, CHANGELOG.md aggiornati
+
+### v9.11.0 (2026-08-02) — Intent Understanding: router GBNF, 10 handler, MCP Reasoning Leak Fix
+
+- **`agent/intent_router.py` (VERIFICATO):** `classify()` — tier-0 fast-path greeting (26ms) → cache LRU 60s → LLM GBNF (18 intent) → fallback regex. `IntentResult` contratto unico, `SLOT_EXTRACTORS` per intent, `INTENT_THRESHOLDS` (read 0.60 / write 0.70), `DISPATCH_TABLE` + `dispatch()`. Benchmark 100% intent (69/69) + 100% slot (67/67). Grep legacy (`GatekeeperResult`/`to_gatekeeper_result`/`extended_intent`/`INTENT_ROUTER_MODE`) = 0
+- **`agent/intent_handlers.py` (ESTESO):** 10 intent handler (`schedule`/`memory`/`task`/`git`/`ssh`/`transcribe`/`fetch`/`translate`/`config`/`maintenance`) con firma unificata `(result, context)` + `register_handlers()`. Op distruttive via `_confirm_or_pending` (CONFIRM_REQ token-based, timeout 300s). Whitelist SSH read/write, mask segreti config
+- **`agent/context_compressor.py` (NUOVO):** Estratto da `prompt.py` (92 righe) — `compress()` + `compress_concise()`, `COMPRESSOR_MIN_CHARS=1000`, 2 call site migrati
+- **Rename `GATEKEEPER_*`→`COMPRESSOR_*`:** config, llm_engine, settings_manager, .env migrate + backup `.env.bak`. Rename `GatekeeperStats`→`IntentStats` (telemetry, state, rotta `/api/telemetry/intent`, MCP tool `get_intent_stats`, risorsa `jarvis://intent/stats`, dashboard) senza alias
+- **MCP Reasoning Leak Fix (`api/mcp/server_v2.py`):** Helper `_run_chat_pipeline()` condiviso da `chat_send`/`jarvis_chat` — applica `configura_richiesta_agente()` (enable_thinking + logit_bias) e `strip_action_tags()` sul content. `agent/tags.py`: gestione chiusura `</think>` orfana in `strip_thinking_blocks()` + pattern plain `<think>...</think>` per famiglia qwen
+- **Fix E2E slot `message` schedule:** estrazione dopo preposizione `di` (`\bdi\s+(.+)`) — nessuna whitelist verbi. 31/31 test PASS, verificato live (trace `3695c9169921`)
+- **`main.py`:** `confirmation_mgr` token-based iniettato nel context di `dispatch()` (entrambi i rami) → write distruttive richiedono conferma. Fix duplicazione `handle_confirmation_token`
+- **Test:** py_compile 13 file OK, `test_fast_path.py` 31/31, `test_intent_handlers_phase4.py` 31/31. Pushato su origin/main (`6a129cd..7766d25`, 6 commit atomici)
+- **Documentazione:** AGENTS.md, README.md, PIPELINE/API_REFERENCE/SETUP/COMPONENTS/ARCHITECTURE allineati
+
 ### v9.10.0 (2026-07-29) — Module Extraction, Admin Panel Fixes, Cherry Studio Supporto
 
 - **Module Extraction (7 moduli):** Estratti moduli da file oversized per rispettare limite 250 LOC:

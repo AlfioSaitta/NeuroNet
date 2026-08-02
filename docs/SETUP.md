@@ -48,6 +48,10 @@ docker compose -f docker-compose.worker.yml build jarvis_worker
 docker logs jarvis_worker | grep -i "vram\|n_gpu_layers"
 # Output: 🎯 [VRAM] Dopo caricamento ... MiB / 4096MiB
 # Output: ⚙️ n_gpu_layers=-1  (full GPU per Qwen3.5-4B)
+
+# Identità hardware rilevata all'avvio (iniettata nel system prompt come [HARDWARE IDENTITY])
+docker logs jarvis_worker | grep "Hardware rilevato"
+# Output: 🖥️ Hardware rilevato: - Hostname: ... | GPU: NVIDIA GeForce RTX 3050 Ti ...
 ```
 
 ### Test Rapido

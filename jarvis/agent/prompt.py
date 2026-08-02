@@ -32,6 +32,7 @@ try:
 except ImportError:
     synaptiq_engine = None
 from core.telemetry import PipelineTracer, IntentStats
+from core.hardware import get_hardware_block
 import core.state as state
 
 # ════════════════════════════════════════════════════════════════
@@ -112,6 +113,18 @@ CAVEMAN_GEMMA_SYSTEM_ADDENDUM = (
     "- Stop once the answer is complete."
     + MERMAID_RULES
 )
+
+
+def _hardware_identity_block() -> str:
+    """Blocco identità hardware (GPU/CPU/RAM reali) per il system prompt.
+
+    Rilevato all'avvio da core/hardware.py. Concatenato a runtime (non nelle
+    costanti module-level, valutate all'import — prima del detection).
+    """
+    try:
+        return get_hardware_block()
+    except Exception:
+        return ""
 
 
 # ────────────────────────────────────────────────────────────────
@@ -341,12 +354,14 @@ def _build_final_prompt(
             "- No thinking tags, no Jarvis action XML tags (MEMORY, SCHEDULE, SSH, TODO, WEB, etc.).\n"
             "- Use <tool_call> XML for tool calling when instructed — that is the ONLY allowed XML tag.\n"
             + MERMAID_RULES + "\n"
+            + _hardware_identity_block()
         )
         user_content = f"Context:\n{compressed}"
     else:
         system_prompt = (
             f"[{_dt}]\n\n"
             + CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
+            + "\n\n" + _hardware_identity_block()
         )
         user_content = compressed
 
@@ -457,7 +472,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         else:
             user_content = compressed
             tracer.end_step("concise_pipeline", details={"comp_len": len(compressed)})
-        system_prompt = f"[{_datetime_context()}]\n\n" + CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM
+        system_prompt = f"[{_datetime_context()}]\n\n" + CAVEMAN_GEMMA_SYSTEM + "\n" + CAVEMAN_GEMMA_SYSTEM_ADDENDUM + "\n\n" + _hardware_identity_block()
         # Remove previous system messages, insert new one at index 0
         messages[:] = [m for m in messages if m["role"] != "system"]
         messages.insert(0, {"role": "system", "content": system_prompt})
@@ -555,7 +570,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         # datetime duplicato (la fonte è il prefisso user).
         if messages:
             messages[:] = [m for m in messages if not (m.get("role") == "system" and "Current date" in m.get("content", ""))]
-            messages.insert(0, {"role": "system", "content": GENERAL_CONVERSATION_SYSTEM})
+            messages.insert(0, {"role": "system", "content": GENERAL_CONVERSATION_SYSTEM + "\n\n" + _hardware_identity_block()})
         if finalize_trace:
             tracer.finish()
         return (messages, gk)
@@ -632,7 +647,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                     "Use the web search results below (labeled [WEB]) as your ONLY source "
                     "for factual data. If the results don't answer the question, say so "
                     "honestly instead of guessing or using outdated knowledge.\n"
-                )
+                ) + "\n\n" + _hardware_identity_block()
                 messages.insert(0, {"role": "system", "content": web_system})
                 for m in reversed(messages):
                     if m["role"] == "user":
@@ -641,7 +656,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             else:
                 # Inject system prompt to prevent CoT leakage — Qwen3.5 genera
                 # ragionamento in inglese come testo piatto se non ha istruzioni
-                messages.insert(0, {"role": "system", "content": GENERAL_CONVERSATION_SYSTEM})
+                messages.insert(0, {"role": "system", "content": GENERAL_CONVERSATION_SYSTEM + "\n\n" + _hardware_identity_block()})
         if finalize_trace:
             tracer.finish()
         return (messages, gk)
@@ -655,6 +670,14 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 m["content"] = meta_prompt
                 break
         tracer.set_user_content(meta_prompt)
+        # FIX 2026-08-02: identità hardware iniettata anche nel ramo meta.
+        # Senza system prompt il modello vede solo datetime + lista progetti e
+        # risponde evasivamente a "che hardware hai?" (trace d2811fb00043).
+        if messages:
+            messages[:] = [m for m in messages if not (m.get("role") == "system" and "Current date" in m.get("content", ""))]
+            _meta_system = GENERAL_CONVERSATION_SYSTEM + "\n\n" + _hardware_identity_block()
+            messages.insert(0, {"role": "system", "content": _meta_system})
+            tracer.set_system_prompt(_meta_system)
         tracer.step("context_gathering", status="skipped", details={"reason": "meta_intent"})
         tracer.step("caveman_compression", status="skipped", details={"reason": "meta_intent"})
         if finalize_trace:

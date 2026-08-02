@@ -44,6 +44,7 @@ NeuroNet/
     │   ├── chat_utils.py            # Helper formattazione e validazione chat (146 righe)
     │   ├── qdrant_utils.py          # Utility Qdrant: sanitize_project_name (51 righe)
     │   ├── reasoning.py             # Logica ragionamento approfondito + CoT (334 righe)
+    │   ├── hardware.py              # Rilevamento identità hardware server (GPU/CPU/RAM/hostname, solo stdlib)
     │   └── telemetry_api.py         # Endpoint API telemetry (98 righe)
     ├── agent/
     │   ├── prompt.py                # Intent Router + context compressor + build_omniscient_prompt + 6 helper (924 righe)
@@ -350,6 +351,10 @@ Messaggio utente
 │                     │    <web_data>
 │                     │    <active_project>
 │                     │    <system_instructions>
+│                     │    [HARDWARE IDENTITY] (GPU/CPU/RAM reali
+│                     │     da core/hardware.py, 8 rami: is_raw,
+│                     │     non-raw, concise, greeting, web,
+│                     │     general×2, meta)
 └─────────────────────┘
 ```
 
@@ -742,7 +747,7 @@ Richiesta utente
 **File:**
 - `jarvis/core/telemetry.py` — Classi core (PipelineTracer, IntentStats, LlmCallRecord, StepRecord, PipelineTrace) (577 righe)
 - `jarvis/api/mcp/server.py` — Server MCP stdio legacy (510 righe)
-- `jarvis/api/mcp/server_v2.py` — Server MCP v2 Streamable HTTP — 8 tool + 7 resources (570 righe)
+- `jarvis/api/mcp/server_v2.py` — Server MCP v2 Streamable HTTP — 24 tool + 8 resources
 - `jarvis/api/mcp/client.py` — Client MCP per tool esterni (634 righe)
 - `jarvis/core/state.py` — Ring buffer `pipeline_traces`, `intent_stats`, `error_counters`
 - `.mcp.json` — Config per Claude Code/Cursor
@@ -773,3 +778,32 @@ Classificatore intenti centralizzato con pattern matching:
 | `is_internal_query(msg)` | True se comando interno |
 
 Costanti `Intent.*` e `PROJECT_KEYWORDS` per matching rapido.
+
+---
+
+### 18. 🖥️ Hardware Identity (`jarvis/core/hardware.py`) — Rilevamento Identità Server
+
+Modulo stdlib-only che rileva l'identità hardware del server all'avvio, usata per iniettare nel system prompt del LLM il blocco `[HARDWARE IDENTITY]` (il modello risponde con le specifiche reali invece di evadere o inventare).
+
+**API:**
+
+| Funzione | Descrizione |
+|---|---|
+| `detect_hardware()` | Esegue il rilevamento reale (GPU/CPU/RAM/hostname), cache `_HW_CACHE`, mai eccezioni |
+| `get_hardware_info()` | Ritorna la cache (rileva lazy se non ancora eseguito) |
+| `get_hardware_block()` | Blocco formattato `[HARDWARE IDENTITY ...]` per il system prompt, `""` se nessun dato utile |
+
+**Sorgenti dati (solo stdlib, mai eccezioni):**
+
+| Dato | Sorgente |
+|---|---|
+| GPU + VRAM + driver | `nvidia-smi --query-gpu=name,memory.total,memory.free,driver_version --format=csv,noheader,nounits` |
+| CPU model + threads | `/proc/cpuinfo` (`model name`) + `os.cpu_count()` |
+| RAM totale/disponibile | `/proc/meminfo` (`MemTotal`/`MemAvailable`, kB → GiB), fallback `os.sysconf` |
+| Hostname | `socket.gethostname()` |
+
+**Integrazione:**
+- `core/lifecycle.py`: `detect_hardware()` eseguito all'avvio post-warmup (`await asyncio.to_thread`), log `🖥️ Hardware rilevato:` — non bloccante
+- `agent/prompt.py`: helper `_hardware_identity_block()` chiama `get_hardware_block()` a runtime (non nelle costanti module-level) e concatena il risultato al system prompt in **8 rami**: `_build_final_prompt` (is_raw + non-raw), concise, greeting, web (con `[WEB DATA]`), general senza web, e **meta** (fix 03/08 — prima quel ramo non iniettava system prompt e il modello inventava l'hardware)
+
+**Design note:** nessun import da `core.config`/`llama_cpp` → testabile standalone, zero rischio di import circolare.
