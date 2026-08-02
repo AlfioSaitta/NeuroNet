@@ -45,10 +45,13 @@ from rag.engine import ingest_local_documents, search_documents
 from rag.cache import semantic_cache_search, semantic_cache_store
 from memory.engine import extract_memories, save_to_memory, process_response_tags, reindex_graph_connections
 from agent.tags import strip_action_tags, TagSafeStream
+from agent.intent_router import GREETING_RESPONSE, is_greeting_result, dispatch
+from agent.intent_handlers import register_handlers
+register_handlers()  # Fase 4.12: popola DISPATCH_TABLE (schedule/memory/task) — idempotente
 from agent.prompt import build_omniscient_prompt
 from core.telemetry import PipelineTracer
 from core.llm_engine import engine, extract_content, MODEL_PROFILE
-from core.reasoning import configura_richiesta_agente, genera_stream_agente
+from core.reasoning import apply_reasoning_config, genera_stream_agente
 from agent.tools import execute_tool_call
 from agent.confirmation import ConfirmationManager
 from agent.classifier import is_internal_query
@@ -678,8 +681,6 @@ async def chat(payload: ChatRequest, request: Request):
     # ── Confirmation token handling ──
     confirmation_mgr = None
     confirm_resp = await handle_confirmation_token(body, conversation_id=str(conversation_id))
-    confirmation_mgr = None
-    confirm_resp = await handle_confirmation_token(body, conversation_id=str(conversation_id))
     if confirm_resp is not None:
         return confirm_resp
 
@@ -724,8 +725,8 @@ async def chat(payload: ChatRequest, request: Request):
         tracer.end_step("build_omniscient_prompt")
 
     # ── Greeting short-circuit: pure greetings skip LLM ──
-    if gatekeeper_result and gatekeeper_result.intent == "greeting":
-        greeting_text = "Ciao! 👋 Come posso aiutarti?"
+    if is_greeting_result(gatekeeper_result):
+        greeting_text = GREETING_RESPONSE
         if tracer:
             tracer.finish()
         return JSONResponse(status_code=200, content={
@@ -737,36 +738,19 @@ async def chat(payload: ChatRequest, request: Request):
             "choices": [{"index": 0, "message": {"role": "assistant", "content": greeting_text}, "finish_reason": "stop"}],
         })
 
-    # ── Reasoning config: GatekeeperResult + ModelProfile → generation options ──
+    # ── Reasoning config: IntentResult + ModelProfile → generation options ──
     _last_user_msg = ""
     for m in reversed(body.get("messages", [])):
         if isinstance(m, dict) and m.get("role") == "user":
             _last_user_msg = m.get("content", "")
             break
     if gatekeeper_result and _last_user_msg:
-        _content_prompt, _chat_kwargs, _settings = configura_richiesta_agente(
-            MODEL_PROFILE, gatekeeper_result, _last_user_msg,
-        )
-        # Merge chat_template_kwargs e logit_bias nelle options
         opts = body.get("options") or {}
-        opts.setdefault("chat_template_kwargs", {}).update(_chat_kwargs)
-        if _settings.get("logit_bias"):
-            opts.setdefault("logit_bias", {}).update(_settings["logit_bias"])
-        # Temperature / top_p override solo se la richiesta non specifica già
-        if "temperature" not in opts and "temperature" in _settings:
-            opts["temperature"] = _settings["temperature"]
-        if "top_p" not in opts and "top_p" in _settings:
-            opts["top_p"] = _settings["top_p"]
-        if "repeat_penalty" not in opts and "repeat_penalty" in _settings:
-            opts["repeat_penalty"] = _settings["repeat_penalty"]
+        apply_reasoning_config(opts, gatekeeper_result, _last_user_msg, MODEL_PROFILE)
         body["options"] = opts
-        # Inject /no_think prefix nell'ultimo messaggio utente
-        if _content_prompt and _content_prompt != _last_user_msg:
-            msg_list = body.get("messages", [])
-            for m in reversed(msg_list):
-                if m.get("role") == "user":
-                    m["content"] = _content_prompt
-                    break
+        # FIX 2026-08-02: nessun prefisso testuale "/no_think " nel contenuto utente
+        # (helper condiviso apply_reasoning_config) — il blocco del thinking è
+        # garantito da chat_template_kwargs + logit_bias.
 
     is_stream = body.get("stream", True)
     
@@ -929,6 +913,27 @@ async def chat(payload: ChatRequest, request: Request):
         # per non bloccare la risposta (può impiegare 15s+ con loopback Mem0).
         clean_content = strip_action_tags(content, model_family=MODEL_PROFILE.family) if content else ""
         chat_resp["choices"][0]["message"]["content"] = clean_content or content
+
+        # ── Fase 4.12: dispatch intent → handler con soglie §4.3 ──
+        # "ricordami tra 30 minuti di X" → schedule job; "ricorda che X" → memoria;
+        # "aggiungi un task" → CRUD task. Sotto soglia → nessuna azione (fallback).
+        # confirmation_mgr token-based (from_request): le op distruttive
+        # (git/ssh/config/maintenance write) richiedono conferma CONFIRM_REQ.
+        if gatekeeper_result:
+            try:
+                if confirmation_mgr is None:
+                    confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
+                _confirm = await dispatch(gatekeeper_result, {
+                    "user_id": current_user_id,
+                    "chat_id": jwt_user.get("id", 0) if isinstance(jwt_user, dict) else 0,
+                    "project": gatekeeper_result.project,
+                    "confirmation_mgr": confirmation_mgr,
+                })
+                if _confirm:
+                    _cur = chat_resp["choices"][0]["message"].get("content", "")
+                    chat_resp["choices"][0]["message"]["content"] = f"{_cur}\n\n{_confirm}"
+            except Exception as e:
+                logger.warning(f"⚠️ intent dispatch error: {e}")
 
         # Processa i tag in BACKGROUND per effetti collaterali
         if content:
@@ -1248,6 +1253,26 @@ async def chat(payload: ChatRequest, request: Request):
                     tracer.end_step("gemma_generation_stream_tool_final", details={"error": gen2.get("error", "unknown")})
 
             full_text = "".join(full_chunks)
+
+            # ── Fase 4.12: dispatch intent → handler con soglie §4.3 ──
+            # "ricordami tra 30 minuti di X" → schedule job; "ricorda che X" → memoria;
+            # "aggiungi un task" → CRUD task. Sotto soglia → nessuna azione (fallback).
+            # confirmation_mgr token-based (from_request): le op distruttive
+            # (git/ssh/config/maintenance write) richiedono conferma CONFIRM_REQ.
+            if gatekeeper_result:
+                try:
+                    if confirmation_mgr is None:
+                        confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
+                    _confirm = await dispatch(gatekeeper_result, {
+                        "user_id": current_user_id,
+                        "chat_id": jwt_user.get("id", 0) if isinstance(jwt_user, dict) else 0,
+                        "project": gatekeeper_result.project,
+                        "confirmation_mgr": confirmation_mgr,
+                    })
+                    if _confirm:
+                        full_text = f"{full_text}\n\n{_confirm}" if full_text else _confirm
+                except Exception as e:
+                    logger.warning(f"⚠️ intent dispatch error: {e}")
 
             if tracer:
                 from core.telemetry import LlmCallRecord
