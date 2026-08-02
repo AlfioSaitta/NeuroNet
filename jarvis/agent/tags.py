@@ -39,6 +39,9 @@ THINKING_PATTERNS: list[tuple[str, str, str]] = [
     (r'<\|im_start\|>|<\|im_end\|>', "", "qwen"),
     # Qwen thinking: <|think|>...</think> or <|think|>...<|/think|>
     (r'(?s)<\|think\|>.*?(?:</?think>|<\|think\|>)\s*', "", "qwen"),
+    # Qwen thinking plain-text style: <think>...</think> (senza pipe,
+    # leakato quando il template chat non applica i token speciali)
+    (r'(?s)<think>.*?</think>\s*', "", "qwen"),
     # Qwen tool_call tags (both legacy pipe and new XML formats)
     (r'(?s)<\|tool_call\|>.*?<\|tool_call\|>\s*', "", "qwen"),
     (r'(?s)<tool_call\s*>.*?</tool_call\s*>\s*', "", "qwen"),
@@ -115,6 +118,13 @@ def strip_thinking_blocks(text: str, model_family: str = "all") -> str:
         if model_family != "all" and tag != "all" and tag != model_family:
             continue
         text = pattern.sub(replacement, text)
+    # FIX 2026-08-02: chiusura </think> orfana senza apertura visibile.
+    # Il modello Qwen emette <think> come token speciale del template chat
+    # (non compare nel content), ma il testo reasoning + </think> restano.
+    # Se le chiusure superano le aperture, tutto ciò che precede la prima
+    # chiusura è reasoning da scartare.
+    if text.count('</think>') > text.count('<think>'):
+        text = re.sub(r'^.*?</think>', '', text, flags=re.DOTALL).strip()
     return text.strip()
 
 
