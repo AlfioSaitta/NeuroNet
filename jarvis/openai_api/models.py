@@ -12,8 +12,22 @@ router = APIRouter()
 
 
 class OpenAIMessage(BaseModel):
+    """Messaggio OpenAI-compatibile (Fase 6.1 — compatibilità client agentici).
+
+    Contratto esteso per client agentici (OpenCode, Cline, Continue, Roo):
+    - ``content`` può essere str OPPURE array di blocchi OpenAI
+      (``[{"type":"text","text":...}]``) come inviato da AI SDK/OpenCode;
+      None ammesso per messaggi assistant con soli ``tool_calls``.
+    - ``tool_calls`` / ``tool_call_id`` / ``name`` preservano lo storico del
+      loop tool-calling (altrimenti pydantic con extra='ignore' li scartava
+      silenziosamente e il modello perdeva il contesto al secondo giro).
+    """
     role: str
-    content: str
+    content: Optional[str | List[Dict[str, Any]]] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+    model_config = ConfigDict(extra="allow")
 
 
 class ChatCompletionRequestOpenAI(BaseModel):
@@ -34,6 +48,8 @@ class ChatCompletionRequestOpenAI(BaseModel):
     n: Optional[int] = 1
     user: Optional[str] = None
     confirmation_token: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    stream_options: Optional[Dict[str, Any]] = None
     model_config = ConfigDict(extra="allow")
 
 

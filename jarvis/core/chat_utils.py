@@ -126,7 +126,13 @@ def build_llm_options(body: dict) -> dict:
             options["stop"] = stop_seq
         elif isinstance(stop_seq, str):
             options["stop"] = [stop_seq]
-    
+
+    # Fase 6.7: reasoning_effort (OpenAI agentic clients) — applicato dal
+    # chiamante dopo apply_reasoning_config (high|medium → thinking ON,
+    # low → OFF). Qui si estrae il valore grezzo dal body.
+    if body.get("reasoning_effort") is not None:
+        options["reasoning_effort"] = str(body["reasoning_effort"]).strip().lower()
+
     return options
 
 

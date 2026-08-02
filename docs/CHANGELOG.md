@@ -4,6 +4,22 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 
 ---
 
+### v9.14.0 (2026-08-03) — Fase 6: Compatibilità client agentici (OpenCode & Co.)
+
+- **`jarvis/openai_api/models.py`:** `OpenAIMessage` esteso — `content: str | List[Dict[str, Any]]` (content array), `tool_calls`, `tool_call_id`, `name` (opzionali, default `None`, nessun `extra='forbid'`). `ChatCompletionRequestOpenAI` esteso con `reasoning_effort` e `stream_options`. Nessun payload OpenAI più scartato (422) o validato troppo strettamente
+- **`jarvis/openai_api/chat.py` — flusso `agentic` automatico:** rilevamento da **`tools` non vuoti nel body** (`is_agentic = bool(body.get("tools"))` — fix bug critico: `payload.model_dump()` include chiavi `None`, quindi `"tools" in body` era sempre True). In flusso agentic:
+  - Ramo tool-calling (stream e non-stream): emette i `tool_calls` al client come delta SSE (`delta.tool_calls` con `id`/`type`/`function`) + `finish_reason="tool_calls"`, **NON esegue `execute_tool_call`** né genera la seconda risposta server-side — il client esegue i propri tool e rimanda i risultati (`role:"tool"` con `tool_call_id`)
+  - `_build_client_tools_block()`: blocco `[CLIENT_TOOLS]` iniettato nel system prompt (solo agentic), name + description + parameters condensati (budget ~800 char), filtro tool `mcp__*`/runtime
+  - `process_response_tags` saltato in flusso agentic (header `X-Jarvis-Process-Tags: true` per forzarlo)
+  - `_normalize_content()` per content array, `_estimate_usage()` per lo stream
+  - `reasoning_effort` `high|medium` → thinking ON, `low|absent` → OFF (post `apply_reasoning_config`)
+  - `stream_options.include_usage` → chunk finale con `usage` prima di `data: [DONE]` (entrambi i flussi)
+- **`jarvis/core/chat_utils.py`:** `build_llm_options` estrae `reasoning_effort` dal body
+- **`tests/test_agentic_contract.py` (NUOVO, 23 test):** Contratto agentico E2E — rilevamento agentic (tools non vuoti, tools vuoti → flusso chat), `[CLIENT_TOOLS]` iniettato solo agentic, content array (str, list[str], list[dict] con text/image_url) normalizzati senza crash, messaggi `role:"tool"` con `tool_call_id` preservati, **mai `execute_tool_call`** (spy chiamato 0 volte), streaming SSE con `delta.tool_calls` + `finish_reason="tool_calls"` + chunk `usage` finale, round-trip multi-giro (tool_calls → risultato tool → risposta testuale), non-stream con `tool_calls` nel JSON, `reasoning_effort` mappato, `stream_options.include_usage=false` → nessun chunk usage, niente `data: [DONE]` duplicato. Isolamento `sys.modules` con fixture autouse (lazy import `parse_qwen_tool_calls` a runtime da `core.llm_engine`)
+- **Test:** **92/92 PASS** in unica run pytest (`tests/test_agentic_contract.py tests/test_hardware.py tests/test_prompt_hardware.py tests/test_mcp_tools.py` — ordine vincolato: `mcp_tools` per ultimo, il suo mock `rag.engine` vince), `py_compile` OK sui file modificati
+- **Documentazione:** `docs/plans/intent_understanding_llm.md` (checklist Fase 6 6.1-6.9 → completato, stato header), AGENTS.md (cronologia 03/08)
+- **Pushato su origin/main.**
+
 ### v9.13.0 (2026-08-03) — Test Suite Hardware Identity + Fix bug latente compressione
 
 - **`tests/test_hardware.py` (NUOVO, 33 test):** Suite completa per `core/hardware.py` — `_run` (strip stdout, stdout vuoto, eccezione, timeout, stderr ignorato), `_detect_gpu` (CSV nvidia-smi valido, vuoto→"non rilevata (CPU-only)", malformato→raw, flag di query), `_detect_cpu` (model+threads, model assente→"n/d", file illeggibile, 0 threads), `_detect_ram` (total+available in GiB, senza available, fallback sysconf, sysconf fallito→"n/d", total=0), `detect_hardware` (4 chiavi, cache, mai eccezioni, fallback parziale per-probe), `get_hardware_info` (lazy detection, cache senza re-detect), `get_hardware_block` (formato, vuoto quando gpu non rilevata AND hostname n/d, non-vuoto se una delle due presente, mai eccezioni su cache corrotta), integrazione ambiente reale (detect funzionante, blocco ben formato, solo stdlib via ispezione sorgente)

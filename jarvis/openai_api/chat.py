@@ -52,6 +52,85 @@ def _reconstruct_tool_calls(stream_chunks):
     return result
 
 
+# ── Fase 6.4: <CLIENT_TOOLS> block builder ────────────────────────────
+def _build_client_tools_block(tools: list) -> str:
+    """Condensa i tools dichiarati dal client in un blocco ``<CLIENT_TOOLS>``.
+
+    Budget ~800 char: name + description (troncata a 100 char) + nomi dei
+    primi 6 parametri + required. Filtra i tool runtime ``mcp__*`` di OpenCode
+    per non saturare il contesto. Il modello li usa come capacità disponibili
+    per gli intent con side effects (Fase 6.4/6.5).
+    """
+    if not tools:
+        return ""
+    lines = ["[CLIENT_TOOLS]", "Available tools you can invoke (executed by the user/client):"]
+    budget = 800
+    used = sum(len(l) for l in lines)
+    for t in tools:
+        func = t.get("function", t) if isinstance(t, dict) else {}
+        if not isinstance(func, dict):
+            continue
+        name = func.get("name", "")
+        if not name or name.startswith("mcp__"):
+            continue
+        desc = str(func.get("description", ""))[:100]
+        params = func.get("parameters") or {}
+        props = params.get("properties") if isinstance(params, dict) else {}
+        arg_names = ", ".join(list(props.keys())[:6]) if isinstance(props, dict) else ""
+        req = params.get("required") if isinstance(params, dict) else []
+        req_str = ", ".join(req[:4]) if req else ""
+        line = f"- {name}: {desc}" if desc else f"- {name}"
+        if arg_names:
+            line += f" (args: {arg_names})"
+        if req_str:
+            line += f" [req: {req_str}]"
+        if used + len(line) > budget:
+            break
+        lines.append(line)
+        used += len(line)
+    if len(lines) <= 2:
+        return ""
+    return "\n".join(lines)
+
+
+def _normalize_content(content) -> str:
+    """Normalizza content OpenAI (str | list di blocchi) in testo piatto.
+
+    Client agentici (AI SDK/OpenCode) inviano ``content`` come array di blocchi
+    (``[{"type":"text","text":...}]``). build_omniscient_prompt e il router
+    intenti richiedono stringhe: qui i blocchi text vengono concatenati.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for blk in content:
+            if isinstance(blk, dict):
+                if blk.get("type") == "text" and blk.get("text"):
+                    parts.append(str(blk["text"]))
+            elif blk:
+                parts.append(str(blk))
+        return "\n".join(parts)
+    return "" if content is None else str(content)
+
+
+def _estimate_usage(messages: list, completion_text: str) -> dict:
+    """Stima usage (prompt/completion/total tokens) quando lo stream non espone usage.
+
+    llama-cpp-python in streaming non include ``usage`` nei chunk: stima
+    approssimata (~4 char/token) per il chunk finale richiesto da
+    ``stream_options.include_usage`` (Fase 6.8).
+    """
+    prompt_text = json.dumps([m for m in messages if isinstance(m, dict)], ensure_ascii=False)
+    prompt_tokens = max(1, len(prompt_text) // 4)
+    completion_tokens = max(0, len(completion_text or "") // 4)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
 router = APIRouter()
 
 
@@ -62,6 +141,20 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
     body = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
     is_stream = body.get("stream", False)
     raw_messages = body.get("messages", [])
+
+    # ── Fase 6.2: rilevamento flusso agentic ──
+    # Client agentici (OpenCode, Cline, Continue, Roo) dichiarano SEMPRE i propri
+    # tools nel body di /v1/chat/completions. I chat client (Cherry Studio,
+    # dashboard) no. La presenza di "tools" (lista NON vuota) inverte il loop:
+    # esecuzione client-driven (il client esegue i SUOI tool e rimanda il
+    # risultato come role:"tool" con tool_call_id). Nessuna env di modalità.
+    # NOTA: NON usare `"tools" in body` — payload.model_dump() include le chiavi
+    # dichiarate anche se None (exclude_none=False di default), quindi la chiave
+    # esisterebbe sempre e ogni chat client risulterebbe agentic.
+    is_agentic = bool(body.get("tools"))
+    client_tools_block = _build_client_tools_block(body.get("tools") or []) if is_agentic else ""
+    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+    force_process_tags = request.headers.get("X-Jarvis-Process-Tags", "").lower() == "true"
 
     options = build_llm_options(body)
 
@@ -90,7 +183,23 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
     # ── n (number of completions) ──
     n_completions = body.get("n", 1) or 1
 
-    ollama_messages = [{"role": m["role"], "content": m["content"]} for m in raw_messages]
+    # Normalizza content (str | array di blocchi OpenAI) e PRESERVA i campi
+    # del loop agentico (Fase 6.1/6.3): tool_calls dell'assistant e
+    # tool_call_id/name dei messaggi role:"tool" non vanno scartati — il
+    # modello perde il contesto del round-trip al secondo giro.
+    ollama_messages = []
+    for m in raw_messages:
+        _om = {
+            "role": m["role"],
+            "content": _normalize_content(m.get("content")),
+        }
+        if m.get("tool_calls"):
+            _om["tool_calls"] = m["tool_calls"]
+        if m.get("tool_call_id"):
+            _om["tool_call_id"] = m["tool_call_id"]
+        if m.get("name"):
+            _om["name"] = m["name"]
+        ollama_messages.append(_om)
 
     # User from API key middleware (request.state.user) takes precedence
     user_from_middleware = getattr(request.state, 'user', None)
@@ -123,6 +232,17 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             conversation_id=str(conversation_id), concise=concise
         )
 
+    # ── Fase 6.4: iniezione <CLIENT_TOOLS> nel system prompt (solo agentic) ──
+    # I tools dichiarati dal client diventano capacità disponibili per gli
+    # intent con side effects (code/git/ssh/action/maintenance/config-set/task/
+    # memory-save). Il modello li invoca via <tool_call> XML; il client li
+    # esegue lato client. I chat client non-tool non ricevono il blocco.
+    if is_agentic and client_tools_block:
+        for _m in enriched:
+            if _m.get("role") == "system":
+                _m["content"] = str(_m.get("content", "")) + "\n\n" + client_tools_block
+                break
+
     # ── Apply reasoning configuration (thinking suppression) ──
     # Must match what main.py does to prevent models from outputting
     # chain-of-thought reasoning as their entire response.
@@ -139,6 +259,21 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
             # FIX 2026-08-02: nessuna iniezione testuale "/no_think " nel messaggio
             # utente (helper condiviso apply_reasoning_config) — il blocco del
             # thinking è garantito da chat_template_kwargs + logit_bias.
+
+    # ── Fase 6.7: reasoning_effort override (OpenAI agentic clients) ──
+    # high|medium → thinking ON; low → OFF. L'override esplicito del client
+    # vince sul default per intent applicato sopra (apply_reasoning_config).
+    _effort = options.pop("reasoning_effort", None)
+    if _effort:
+        _eff = str(_effort).strip().lower()
+        _ckw = options.setdefault("chat_template_kwargs", {})
+        if _eff in ("high", "medium"):
+            _ckw["enable_thinking"] = True
+            options.pop("logit_bias", None)  # sblocca il thinking bloccato per intent
+            logger.info(f"🧠 reasoning_effort={_eff} → thinking ON (override client)")
+        elif _eff == "low":
+            _ckw["enable_thinking"] = False
+            logger.info(f"🔇 reasoning_effort={_eff} → thinking OFF (override client)")
 
     tools = body.get("tools")
     # Propaga tool_choice alle options per forzatura Qwen XML tool call
@@ -173,6 +308,37 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                         _raw_c, flags=_re.DOTALL
                     ).strip()
         if tool_calls:
+            if is_agentic:
+                # ── Fase 6.3: flusso agentic (non-stream) — MAI eseguire ──
+                # Il client esegue i SUOI tool (già dichiarati in <CLIENT_TOOLS>)
+                # e rimanda il risultato come role:"tool" con tool_call_id nel
+                # turno successivo. Jarvis emette solo i tool_calls.
+                choices = []
+                for idx in range(n_completions):
+                    _tc = tool_calls if idx == 0 else []
+                    msg_data = {
+                        "role": "assistant",
+                        "content": choice.get("content", ""),
+                        "tool_calls": _tc,
+                    }
+                    c = {
+                        "index": idx,
+                        "message": msg_data,
+                        "finish_reason": "tool_calls",
+                    }
+                    if logprobs_enabled and idx == 0:
+                        c["logprobs"] = {
+                            "content": response.get("choices", [{}])[0].get("logprobs"),
+                        } if response.get("choices") else None
+                    choices.append(c)
+                return {
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                    "object": "chat.completion",
+                    "created": int(datetime.now(UTC).timestamp()),
+                    "model": MODEL_ID,
+                    "choices": choices,
+                    "usage": response.get("usage", {}),
+                }
             if confirmation_mgr is None:
                 confirmation_mgr = ConfirmationManager.from_request(request_id=conversation_id)
             enriched.append(dict(choice))
@@ -195,8 +361,10 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
         content = choice.get("content", "")
 
         # Skip process_response_tags for internal Mem0 queries to avoid
-        # recursive memory storage → more Mem0 extractions → infinite loop
-        if _is_internal:
+        # recursive memory storage → more Mem0 extractions → infinite loop.
+        # Fase 6.6: in flusso agentic i tag XML d'azione (MEMORY, SCHEDULE, ...)
+        # sono gestiti dal client; header X-Jarvis-Process-Tags: true li forza.
+        if _is_internal or (is_agentic and not force_process_tags):
             cleaned = content
         else:
             try:
@@ -339,6 +507,30 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                     tool_calls = _reconstruct_tool_calls(tool_calls_stream_acc)
                     first_text = "".join(full_chunks)
 
+                if is_agentic:
+                    # ── Fase 6.3: flusso agentic (streaming) — MAI eseguire ──
+                    # Emette i tool_calls ricostruiti come delta SSE + finish_reason="tool_calls"
+                    # e termina: il client esegue i SUOI tool e rimanda il risultato come
+                    # role:"tool" con tool_call_id nel turno successivo.
+                    for i, tc in enumerate(tool_calls):
+                        tc_delta = {
+                            "index": i,
+                            "id": tc.get("id", f"call_{uuid.uuid4().hex[:12]}"),
+                            "type": tc.get("type", "function"),
+                            "function": {
+                                "name": tc["function"]["name"],
+                                "arguments": tc["function"].get("arguments", ""),
+                            },
+                        }
+                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': {'tool_calls': [tc_delta]}, 'finish_reason': None}]})}\n\n"
+                    yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]})}\n\n"
+                    # Fase 6.8: stream_options.include_usage → chunk finale con usage
+                    if include_usage:
+                        _usage = _estimate_usage(enriched, first_text)
+                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [], 'usage': _usage})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
                 # Costruisce assistant message con contenuto catturato + tool_calls
                 assistant_msg = {"role": "assistant", "content": first_text}
                 if tool_calls:
@@ -391,12 +583,21 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
 
             full_text = "".join(full_chunks)
 
+            # ── Fase 6.8: stream_options.include_usage → chunk finale con usage ──
+            # Richiesto da OpenCode per il monitoraggio; utile anche ai chat
+            # client (Cherry Studio). Emesso PRIMA di [DONE], choices vuote.
+            if include_usage:
+                _usage = _estimate_usage(enriched, full_text)
+                yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': response_created, 'model': MODEL_ID, 'choices': [], 'usage': _usage})}\n\n"
+
             # Invia SUBITO [DONE] per non bloccare il client
             yield "data: [DONE]\n\n"
 
             # Processa i tag in BACKGROUND per effetti collaterali (MEMORY, SCHEDULE, SSH, ecc.)
-            # Skip for internal Mem0 queries to avoid recursive memory loops
-            if full_text and not _is_internal:
+            # Skip for internal Mem0 queries to avoid recursive memory loops.
+            # Fase 6.6: in flusso agentic i tag sono gestiti dal client; header
+            # X-Jarvis-Process-Tags: true li forza.
+            if full_text and not _is_internal and not (is_agentic and not force_process_tags):
                 try:
                     spawn_background(process_response_tags(full_text, user_id=current_user_id))
                 except Exception as e:
