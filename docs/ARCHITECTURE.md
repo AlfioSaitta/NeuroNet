@@ -64,8 +64,8 @@ jarvis:8000
   ├── Embedding: FastEmbed ONNX CPU (BAAI/bge-base-en-v1.5)
   │     └── 0 VRAM, 768 dims
   │
-  ├── Gatekeeper: Qwen3.5-0.8B (CPU, 0 VRAM)
-  │     └── 3-tier: keyword bypass + LLM classification + compression
+  ├── Compressore: Qwen3.5-0.8B (CPU, 0 VRAM)
+  │     └── Context compression (skip < 1000ch, fallback raw)
   │
   ├── RAG: chunk codice da Qdrant (AST-aware, Tree-sitter)
   ├── Memoria: ricordi da Mem0 (Qdrant)

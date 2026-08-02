@@ -38,7 +38,7 @@ NeuroNet/
     │   ├── state.py                 # Stato globale mutabile + ring buffer (249 righe)
     │   ├── llm_engine.py            # LlamaEngine + PriorityLock + _strip_thinking + decomp. helpers (1068 righe)
     │   ├── model_profiles.py        # Auto-rilevamento famiglia modello GGUF (480 righe)
-    │   ├── telemetry.py             # PipelineTracer + GatekeeperStats (577 righe)
+    │   ├── telemetry.py             # PipelineTracer + IntentStats (577 righe)
     │   ├── lifecycle.py             # Lifecycle manager (440 righe)
     │   ├── embed_worker.py          # Worker per embedding asincrono (275 righe)
     │   ├── chat_utils.py            # Helper formattazione e validazione chat (146 righe)
@@ -46,7 +46,7 @@ NeuroNet/
     │   ├── reasoning.py             # Logica ragionamento approfondito + CoT (334 righe)
     │   └── telemetry_api.py         # Endpoint API telemetry (98 righe)
     ├── agent/
-    │   ├── prompt.py                # Gatekeeper + build_omniscient_prompt + 6 helper (924 righe)
+    │   ├── prompt.py                # Intent Router + context compressor + build_omniscient_prompt + 6 helper (924 righe)
     │   ├── tags.py                  # TagSafeStream + process_all_tags + 21 handler (892 righe)
     │   ├── tools.py                 # execute_tool_call + 18 dispatch + 5 built-in (1065 righe)
     │   ├── tool_handlers.py         # Handler tool-calling (file, shell, skills) (637 righe)
@@ -181,8 +181,8 @@ NeuroNet/
 - Hardware Profile Auto-Detection: rilevamento famiglia GGUF via header binario, applica parametri ottimali (n_gpu_layers, flash_attn, n_ubatch)
 - FastEmbed ONNX CPU: embedding a 0 VRAM, nessuna contenzione GPU
 - `_strip_thinking()` — rimuove tag `<think>`, analisi strutturate e meta-ragionamenti dalle risposte LLM
-- `compress_prompt()` — compressione caveman con Qwen3.5 0.8B (CPU, GATEKEEPER_N_CTX=4096, 6 few-shot), raw fallback se ratio negativo
-- `classify_intent_with_gemma()` — classificazione intenti via Gemma 4 (0 VRAM extra, 1-5 token output) — parte del 3-tier gatekeeper
+- `compress()` (agent/context_compressor.py) — compressione caveman con Qwen3.5 0.8B (CPU, COMPRESSOR_N_CTX=4096, 6 few-shot), raw fallback se ratio negativo
+- `classify()` (agent/intent_router.py) — classificazione intenti via main model + GBNF (0 VRAM extra, 1-5 token output) — parte del routing intenti
 
 ---
 
@@ -330,7 +330,7 @@ Messaggio utente
           ▼
 ┌─────────────────────┐
 │  RAG Documentale    │──► Qdrant search + reranking
-│  (se gatekeeper True)│    + file matching nel prompt
+│  (se intent project/code)│    + file matching nel prompt
 │                      │    + Synaptiq hybrid search
 └─────────┬───────────┘
           │
@@ -683,7 +683,7 @@ Metriche:
 
 ### 15. 🔍 Pipeline Telemetry & MCP Server (`jarvis/core/telemetry.py`, `jarvis/api/mcp/`)
 
-Sistema di tracciamento strutturato che registra ogni richiesta utente attraverso i 4 step della pipeline (keyword bypass, gatekeeper LLM, context gathering, generazione LLM). I dati sono esposti tramite API REST HTTP e server MCP v2.
+Sistema di tracciamento strutturato che registra ogni richiesta utente attraverso i 4 step della pipeline (keyword bypass, intent routing, context gathering, generazione LLM). I dati sono esposti tramite API REST HTTP e server MCP v2.
 
 ```
 Richiesta utente
@@ -694,7 +694,7 @@ Richiesta utente
 │  (per-request)      │    ├── ok/skipped/error
 │                      │    └── duration_ms
 ├─────────────────────┤
-│  GatekeeperStats    │──► record(intent, confidence, bypassed)
+│  IntentStats        │──► record(intent, confidence, bypassed)
 │  (cumulativo)       │    ├── by_intent distribution
 │                      │    └── avg_confidence
 ├─────────────────────┤
@@ -716,7 +716,7 @@ Richiesta utente
 │  ┌───────▼─────────────────────▼──────────┐           │
 │  │ HTTP REST API                          │           │
 │  │ /api/telemetry/traces                  │           │
-│  │ /api/telemetry/gatekeeper              │           │
+│  │ /api/telemetry/intent                  │           │
 │  │ /api/telemetry/errors                  │           │
 │  │ /api/telemetry/status                  │           │
 │  │ /api/telemetry/model                   │           │
@@ -733,18 +733,18 @@ Richiesta utente
 - Errore finale se presente
 - Ogni trace completato finisce in `state.pipeline_traces` (ring buffer circolare, ultimi 500)
 
-**GatekeeperStats** — statistiche cumulative:
+**IntentStats** — statistiche cumulative:
 - `total_classified`, `bypassed`, `llm_called`
 - `by_intent`: distribuzione degli intenti classificati
-- `avg_confidence`: confidenza media del Gatekeeper
+- `avg_confidence`: confidenza media del classificatore
 - `by_intent_with_bypass`: bypass rate per intento
 
 **File:**
-- `jarvis/core/telemetry.py` — Classi core (PipelineTracer, GatekeeperStats, LlmCallRecord, StepRecord, PipelineTrace) (577 righe)
+- `jarvis/core/telemetry.py` — Classi core (PipelineTracer, IntentStats, LlmCallRecord, StepRecord, PipelineTrace) (577 righe)
 - `jarvis/api/mcp/server.py` — Server MCP stdio legacy (510 righe)
 - `jarvis/api/mcp/server_v2.py` — Server MCP v2 Streamable HTTP — 8 tool + 7 resources (570 righe)
 - `jarvis/api/mcp/client.py` — Client MCP per tool esterni (634 righe)
-- `jarvis/core/state.py` — Ring buffer `pipeline_traces`, `gatekeeper_stats`, `error_counters`
+- `jarvis/core/state.py` — Ring buffer `pipeline_traces`, `intent_stats`, `error_counters`
 - `.mcp.json` — Config per Claude Code/Cursor
 
 ---

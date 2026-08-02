@@ -74,7 +74,7 @@ Nodo **Master VPS** (futuro): CPU-only, 24GB RAM, delegherà inferenza GPU al Wo
 Client (API HTTP) → main.py → LlamaEngine.load_models()
   ├── Chat Model: Qwen3.5-4B su GPU (main brain)
   ├── Embedding: FastEmbed ONNX CPU (BAAI/bge-base-en-v1.5)
-  ├── Gatekeeper: Qwen3.5-0.8B su CPU (compressione)
+  ├── Compressore: Qwen3.5-0.8B su CPU (compressione)
   └── RAG: Qdrant + Synaptiq → super-prompt → LLM
 ```
 
@@ -87,11 +87,11 @@ Client (API HTTP) → main.py → LlamaEngine.load_models()
 | File | Responsabilità | Dipendenze Chiave |
 |---|---|---|
 | `core/config.py` | **Unica fonte di verità per tutte le costanti.** Legge `.env` con `os.getenv()`. | `os`, `logging` |
-| `core/state.py` | Stato globale mutabile (singleton). Ring buffer `pipeline_traces` (500), gatekeeper stats. | — |
+| `core/state.py` | Stato globale mutabile (singleton). Ring buffer `pipeline_traces` (500), intent stats. | — |
 | `core/llm_engine.py` | Carica modelli GGUF, inferenza, thinking mode, **FastEmbed (ONNX CPU)**. `_load_chat_model()` rileva famiglia modello PRIMA del caricamento e applica default hardware per famiglia. | `llama_cpp`, `fastembed`, `config`, `model_profiles` |
 | `core/model_profiles.py` | Auto-rilevamento famiglia modello GGUF via header binario. `_family_ctx_defaults()` + `_family_hardware_defaults()` per parametri temperatura e GPU per famiglia. | `config` |
 | `core/lifecycle.py` | Lifecycle manager: avvio componenti, shutdown graceful, RAG ingestion saltabile. | `config`, `state` |
-| `core/telemetry.py` | PipelineTracer per-request + GatekeeperStats. Tracciamento step, LLM calls, tool calls. | `state` |
+| `core/telemetry.py` | PipelineTracer per-request + IntentStats. Tracciamento step, LLM calls, tool calls. | `state` |
 | `core/chat_utils.py` | Helper chat: formattazione messaggi, estrazione testo, validazione. Estratto da `main.py`. | `config` |
 | `core/qdrant_utils.py` | Utility Qdrant: `sanitize_project_name()`, helper collection. | `config` |
 | `core/reasoning.py` | Logica di ragionamento approfondito, chain-of-thought management. Estratto da `main.py`. | `llm_engine`, `config` |
@@ -102,7 +102,7 @@ Client (API HTTP) → main.py → LlamaEngine.load_models()
 
 | File | Responsabilità |
 |---|---|
-| `agent/prompt.py` | Costruisce super-prompt omnisciente con tag XML. Gatekeeper + keyword bypass. |
+| `agent/prompt.py` | Costruisce super-prompt omnisciente con tag XML. Intent router + context compressor. |
 | `agent/tags.py` | 21 tag XML d'azione (MEMORY, SCHEDULE, SSH, EXEC, ecc.). `TagSafeStream` per streaming. |
 | `agent/tools.py` | TOOLS_SCHEMA + dispatch table per tool-calling (file/shell/skills). |
 | `agent/classifier.py` | Classificatore intenti centralizzato. |
@@ -166,9 +166,9 @@ Il file `.env` è la **singola fonte di configurazione**. Non hardcodare mai val
 |---|---|---|
 | `LLAMA_MODEL_PATH` | `./models/Qwen3.5-4B-UD-Q4_K_XL.gguf` | **Unica da cambiare per switchare modello** |
 | `LLAMA_EMBED_MODEL_PATH` | `./models/Qwen3-Embedding-0.6B-Q8_0.gguf` | Embedding (CPU) |
-| `GATEKEEPER_MODEL_PATH` | `./models/Qwen3.5-0.8B-Instruct-Q4_K_M.gguf` | Compressione (CPU) |
-| `GATEKEEPER_N_GPU_LAYERS` | `0` | Gatekeeper su CPU |
-| `GATEKEEPER_N_CTX` | `4096` | Contesto gatekeeper |
+| `COMPRESSOR_MODEL_PATH` | `./models/Qwen3.5-0.8B-Instruct-Q4_K_M.gguf` | Compressione (CPU) |
+| `COMPRESSOR_N_GPU_LAYERS` | `0` | Compressore su CPU |
+| `COMPRESSOR_N_CTX` | `4096` | Contesto compressore |
 | `LLM_NUM_CTX` | `12288` | Contesto chat |
 | `LLM_BATCH_SIZE` | `512` | Batch prompt processing |
 | `LLM_NUM_PREDICT` | `2048` | Token max output |
@@ -229,7 +229,7 @@ WATCHDOG_BATCH_DELAY=1.0
 | **Qwen3.5-4B (attivo)** | `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ~3334 MiB (full GPU) | Chat model primario |
 | **Gemma 4 E2B QAT (backup)** | `gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf` | 1036 MiB (15/35 layer) | Backup, richiede N_GPU_LAYERS=15 |
 | **FastEmbed (ONNX CPU)** | `BAAI/bge-base-en-v1.5` | 0 VRAM | Embedding via FastEmbed |
-| **Qwen3.5-0.8B Gatekeeper** | `Qwen3.5-0.8B-Instruct-Q4_K_M.gguf` | 0 VRAM (CPU) | Compressione caveman |
+| **Qwen3.5-0.8B Compressore** | `Qwen3.5-0.8B-Instruct-Q4_K_M.gguf` | 0 VRAM (CPU) | Compressione caveman |
 
 ### Parametri Ottimali per Modello
 
@@ -328,12 +328,12 @@ Tutti i container in `ai_network`: `qdrant`, `searxng`, `crawl4ai`. Jarvis gira 
 
 | Componente | Stato | Dettaglio |
 |---|---|---|
-| `core/llm_engine.py` | ✅ **OTTIMIZZATO** | FastEmbed ONNX CPU (BAAI/bge-base-en-v1.5). Hardware profile auto-detection per cambio modello sicuro. Classificazione intenti via main model (0 VRAM extra). Compressione gatekeeper su CPU. |
+| `core/llm_engine.py` | ✅ **OTTIMIZZATO** | FastEmbed ONNX CPU (BAAI/bge-base-en-v1.5). Hardware profile auto-detection per cambio modello sicuro. Classificazione intenti via main model (0 VRAM extra). Compressione contesto su CPU. |
 | `core/model_profiles.py` | ✅ **ESTESO** | `_family_hardware_defaults()` per default GPU per famiglia (N_GPU_LAYERS, flash_attn, n_ubatch). Rilevamento via header GGUF. |
 | `core/lifecycle.py` | ✅ **MIGLIORATO** | RAG ingestion iniziale saltata se `WATCHDOG_ENABLED=false`. |
 | `main.py` | ✅ **MIGLIORATO** | `conversation_id` generato e restituito in ogni risposta (UUID se non fornito). Multi-turn funzionante tra richieste separate. |
-| `core/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + GatekeeperStats. |
-| `agent/prompt.py` | ✅ **MIGLIORATO** | 3-tier gatekeeper: keyword bypass + Gemma4 classification + Qwen3.5 compression. |
+| `core/telemetry.py` | ✅ Nuovo | PipelineTracer per-request + IntentStats. |
+| `agent/prompt.py` | ✅ **MIGLIORATO** | Intent router (fast-path + LLM GBNF) + context compressor (Qwen3.5 compression). |
 | `admin/dashboard.py` | ✅ **ESTESO** | SETTINGS_META (73 env var). `_persist_env()` atomic write. |
 | `admin_panel/` | ✅ **OTTIMIZZATO** | Sigma.js FA2 via Web Worker. Telemetry splittato in 10 funzioni. CSS tematico. |
 | `auth.py` + `user_manager.py` | ✅ **NUOVO** | JWT auth + UserManager SQLite + API key SHA256. |
@@ -369,6 +369,7 @@ Tutti i container in `ai_network`: `qdrant`, `searxng`, `crawl4ai`. Jarvis gira 
 
 | Data | Modifica | Impatto |
 |---|---|---|
+| **02/08** | **Fase 5 Consolidamento + push** | Piano Intent Understanding (§10.10): 5.5 `agent/context_compressor.py` estratto (92 righe, `compress()`+`compress_concise()`, `COMPRESSOR_MIN_CHARS=1000`, 2 call site migrati) ✅ · 5.6/5.6b rename `GATEKEEPER_*`→`COMPRESSOR_*` (config, llm_engine, settings_manager, .env migrate + backup `.env.bak`) ✅ · 5.7 rename `GatekeeperStats`→`IntentStats` (telemetry, state, rotta `/api/telemetry/intent`, MCP tool `get_intent_stats`, risorsa `jarvis://intent/stats`, `intent_initialized`, `compressor_model_loaded`, dashboard) senza alias ✅ · 5.8 legacy rimossi (`classify_intent_with_gemma`/`_keyword_bypass`/`classify_intent` già assenti) ✅ · 5.9 docs (AGENTS.md, README.md, PIPELINE/API_REFERENCE/SETUP/COMPONENTS/ARCHITECTURE) ✅. **Grep release finale (`GATEKEEPER_\|gatekeeper_stats\|GatekeeperResult\|...`) = 0 su jarvis/**, py_compile 13 file OK, `test_fast_path.py` 31/31, `test_intent_handlers_phase4.py` 31/31. **Pushato su origin/main.** |
 | **02/08** | **Verifica finale Fasi 1-4 + push** | Revisione completa del piano Intent Understanding (§10.9): Fase 1 (intent_router: IntentResult/GBNF/SLOT_EXTRACTORS/classify/_fast_path, classifier snellito) ✅ · Fase 2 (benchmark 100% intent 69/69 + 100% slot 67/67) ✅ · Fase 3 (grep legacy = 0, 8 call site migrati, `_record_intent_stats`) ✅ · Fase 4 (10 handler + `INTENT_THRESHOLDS` + `dispatch` con `confirmation_mgr` in entrambi i rami) ✅. Test: py_compile 11 file OK, `test_fast_path.py` 31/31, `test_intent_handlers_phase4.py` 31/31. Live MCP: trace `ba92a5c48bcd` → intent=project conf=1.0 source=regex, `error_count: 0`. **Pushato su origin/main (`6a129cd..7766d25`)**. Residui (Fase 5): rename `GatekeeperStats`→`IntentStats`, `_run_compression`→`context_compressor`, `GATEKEEPER_*`→`COMPRESSOR_*`. |
 | **02/08** | **MCP Reasoning Leak Fix** | `api/mcp/server_v2.py`: nuovo helper `_run_chat_pipeline()` condiviso da `chat_send`/`jarvis_chat` — applica `configura_richiesta_agente()` (enable_thinking + logit_bias, come main.py) e `strip_action_tags()` sul content prima di restituirlo. `agent/tags.py`: gestione chiusura `</think>` orfana in `strip_thinking_blocks()` (Qwen emette `<think>` come token speciale non visibile, il reasoning + `</think>` leakavano nel response) + pattern plain `<think>...</think>` per famiglia qwen. Verificato live: "che ore sono?" e "listami i progetti" non leakano più reasoning/tool_call nel response MCP. |
 | **02/08** | **Fase 4 handler intent (git/ssh/transcribe/fetch/translate/config/maintenance)** | `agent/intent_handlers.py`: aggiunti 7 handler (`handle_git`, `handle_ssh`, `handle_transcribe`, `handle_fetch`, `handle_translate`, `handle_config`, `handle_maintenance`) + helper condivisi (`_git_repo_dir`, `_run_git`, `_confirm_or_pending`, `_SSH_READ_COMMANDS`/`_SSH_WRITE_COMMANDS` whitelist, `_SECRET_RE`). Registrati in `register_handlers()` (10 intent totali: + schedule/memory/task). `main.py`: iniettato `confirmation_mgr` token-based (`ConfirmationManager.from_request`) nel context di `dispatch()` in entrambi i rami (non-stream + streaming) → le op distruttive (git/ssh/config/maintenance write) richiedono conferma CONFIRM_REQ; fix duplicazione `handle_confirmation_token` (chiamata 2 volte, :682-685). `dispatch()` rispetta soglie §4.3 (read 0.60 / write 0.70). Test standalone 28/28 PASS (`/tmp/opencode/test_intent_handlers_phase4.py`). |

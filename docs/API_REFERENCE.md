@@ -71,7 +71,7 @@
 | `/api/telemetry/traces` | GET | Ultimi N pipeline trace completati |
 | `/api/telemetry/traces/active` | GET | Trace correntemente in esecuzione |
 | `/api/telemetry/traces/{request_id}` | GET | Cerca trace per request_id |
-| `/api/telemetry/gatekeeper` | GET | Statistiche cumulative Gatekeeper |
+| `/api/telemetry/intent` | GET | Statistiche cumulative classificatore intenti |
 | `/api/telemetry/errors` | GET | Contatori di errore |
 | `/api/telemetry/status` | GET | Uptime, richieste, token, stato sistema |
 | `/api/telemetry/model` | GET | Informazioni modello LLM (family, GPU layers) |
@@ -116,7 +116,7 @@
 ## Pipeline Telemetry & MCP per Diagnostica AI
 
 - **PipelineTracer**: tracciamento per-request con step timing, LLM calls, gatekeeper decisioni, tool calls
-- **GatekeeperStats**: statistiche cumulative di classificazione (bypass rate, confidence media, by_intent)
+- **IntentStats**: statistiche cumulative di classificazione (bypass rate, confidence media, by_intent)
 - **Ring buffer 500 trace**: ultimi 500 trace completati sempre disponibili in memoria
 - **HTTP REST**: 8 endpoint `/api/telemetry/*` per query diretta
 - **MCP stdio**: server esterno per Claude Code / Cursor via `.mcp.json`
@@ -141,7 +141,7 @@ Configura il tuo agente AI per lanciare il server MCP come subprocesso. Jarvis i
       "env": {
         "JARVIS_URL": "http://localhost:8000"
       },
-      "description": "Jarvis telemetry — espone pipeline trace, gatekeeper stats, error counters e stato del sistema per diagnostica AI."
+      "description": "Jarvis telemetry — espone pipeline trace, intent stats, error counters e stato del sistema per diagnostica AI."
     }
   }
 }
@@ -195,7 +195,7 @@ curl -X POST http://localhost:8000/api/mcp/v2 \
 | `get_recent_traces` | Ultimi N pipeline trace completati | `limit` (int, default 10) |
 | `get_active_traces` | Trace correntemente in esecuzione | nessuno |
 | `get_trace_by_id` | Cerca un trace completato per request_id | `request_id` (stringa, required) |
-| `get_gatekeeper_stats` | Statistiche cumulative Gatekeeper | nessuno |
+| `get_intent_stats` | Statistiche cumulative classificatore intenti | nessuno |
 | `get_errors` | Contatori di errore per diagnostica | nessuno |
 | `get_status` | Stato sistema: uptime, richieste, token | nessuno |
 | `get_model_info` | Info modello LLM: family, GPU layers | nessuno |
@@ -207,7 +207,7 @@ curl -X POST http://localhost:8000/api/mcp/v2 \
 |---|---|
 | `jarvis://traces/recent` | Ultimi 10 pipeline trace |
 | `jarvis://traces/active` | Trace attualmente in esecuzione |
-| `jarvis://gatekeeper/stats` | Statistiche cumulative Gatekeeper |
+| `jarvis://intent/stats` | Statistiche cumulative classificatore intenti |
 | `jarvis://errors/counters` | Contatori di errore |
 | `jarvis://system/status` | Uptime, richieste, token |
 | `jarvis://model/info` | Informazioni modello LLM |
@@ -221,10 +221,10 @@ curl -X POST http://localhost:8000/api/mcp/v2 \
 3. Chiama `get_trace_by_id(request_id="abc123")` per vedere i dettagli
 4. Analizza gli step: `build_omniscient_prompt`, `gemma_generation`, `tool_execution`
 
-**Verifica dello stato del Gatekeeper:**
-1. Chiama `get_gatekeeper_stats()`
-2. Controlla `bypassed` vs `llm_called` — se il bypass rate è basso, il Gatekeeper sta funzionando correttamente
-3. Controlla `avg_confidence` — se < 0.7, il modello Gatekeeper potrebbe avere problemi
+**Verifica dello stato del classificatore intenti:**
+1. Chiama `get_intent_stats()`
+2. Controlla `bypassed` vs `llm_called` — se il bypass rate è basso, il classificatore sta funzionando correttamente
+3. Controlla `avg_confidence` — se < 0.7, il modello di classificazione potrebbe avere problemi
 
 **Diagnostica errori:**
 1. Chiama `get_errors()` per vedere i contatori errori

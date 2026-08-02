@@ -81,7 +81,7 @@ WATCHDOG_WATCH_MODE=per_project
 | Flash Attention | `core/llm_engine.py` | Auto-detectato per famiglia modello |
 | Hardware Profile Auto-Detection | `core/model_profiles.py` | Rilevamento famiglia GGUF (7+ famiglie) via header binario. Applica n_gpu_layers/flash_attn/n_ubatch ottimali |
 | Thinking Mode | `core/llm_engine.py` | `<\|think\|>` per Gemma / DeepSeek / QwQ |
-| Compressione Gatekeeper | `core/llm_engine.py` | Qwen3.5 0.8B CPU (0 VRAM), 4096 ctx, 6 few-shot |
+| Compressione contesto | `agent/context_compressor.py` | Qwen3.5 0.8B CPU (0 VRAM), 4096 ctx, 6 few-shot |
 | Classificazione intenti | `core/llm_engine.py` | Con main model (0 VRAM extra), 1-5 token, ~0.3-0.8s |
 | Embedding | FastEmbed ONNX CPU | BAAI/bge-base-en-v1.5, 0 VRAM, 768 dims |
 
@@ -115,11 +115,12 @@ WATCHDOG_WATCH_MODE=per_project
 </details>
 
 <details>
-<summary><b>🧩 Prompt Builder & Gatekeeper</b></summary>
+<summary><b>🧩 Prompt Builder & Intent Router</b></summary>
 
 | Feature | File | Dettaglio |
 |---|---|---|
-| LLM Gatekeeper | `agent/prompt.py` | 3-tier: keyword bypass + main model classification (0 VRAM extra) + Qwen3.5 0.8B compression (CPU) |
+| Intent Router | `agent/intent_router.py` | `classify()`: tier-0 fast-path (greeting 26ms) → cache LRU 60s → LLM GBNF 18 intent → fallback regex. 0 VRAM extra |
+| Context Compressor | `agent/context_compressor.py` | `compress()` con Qwen3.5 0.8B CPU, skip < COMPRESSOR_MIN_CHARS, fallback raw |
 | Budget Allocator | `agent/prompt.py` | 55% RAG / 20% web / 10% mem / 15% tree, max 15K char |
 | Super-prompt XML | `agent/prompt.py` | 7 tag contestuali |
 | 21 tag d'azione | `agent/tags.py` | MEMORY, SCHEDULE, SSH, TODO, WEB, FILE, EXEC, COMMIT... |
@@ -167,7 +168,7 @@ WATCHDOG_WATCH_MODE=per_project
 ## 🔄 Pipeline
 
 ```
-Input → Routing → PipelineTracer → Gatekeeper (3-tier: keyword bypass + main model classification + compression)
+Input → Routing → PipelineTracer → Intent Router (fast-path + LLM GBNF) + Context Compressor
        → Context Gathering [FastEmbed ONNX CPU | Memoria | RAG | Synaptiq]
        → Super-prompt XML → LLM Generation (Qwen3.5-4B GPU, 35-40 tok/s)
        → TagSafeStream → Tool-calling Loop → Output
@@ -191,7 +192,7 @@ Accessibile su `/admin/` (primario; `/dashboard` redirect 301). Login su `/admin
 | **Management → Models** | Lista GGUF, switch runtime |
 | **Management → Tasks** | CRUD task con priorità/scadenze |
 | **Management → Cron** | Job APScheduler, attivazione/pausa |
-| **Management → Analytics** | Inferenza, telemetry, gatekeeper, error distribution |
+| **Management → Analytics** | Inferenza, telemetry, intent stats, error distribution |
 | **Logs** | Docker logs viewer con filtro servizio e auto-scroll |
 | **Management → Users** | User management CRUD (solo admin): crea, modifica, disabilita utenti, assegna ruoli/progetti |
 | **Profile** | Self-service: cambio password, gestione API key (genera/revoca/rigenera), link Telegram ID |

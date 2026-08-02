@@ -104,7 +104,7 @@ Jarvis usa **esclusivamente `llama-cpp-python`** con file GGUF. Nessun processo 
 | Modello | Stato | VRAM | Note |
 |---|---|---|---|
 | `Qwen3.5-4B-UD-Q4_K_XL.gguf` | ✅ **IN USO** | ~3334MiB (81%) | Chat model primario, n_gpu_layers=-1 (full GPU), flash_attn=true, ~35-40 tok/s |
-| `Qwen3.5-0.8B-Instruct-Q4_K_M.gguf` | ✅ **IN USO** | **0 VRAM (CPU)** | Gatekeeper compression, GATEKEEPER_N_GPU_LAYERS=0, 4096 ctx, 6 few-shot |
+| `Qwen3.5-0.8B-Instruct-Q4_K_M.gguf` | ✅ **IN USO** | **0 VRAM (CPU)** | Compressione contesto, COMPRESSOR_N_GPU_LAYERS=0, 4096 ctx, 6 few-shot |
 | FastEmbed ONNX (BAAI/bge-base-en-v1.5) | ✅ **IN USO** | **0 VRAM (CPU)** | Embedding vettoriale, 768 dims |
 | `Qwen3-Reranker-0.6B-Q8_0.gguf` | ⏳ Inutilizzato | — | Sostituito da FastEmbed CPU |
 | `gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf` | ⏳ Backup | 1036MiB (25%) | Backup, richiede n_gpu_layers=15, ~5.7 tok/s |

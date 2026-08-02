@@ -50,33 +50,32 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │                                                                              │
 │  start_step("keyword_bypass")                                                │
 │  ├── Keyword bypass check (es. "memoria", "/web", "/docs")                  │
-│  │     └── match → salta Gatekeeper LLM (bypass)                            │
+│  │     └── match → salta classificazione LLM (bypass)                       │
 │  └── PipelineTracer.start() → request_id univoco                             │
 └───────────────────────────────────┬──────────────────────────────────────────┘
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  3. GATEKEEPER (jarvis/agent/prompt.py) — 3-tier classification             │
+│3. INTENT ROUTER + CONTEXT COMPRESSION (agent/)                               │
 │                                                                              │
-│  build_omniscient_prompt(user_message)                                       │
+│build_omniscient_prompt(user_message) → intent_router.classify()              │
 │                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │ Tier 1 — Keyword/Regex bypass:                                          ││
-│  │  ├── Cache hit, comandi rapidi, "/" prefix                              ││
-│  │  └── Bypassa interamente il Gatekeeper LLM                              ││
-│  │                                                                         ││
-│  │ Tier 2 — Qwen3.5-0.8B classification (CPU, 4096 ctx):                  ││
-│  │  ├── Classifica intento in: progetto/codice / conversazione / comando   ││
-│  │  │   rapido                                                              ││
-│  │  └── 6 few-shot esempi per accuracy                                     ││
-│  │                                                                         ││
-│  │ Tier 3 — Qwen3.5-0.8B compression:                                     ││
-│  │  ├── Se progetto/codice → compressa prompt lungo in formato caveman     ││
-│  │  ├── GATEKEEPER_MAX_CHARS=1500 guard per overflow                       ││
-│  │  └── Pass-through se ratio compressione negativo                        ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
+│  ┌──────────────────────────────────────────────────────────────────────────┐│
+│  │Tier 0 — _fast_path (greeting 26ms, 0 token):                             ││
+│  │  ├── Saluti puri / comandi rapidi / cache hit → bypass totale LLM        ││
+│  │  └── Regex intent extraction (project, schedule, ...)                    ││
+│  │                                                                          ││
+│  │Tier 1 — _llm_classify (main model + GBNF, 0 VRAM extra):                 ││
+│  │  ├── Classifica in 18 intent (project/code/schedule/memory/...)          ││
+│  │  └── 1-5 token, timeout 15s, cache LRU 60s                               ││
+│  │                                                                          ││
+│  │Tier 2 — context_compressor (Qwen3.5-0.8B CPU, 4096 ctx):                 ││
+│  │  ├── Se project/code → compressa prompt lungo in formato caveman         ││
+│  │  ├── COMPRESSOR_MIN_CHARS=1000 guard per skip (fallback raw)             ││
+│  │  └── Pass-through se ratio compressione negativo                         ││
+│  └──────────────────────────────────────────────────────────────────────────┘│
 │                                                                              │
-│  → GatekeeperStats.record(intent, confidence, bypassed)                     │
+│→ IntentStats.record(intent, confidence, bypassed)                            │
 └───────────────────────────────────┬──────────────────────────────────────────┘
                                     │
                                     ▼
@@ -105,7 +104,7 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │           │                      │                       │                 │
 │           ▼                      ▼                       ▼                 │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │ RAG DOCUMENTALE (se gatekeeper=True)                                    ││
+│  │ RAG DOCUMENTALE (se intent=project/code)                                    ││
 │  │                                                                         ││
 │  │  → FastEmbed ONNX CPU embedding (BAAI/bge-base-en-v1.5, 768 dims)      ││
 │  │  → Qdrant search (collezione progetto attivo)                           ││
