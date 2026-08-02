@@ -128,17 +128,17 @@ LLM_FLASH_ATTN = os.getenv("LLM_FLASH_ATTN", "true").lower() == "true"
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 
 # ==============================================================================
-# GATEKEEPER LLM (Qwen3.5-0.8B-Instruct) — solo compressione
+# CONTEXT COMPRESSOR LLM (Qwen3.5-0.8B-Instruct) — solo compressione
 # ==============================================================================
 # Classificazione intenti: Qwen3.5-4B (main model su GPU, 0 VRAM extra).
-# Compressione caveman: Qwen3.5 0.8B su CPU (GATEKEEPER_N_GPU_LAYERS=0).
+# Compressione caveman: Qwen3.5 0.8B su CPU (COMPRESSOR_N_GPU_LAYERS=0).
 # La compressione è SKIPPATA per query semplici (< 1000ch contesto),
 # attivata solo su query complesse con RAG+storia estesi.
 # Default: CPU (n_gpu_layers=0) per non rubare VRAM al main model.
-GATEKEEPER_MODEL_PATH = os.getenv("GATEKEEPER_MODEL_PATH", "")
-GATEKEEPER_N_GPU_LAYERS = int(os.getenv("GATEKEEPER_N_GPU_LAYERS", "0"))
-GATEKEEPER_N_CTX = int(os.getenv("GATEKEEPER_N_CTX", "4096"))
-GATEKEEPER_N_THREADS = int(os.getenv("GATEKEEPER_N_THREADS", "4"))
+COMPRESSOR_MODEL_PATH = os.getenv("COMPRESSOR_MODEL_PATH", "")
+COMPRESSOR_N_GPU_LAYERS = int(os.getenv("COMPRESSOR_N_GPU_LAYERS", "0"))
+COMPRESSOR_N_CTX = int(os.getenv("COMPRESSOR_N_CTX", "4096"))
+COMPRESSOR_N_THREADS = int(os.getenv("COMPRESSOR_N_THREADS", "4"))
 
 # ==============================================================================
 # EMBEDDING MODEL (Qwen3-Embedding su CPU)

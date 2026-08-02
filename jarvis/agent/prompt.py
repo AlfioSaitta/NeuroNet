@@ -24,13 +24,14 @@ from memory.engine import extract_memories, save_to_memory
 from rag.web_search import perform_web_search_and_crawl, is_web_requiring_query, clean_web_query
 from agent.tags import build_tag_instructions
 from scheduler.tasks import get_open_tasks
-from core.llm_engine import engine, extract_content
+from core.llm_engine import extract_content
 from agent import intent_router
+from agent.context_compressor import compress as _compress_context, compress_concise as _compress_concise
 try:
     from graph.synaptiq_engine import synaptiq_engine
 except ImportError:
     synaptiq_engine = None
-from core.telemetry import PipelineTracer, GatekeeperStats
+from core.telemetry import PipelineTracer, IntentStats
 import core.state as state
 
 # ════════════════════════════════════════════════════════════════
@@ -68,8 +69,8 @@ def _datetime_context() -> str:
 # ════════════════════════════════════════════════════════════════
 # STEP 1: FAST PATHS — Keyword Bypass (0 LLM calls)
 # ════════════════════════════════════════════════════════════════
-# Le costanti di routing (META_PHRASES, SIMPLE_QUERIES, PROJECT_KEYWORDS,
-# PURE_GREETINGS) sono centralizzate in agent.intent_router (importate sopra):
+# Le costanti di routing (fast-path regex/parole chiave) sono centralizzate
+# in agent.intent_router (importate sopra):
 # Fase 1 del piano intent_understanding_llm.md — unica fonte di verità.
 
 # System prompt per Gemma 4 in risposta diretta ma naturale
@@ -146,13 +147,13 @@ GENERAL_CONVERSATION_SYSTEM = (
 # ════════════════════════════════════════════════════════════════
 
 def _record_intent_stats(intent: str, confidence: float, bypassed: bool, project: str | None = None, source: str | None = None):
-    """Aggiorna le statistiche cumulative del gatekeeper (esposte via MCP)."""
+    """Aggiorna le statistiche cumulative del classificatore intenti (esposte via MCP)."""
     try:
-        if state.gatekeeper_stats is None:
-            state.gatekeeper_stats = GatekeeperStats()
-        state.gatekeeper_stats.record(intent, confidence, bypassed, project, source)
+        if state.intent_stats is None:
+            state.intent_stats = IntentStats()
+        state.intent_stats.record(intent, confidence, bypassed, project, source)
     except Exception as exc:
-        logger.warning(f"Errore aggiornamento gatekeeper_stats: {exc}")
+        logger.warning(f"Errore aggiornamento intent_stats: {exc}")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -307,75 +308,6 @@ def _allocate_budget(
 
 
 # ────────────────────────────────────────────────────────────────
-# Helper: caveman compression with fallback
-# ────────────────────────────────────────────────────────────────
-
-async def _run_compression(
-    clean_msg: str, rag_context_for_compress: str, history_str: str,
-    active_project: str | None, mem_final: str, tasks_final: str,
-    rag_final: str, web_final: str,
-) -> tuple[str, bool]:
-    """Compress context via Qwen3.5 caveman, fall back to raw labels on failure.
-
-    Salta completamente la compressione LLM se il contesto è trascurabile
-    (< 1000 chars totali tra RAG, history e web). Questa è l'ottimizzazione
-    principale per query semplici (data, ora, meteo, etc.) dove non c'è nulla
-    da comprimere — risparmia 10-50s per richiesta.
-
-    Returns (compressed_text, is_raw_fallback).
-    """
-    # ── Skip compressor se contesto trascurabile (Op1/Op8) ──
-    total_context = len(rag_context_for_compress or '') + len(history_str or '') + len(web_final or '')
-    COMPRESSOR_MIN_CHARS = 1000
-    if total_context < COMPRESSOR_MIN_CHARS and not rag_final and not active_project:
-        logger.info(f"🗜️ Skip compressor: contesto trascurabile ({total_context}ch < {COMPRESSOR_MIN_CHARS}ch), raw fallback")
-        is_raw = True
-        fallback_parts = []
-        if mem_final:
-            fallback_parts.append(f"Memory: {mem_final[:500]}")
-        if tasks_final:
-            fallback_parts.append(f"Tasks: {tasks_final[:300]}")
-        if active_project:
-            fallback_parts.append(f"Project: {active_project}")
-        if web_final:
-            fallback_parts.append(f"Web: {web_final[:500]}")
-        fallback_parts.append(f"Query: {clean_msg}")
-        compressed = "\n".join(fallback_parts)[:4096]
-        return compressed, True
-
-    compressed = await engine.compress_prompt(
-        user_query=clean_msg,
-        rag_context=rag_context_for_compress,
-        history=history_str,
-        active_project=active_project,
-    )
-
-    is_raw = False
-    if not compressed or len(compressed) < 20:
-        logger.warning("⚠️ Caveman compression fallita, uso fallback raw")
-        is_raw = True
-        fallback_parts = []
-        if mem_final:
-            fallback_parts.append(f"Memory: {mem_final[:500]}")
-        if tasks_final:
-            fallback_parts.append(f"Tasks: {tasks_final[:300]}")
-        if active_project:
-            fallback_parts.append(f"Project: {active_project}")
-        if rag_final:
-            fallback_parts.append(f"Context:\n{rag_final[:2000]}")
-        if web_final:
-            fallback_parts.append(f"Web: {web_final[:500]}")
-        fallback_parts.append(f"Query: {clean_msg}")
-        compressed = "\n".join(fallback_parts)[:4096]
-
-    if compressed.startswith("[PROJECT:") or compressed.startswith("[RAG_CONTEXT]"):
-        is_raw = True
-        logger.warning("⚠️ Caveman compression fallback raw (raw_data labels)")
-
-    return compressed, is_raw
-
-
-# ────────────────────────────────────────────────────────────────
 # Helper: build final Gemma 4 prompt
 # ────────────────────────────────────────────────────────────────
 
@@ -511,9 +443,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                 task.add_done_callback(state.background_tasks.discard)
             except Exception:
                 pass
-        compressed = await engine.compress_prompt(
-            user_query=clean_msg, rag_context="", history="", active_project=None,
-        )
+        compressed = await _compress_concise(clean_msg)
         tracer.add_llm_call(
             compressed._as_llm_record("caveman_compression") if hasattr(compressed, '_as_llm_record') else
             __import__('telemetry', fromlist=['LlmCallRecord']).LlmCallRecord(
@@ -549,7 +479,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     _user_override_mem_count = user_overrides.get("mem_count", 0)
 
     # ════════════════════════════════════════════════════
-    # STEP 1 + 2: GATEKEEPER
+    # STEP 1 + 2: INTENT ROUTING
     # ════════════════════════════════════════════════════
     _active_before = state.get_last_project(current_user_id, conversation_id)
     _all_projects = await _get_cached_rag_projects(user=user)
@@ -890,7 +820,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     logger.info(f"🗜️ Starting caveman compression: {raw_size} chars raw → budget={MAX_BUDGET}")
     logger.info(f"   raw_size={raw_size} rag_alloc={len(rag_final or '')} web_alloc={len(web_final or '')} mem_alloc={len(mem_final or '')} synaptiq_alloc={len(cg_ctx or '')}")
 
-    compressed, _compression_is_raw = await _run_compression(
+    compressed, _compression_is_raw = await _compress_context(
         clean_msg, rag_context_for_compress, history_str, active_project,
         mem_final, tasks_final, rag_final, web_final,
     )

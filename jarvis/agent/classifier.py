@@ -5,7 +5,7 @@ Fase 1 del piano intent_understanding_llm.md: il modulo conserva SOLO le
 funzioni vive dopo la centralizzazione in agent/intent_router.py.
 
 Rimossi (centralizzati in agent.intent_router):
-- PROJECT_KEYWORDS, GREETING_WORDS, Intent enum
+- costanti di routing (regex/parole chiave), GREETING_WORDS, Intent enum
 - is_project_query, is_greeting, is_web_query, classify, needs_rag, needs_confirmation
 
 Conservati:

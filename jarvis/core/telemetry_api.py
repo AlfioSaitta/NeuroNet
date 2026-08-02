@@ -24,7 +24,7 @@ def get_status_dict() -> dict:
         "total_completion_tokens": state.total_completion_tokens,
         "active_traces": len(PipelineTracer.get_all_active()),
         "pipeline_traces_capacity": getattr(state.pipeline_traces, 'maxlen', 500),
-        "gatekeeper_initialized": state.gatekeeper_stats is not None,
+        "intent_initialized": state.intent_stats is not None,
         "error_count": len(state.error_counters),
     }
 
@@ -43,7 +43,7 @@ def get_model_info_dict() -> dict:
         "flash_attn": False,
         "thinking_mode": False,
         "max_tokens": 2048,
-        "gatekeeper_model_loaded": False,
+        "compressor_model_loaded": False,
         "model_loaded": False,
         "detected_family": "unknown",
     }
@@ -68,7 +68,7 @@ def get_model_info_dict() -> dict:
         if engine.chat_model is not None:
             info["model_loaded"] = True
         if engine.gatekeeper_model is not None:
-            info["gatekeeper_model_loaded"] = True
+            info["compressor_model_loaded"] = True
     except Exception:
         info["model_loaded"] = False
     try:

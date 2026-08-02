@@ -531,12 +531,12 @@ async def get_telemetry_trace_by_id(request_id: str):
     return JSONResponse(trace)
 
 
-@app.get("/api/telemetry/gatekeeper")
-async def get_telemetry_gatekeeper_stats():
-    """Statistiche cumulative del Gatekeeper."""
-    stats = state.gatekeeper_stats
+@app.get("/api/telemetry/intent")
+async def get_telemetry_intent_stats():
+    """Statistiche cumulative del classificatore intenti."""
+    stats = state.intent_stats
     if stats is None:
-        return JSONResponse({"stats": None, "message": "GatekeeperStats non ancora inizializzato"})
+        return JSONResponse({"stats": None, "message": "IntentStats non ancora inizializzato"})
     return JSONResponse({"stats": stats.to_dict()})
 
 
@@ -567,7 +567,7 @@ async def get_telemetry_pending_ops():
 # ═══════════════════════════════════════════
 # Init telemetry state in lifespan
 # ═══════════════════════════════════════════
-# gatekeeper_stats e pipeline_traces sono già definiti in state.py.
+# intent_stats e pipeline_traces sono già definiti in state.py.
 # Inizializziamo il contatore errori e il timestamp di avvio qui.
 if not hasattr(state, '_start_time'):
     state._start_time = time.time()

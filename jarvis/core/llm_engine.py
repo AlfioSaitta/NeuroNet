@@ -250,9 +250,9 @@ class LlamaEngine:
     def _load_gatekeeper_model(self, path: str) -> None:
         """Carica il modello gatekeeper (Qwen3.5) per intent classification + compressione."""
         from core.config import (
-            GATEKEEPER_N_CTX as _gk_ctx,
-            GATEKEEPER_N_THREADS as _gk_threads,
-            GATEKEEPER_N_GPU_LAYERS as _gk_gpu,
+            COMPRESSOR_N_CTX as _gk_ctx,
+            COMPRESSOR_N_THREADS as _gk_threads,
+            COMPRESSOR_N_GPU_LAYERS as _gk_gpu,
         )
         _dev = "GPU" if _gk_gpu != 0 else "CPU"
         logger.info(f"Caricamento Gatekeeper Model ({_dev}): {path}")
@@ -288,7 +288,7 @@ class LlamaEngine:
 
         from core.config import (
             LLAMA_MODEL_PATH as _cfg_model_path,
-            GATEKEEPER_MODEL_PATH as _cfg_gk_path,
+            COMPRESSOR_MODEL_PATH as _cfg_gk_path,
         )
 
         # 1. FastEmbed (ONNX CPU) per embedding — zero VRAM, zero subprocess
@@ -323,7 +323,7 @@ class LlamaEngine:
             logger.warning(
                 f"File gatekeeper model {_cfg_gk_path} non trovato! "
                 "Gatekeeper e compressione disabilitati. "
-                "Imposta GATEKEEPER_MODEL_PATH nel .env per abilitare."
+                "Imposta COMPRESSOR_MODEL_PATH nel .env per abilitare."
             )
 
         log_vram_usage("VRAM finale dopo caricamento tutti i modelli")
@@ -332,7 +332,7 @@ class LlamaEngine:
         """Seleziona il modello Llama in base al nome logico."""
         if model == "gatekeeper":
             if not self.gatekeeper_model:
-                raise RuntimeError("Gatekeeper model (Qwen3.5) non caricato — imposta GATEKEEPER_MODEL_PATH")
+                raise RuntimeError("Gatekeeper model (Qwen3.5) non caricato — imposta COMPRESSOR_MODEL_PATH")
             return self.gatekeeper_model
         # default: main chat model (Gemma 4 GPU)
         if not self.chat_model:
@@ -714,7 +714,7 @@ class LlamaEngine:
         raw_data = "\n\n".join(raw_parts)
 
         # ── Token-aware context window guard ──
-        # Gatekeeper model has GATEKEEPER_N_CTX (default 4096, configurabile).
+        # Compressor model has COMPRESSOR_N_CTX (default 4096, configurabile).
         # System prompt ~100-450 token, response ~50 token, overhead ~50 token.
         # Budget for raw_data: 2000 chars (safe for CJK at 1 char/token).
         _GK_MAX_CHARS = 2000

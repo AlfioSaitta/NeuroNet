@@ -180,10 +180,10 @@ def get_trace_by_id(request_id: str) -> str:
     return _json_text(result)
 
 
-@mcp.tool(name="get_gatekeeper_stats", description="Statistiche cumulative del Gatekeeper (bypass rate, confidence media).")
-def get_gatekeeper_stats() -> str:
+@mcp.tool(name="get_intent_stats", description="Statistiche cumulative del classificatore intenti (bypass rate, confidence media).")
+def get_intent_stats() -> str:
     s = _import_state()
-    return _json_text({"stats": s.gatekeeper_stats.to_dict() if s.gatekeeper_stats else None})
+    return _json_text({"stats": s.intent_stats.to_dict() if s.intent_stats else None})
 
 
 @mcp.tool(name="get_errors", description="Contatori di errore per diagnostica.")
@@ -591,10 +591,10 @@ async def active_traces() -> str:
     return _json_text({"active_traces": PT.get_all_active()})
 
 
-@mcp.resource(uri="jarvis://gatekeeper/stats", name="Gatekeeper Stats", description="Statistiche cumulative Gatekeeper.", mime_type="application/json")
-async def gatekeeper_stats() -> str:
+@mcp.resource(uri="jarvis://intent/stats", name="Intent Stats", description="Statistiche cumulative classificatore intenti.", mime_type="application/json")
+async def intent_stats() -> str:
     s = _import_state()
-    return _json_text({"stats": s.gatekeeper_stats.to_dict() if s.gatekeeper_stats else None})
+    return _json_text({"stats": s.intent_stats.to_dict() if s.intent_stats else None})
 
 
 @mcp.resource(uri="jarvis://errors/counters", name="Error Counters", description="Contatori di errore.", mime_type="application/json")
@@ -799,7 +799,7 @@ _TOOL_HANDLERS: dict[str, callable] = {
     "get_active_traces": lambda args: {"active_traces": _import_telemetry()[0].get_all_active(), "count": len(_import_telemetry()[0].get_all_active())},
     "get_trace_by_id": lambda args: _import_telemetry()[2]((args or {}).get("request_id", "")) or {"error": "not found"},
     "get_trace_full": lambda args: _import_telemetry()[2]((args or {}).get("request_id", "")) or {"error": "not found"},
-    "get_gatekeeper_stats": lambda args: {"stats": _import_state().gatekeeper_stats.to_dict() if _import_state().gatekeeper_stats else None},
+    "get_intent_stats": lambda args: {"stats": _import_state().intent_stats.to_dict() if _import_state().intent_stats else None},
     "get_errors": lambda args: {"errors": dict(_import_state().error_counters)},
     "get_status": lambda args: _get_status_dict(),
     "get_model_info": lambda args: _get_model_info_dict(),
@@ -810,7 +810,7 @@ _TOOL_HANDLERS: dict[str, callable] = {
 _RESOURCE_HANDLERS: dict[str, callable] = {
     "jarvis://traces/recent": lambda: {"traces": _import_telemetry()[1](limit=10)},
     "jarvis://traces/active": lambda: {"active_traces": _import_telemetry()[0].get_all_active()},
-    "jarvis://gatekeeper/stats": lambda: {"stats": _import_state().gatekeeper_stats.to_dict() if _import_state().gatekeeper_stats else None},
+    "jarvis://intent/stats": lambda: {"stats": _import_state().intent_stats.to_dict() if _import_state().intent_stats else None},
     "jarvis://errors/counters": lambda: {"errors": dict(_import_state().error_counters)},
     "jarvis://system/status": _get_status_dict,
     "jarvis://model/info": _get_model_info_dict,

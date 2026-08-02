@@ -193,34 +193,34 @@ SETTINGS_META: dict[str, dict] = {
         "restart_required": False, "sensitive": False,
         "basic": False,
     },
-    "GATEKEEPER_MODEL_PATH": {
+    "COMPRESSOR_MODEL_PATH": {
         "type": "text", "editable": True,
-        "label": "Gatekeeper Model", "category": "🧠 Gatekeeper",
-        "description": "Percorso del modello GGUF per Gatekeeper (vuoto = disabilitato)",
+        "label": "Compressor Model", "category": "🧠 Compressione",
+        "description": "Percorso del modello GGUF per il Context Compressor (vuoto = disabilitato)",
         "options": None, "unit": None, "min": None, "max": None, "step": None,
         "restart_required": True, "sensitive": False,
         "basic": True,
     },
-    "GATEKEEPER_N_CTX": {
+    "COMPRESSOR_N_CTX": {
         "type": "number", "editable": True,
-        "label": "Gatekeeper Context", "category": "🧠 Gatekeeper",
-        "description": "Contesto massimo per Gatekeeper",
+        "label": "Compressor Context", "category": "🧠 Compressione",
+        "description": "Contesto massimo per il Context Compressor",
         "options": None, "unit": "token", "min": 512, "max": 32768, "step": 512,
         "restart_required": True, "sensitive": False,
         "basic": False,
     },
-    "GATEKEEPER_N_GPU_LAYERS": {
+    "COMPRESSOR_N_GPU_LAYERS": {
         "type": "number", "editable": True,
-        "label": "Gatekeeper GPU Layers", "category": "🧠 Gatekeeper",
-        "description": "Layer Gatekeeper su GPU (-1 = tutti, 0 = CPU)",
+        "label": "Compressor GPU Layers", "category": "🧠 Compressione",
+        "description": "Layer Compressor su GPU (-1 = tutti, 0 = CPU)",
         "options": None, "unit": None, "min": -1, "max": 99, "step": 1,
         "restart_required": True, "sensitive": False,
         "basic": False,
     },
-    "GATEKEEPER_N_THREADS": {
+    "COMPRESSOR_N_THREADS": {
         "type": "number", "editable": True,
-        "label": "Gatekeeper Threads", "category": "🧠 Gatekeeper",
-        "description": "Thread CPU per Gatekeeper",
+        "label": "Compressor Threads", "category": "🧠 Compressione",
+        "description": "Thread CPU per il Context Compressor",
         "options": None, "unit": None, "min": 1, "max": 32, "step": 1,
         "restart_required": True, "sensitive": False,
         "basic": False,

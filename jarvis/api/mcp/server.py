@@ -139,9 +139,9 @@ def tool_get_trace_by_id(args: dict) -> dict:
     return data or {"error": f"Trace {request_id} non trovato"}
 
 
-def tool_get_gatekeeper_stats(args: dict) -> dict:
-    """Statistiche cumulative del Gatekeeper."""
-    data = _fetch_json("/api/telemetry/gatekeeper")
+def tool_get_intent_stats(args: dict) -> dict:
+    """Statistiche cumulative del classificatore intenti."""
+    data = _fetch_json("/api/telemetry/intent")
     return data or {"stats": None}
 
 
@@ -238,9 +238,9 @@ TOOLS = {
             "required": ["request_id"],
         },
     ),
-    "get_gatekeeper_stats": (
-        tool_get_gatekeeper_stats,
-        "Statistiche cumulative del Gatekeeper (classificazione intento, bypass rate, confidence media).",
+    "get_intent_stats": (
+        tool_get_intent_stats,
+        "Statistiche cumulative del classificatore intenti (classificazione intento, bypass rate, confidence media).",
         {"type": "object", "properties": {}},
     ),
     "get_errors": (
@@ -356,9 +356,9 @@ def _handle_list_resources(req_id: int, _params: Optional[dict]):
             "mimeType": "application/json",
         },
         {
-            "uri": "jarvis://gatekeeper/stats",
-            "name": "Gatekeeper Stats",
-            "description": "Statistiche cumulative del Gatekeeper",
+            "uri": "jarvis://intent/stats",
+            "name": "Intent Stats",
+            "description": "Statistiche cumulative del classificatore intenti",
             "mimeType": "application/json",
         },
         {
@@ -406,7 +406,7 @@ def _handle_read_resource(req_id: int, params: Optional[dict]):
     resource_map = {
         "jarvis://traces/recent": ("/api/telemetry/traces?limit=10", tool_get_recent_traces),
         "jarvis://traces/active": ("/api/telemetry/traces/active", tool_get_active_traces),
-        "jarvis://gatekeeper/stats": ("/api/telemetry/gatekeeper", tool_get_gatekeeper_stats),
+        "jarvis://intent/stats": ("/api/telemetry/intent", tool_get_intent_stats),
         "jarvis://errors/counters": ("/api/telemetry/errors", tool_get_errors),
         "jarvis://system/status": ("/api/telemetry/status", tool_get_status),
         "jarvis://llm/breakdown": (None, tool_get_llm_call_breakdown),

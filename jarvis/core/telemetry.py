@@ -521,13 +521,13 @@ def get_trace_by_id(request_id: str) -> Optional[dict]:
 
 
 # ──────────────────────────────────────────────
-# Gatekeeper Stats Collector
+# Intent Stats Collector
 # ──────────────────────────────────────────────
 
-class GatekeeperStats:
+class IntentStats:
     """
-    Statistiche cumulative del Gatekeeper.
-    Mantenuto in memoria (state.gatekeeper_stats) ed esposto via MCP.
+    Statistiche cumulative del classificatore intenti.
+    Mantenuto in memoria (state.intent_stats) ed esposto via MCP.
     """
 
     def __init__(self):

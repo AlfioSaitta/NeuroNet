@@ -240,7 +240,7 @@ pipeline_traces: "_deque" = _deque(maxlen=500)
 
 # Statistiche cumulative del Gatekeeper.
 # Aggiornato da prompt_builder.py dopo ogni classificazione.
-gatekeeper_stats: dict | None = None  # Verrà inizializzato come GatekeeperStats()
+intent_stats: dict | None = None  # Verrà inizializzato come IntentStats()
 
 # Contatori di errore per diagnostica MCP
 error_counters: dict[str, int] = {}

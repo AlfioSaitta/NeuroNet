@@ -343,7 +343,7 @@ async def get_stats():
     }
 
     # Telemetry summary
-    gk_stats = getattr(state, 'gatekeeper_stats', None)
+    gk_stats = getattr(state, 'intent_stats', None)
     gatekeeper_data = gk_stats.to_dict() if gk_stats and hasattr(gk_stats, 'to_dict') else None
     error_count = len(getattr(state, 'error_counters', {}))
     trace_count = len(getattr(state, 'pipeline_traces', []))
@@ -908,7 +908,7 @@ async def get_dashboard_telemetry():
     import logging
     logger = logging.getLogger(__name__)
 
-    gk_stats = getattr(state, 'gatekeeper_stats', None)
+    gk_stats = getattr(state, 'intent_stats', None)
     gatekeeper_data = gk_stats.to_dict() if gk_stats and hasattr(gk_stats, 'to_dict') else None
 
     errors = dict(getattr(state, 'error_counters', {}))
@@ -1764,7 +1764,7 @@ async def get_inference_analytics():
     total_completion_tokens = getattr(state, 'total_completion_tokens', 0)
 
     history = list(getattr(state, 'inference_history', []))[-200:]
-    gatekeeper = getattr(state, 'gatekeeper_stats', None)
+    gatekeeper = getattr(state, 'intent_stats', None)
     gk_data = gatekeeper.to_dict() if gatekeeper and hasattr(gatekeeper, 'to_dict') else None
 
     return JSONResponse({
