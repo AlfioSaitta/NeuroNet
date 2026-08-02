@@ -43,6 +43,7 @@ mcp = FastMCP("jarvis-telemetry")
 
 def _import_state():
     import core.state as _s
+
     return _s
 
 
@@ -70,6 +71,86 @@ def _get_pending_ops_dict() -> dict:
 
 def _json_text(data: Any) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False, default=str)
+
+
+async def _run_chat_pipeline(message: str, user_id: str, tracer, step_name: str = "chat") -> tuple[dict, str, dict]:
+    """Esegue la pipeline chat completa per i tool MCP chat_send/jarvis_chat.
+
+    Allineato a main.py (FIX 2026-08-02): applica apply_reasoning_config
+    (enable_thinking + logit_bias) e pulisce il content dai tag di reasoning
+    e dai tag d'azione XML. Prima i tool MCP restituivano il content grezzo
+    del LLM: il blocco <think> leakato nelle risposte (il modello Qwen emette
+    <think> come token speciale non visibile, ma il testo reasoning + </think>
+    restavano nel content).
+
+    Args:
+        step_name: nome dello step per il tracer (es. "gemma_generation" / "jarvis_chat").
+
+    Returns:
+        (response_dict, content_pulito, usage). response_dict ha già "trace_id".
+    """
+    from core.config import MODEL_PROFILE
+    from core.reasoning import apply_reasoning_config
+    from agent.intent_router import GREETING_RESPONSE, is_greeting_result
+    from agent.tags import strip_action_tags
+    from agent.prompt import build_omniscient_prompt
+    from core.llm_engine import engine
+
+    raw_messages = [{"role": "user", "content": message}]
+    enriched, gk_result = await build_omniscient_prompt(
+        raw_messages, user_id=user_id, conversation_id="mcp",
+        request_id=tracer.request_id, finalize_trace=False,
+    )
+
+    # ── Greeting short-circuit: pure greetings skip LLM ──
+    if is_greeting_result(gk_result):
+        tracer.finish()
+        return (
+            {"response": GREETING_RESPONSE,
+             "trace_id": tracer.request_id, "model": "greeting"},
+            GREETING_RESPONSE,
+            {},
+        )
+
+    # ── Reasoning config: come main.py — enable_thinking + logit_bias ──
+    options: dict = {"temperature": 0.7}
+    if gk_result:
+        apply_reasoning_config(options, gk_result, message, MODEL_PROFILE)
+
+    tracer.start_step(step_name)
+    response = await engine.generate_chat_with_router(
+        enriched, tools=None, options=options, stream=False
+    )
+    if "error" in response:
+        tracer.set_error(response["error"])
+        tracer.finish()
+        return {"error": response["error"], "trace_id": tracer.request_id}, "", {}
+
+    usage = response.get("usage", {})
+    from core.telemetry import LlmCallRecord
+    tracer.add_llm_call(LlmCallRecord(
+        model="chat", step=step_name, duration_ms=0,
+        tokens_prompt=usage.get("prompt_tokens", 0),
+        tokens_completion=usage.get("completion_tokens", 0),
+        temperature=options.get("temperature", 0.7),
+    ))
+
+    content = response["choices"][0]["message"].get("content", "")
+    tracer.set_llm_response(content)
+    tracer.end_step(step_name, details={
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
+        "char_count": len(content),
+    })
+    tracer.finish()
+
+    # Pulisci: tag reasoning (think) + tag d'azione XML
+    clean = strip_action_tags(content, model_family=MODEL_PROFILE.family) if content else ""
+    return {
+        "response": clean or content,
+        "trace_id": tracer.request_id,
+        "model": response.get("model", "unknown"),
+    }, content, usage
 
 
 # ──────────────────────────────────────────────
@@ -147,67 +228,10 @@ async def chat_send(message: str, user_id: str = "mcp_user") -> str:
     """
     try:
         from core.telemetry import PipelineTracer
-        from agent.prompt import build_omniscient_prompt
-        from core.llm_engine import engine
-        from datetime import datetime, UTC
 
-        # ── Crea tracer ──
         tracer = PipelineTracer.begin(user_message=message[:200], user_id=user_id)
-
-        # ── Build enriched messages ──
-        raw_messages = [{"role": "user", "content": message}]
-        enriched, gk_result = await build_omniscient_prompt(
-            raw_messages,
-            user_id=user_id,
-            conversation_id="mcp",
-            request_id=tracer.request_id,
-            finalize_trace=False,
-        )
-
-        # ── Greeting short-circuit: pure greetings skip LLM ──
-        if gk_result and gk_result.intent == "greeting":
-            greeting_text = "Ciao! 👋 Come posso aiutarti?"
-            tracer.finish()
-            return _json_text({"response": greeting_text, "trace_id": tracer.request_id, "model": "greeting"})
-
-        # ── Generazione LLM ──
-        tracer.start_step("gemma_generation")
-        response = await engine.generate_chat_with_router(
-            enriched, tools=None, options={"temperature": 0.7}, stream=False
-        )
-        if "error" in response:
-            tracer.set_error(response["error"])
-            tracer.finish()
-            return _json_text({"error": response["error"], "trace_id": tracer.request_id})
-
-        usage = response.get("usage", {})
-        from core.telemetry import LlmCallRecord
-        tracer.add_llm_call(LlmCallRecord(
-            model="chat",
-            step="gemma_generation",
-            duration_ms=0,
-            tokens_prompt=usage.get("prompt_tokens", 0),
-            tokens_completion=usage.get("completion_tokens", 0),
-            temperature=0.7,
-        ))
-
-        choice = response["choices"][0]["message"]
-        content = choice.get("content", "")
-        tracer.set_llm_response(content)
-        tracer.end_step("gemma_generation", details={
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "char_count": len(content),
-        })
-
-        # ── Finalizza trace ──
-        tracer.finish()
-
-        return _json_text({
-            "response": content,
-            "trace_id": tracer.request_id,
-            "model": response.get("model", "unknown"),
-        })
+        resp, _, _ = await _run_chat_pipeline(message, user_id, tracer, step_name="gemma_generation")
+        return _json_text(resp)
 
     except Exception as e:
         logger.exception(f"chat_send error")
@@ -250,55 +274,10 @@ async def jarvis_chat(message: str, user_id: str = "mcp_user") -> str:
     """Wraps chat_send with the full Jarvis pipeline."""
     try:
         from core.telemetry import PipelineTracer
-        from agent.prompt import build_omniscient_prompt
-        from core.llm_engine import engine
 
         tracer = PipelineTracer.begin(user_message=message[:200], user_id=user_id)
-        raw_messages = [{"role": "user", "content": message}]
-        enriched, gk_result = await build_omniscient_prompt(
-            raw_messages, user_id=user_id, conversation_id="mcp",
-            request_id=tracer.request_id, finalize_trace=False,
-        )
-
-        # ── Greeting short-circuit: pure greetings skip LLM ──
-        if gk_result and gk_result.intent == "greeting":
-            greeting_text = "Ciao! 👋 Come posso aiutarti?"
-            tracer.finish()
-            return _json_text({"response": greeting_text, "trace_id": tracer.request_id, "model": "greeting"})
-
-        tracer.start_step("jarvis_chat")
-        response = await engine.generate_chat_with_router(
-            enriched, tools=None, options={"temperature": 0.7}, stream=False
-        )
-        if "error" in response:
-            tracer.set_error(response["error"])
-            tracer.finish()
-            return _json_text({"error": response["error"], "trace_id": tracer.request_id})
-
-        usage = response.get("usage", {})
-        from core.telemetry import LlmCallRecord
-        tracer.add_llm_call(LlmCallRecord(
-            model="chat", step="jarvis_chat", duration_ms=0,
-            tokens_prompt=usage.get("prompt_tokens", 0),
-            tokens_completion=usage.get("completion_tokens", 0),
-            temperature=0.7,
-        ))
-
-        choice = response["choices"][0]["message"]
-        content = choice.get("content", "")
-        tracer.set_llm_response(content)
-        tracer.end_step("jarvis_chat", details={
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "char_count": len(content),
-        })
-        tracer.finish()
-
-        return _json_text({
-            "response": content,
-            "trace_id": tracer.request_id,
-            "model": response.get("model", "unknown"),
-        })
+        resp, _, _ = await _run_chat_pipeline(message, user_id, tracer, step_name="jarvis_chat")
+        return _json_text(resp)
     except Exception as e:
         logger.exception("jarvis_chat error")
         return _json_text({"error": str(e)})
@@ -516,7 +495,7 @@ async def benchmark_raw(prompt: str = "Dammi data e ora attuale", max_tokens: in
 async def benchmark_pipeline(prompt: str = "Dammi data e ora attuale", max_tokens: int = 100) -> str:
     """
     Invia un prompt ATTRAVERSO l'INTERA pipeline Jarvis:
-    gatekeeper (keyword_bypass + Gemma 4), RAG, compressione, thinking mode.
+    intent router (regex fast-path + LLM classify), RAG, compressione, thinking mode.
     
     Misurazioni identiche a benchmark_raw() per confronto diretto.
     La differenza tra i due test rivela l'overhead della pipeline.

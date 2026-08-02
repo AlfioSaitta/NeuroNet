@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from core.config import QDRANT_HOST, SEARXNG_HOST, CRAWL4AI_HOST, CRAWL4AI_API_TOKEN, ALLOWED_USERS, VECTOR_DB_VERSION, SYNAPTIQ_ENABLED, LOG_FILE_PATH, MODEL_PROFILE
 import core.state as state
 from core.llm_engine import engine
+from agent.intent_router import is_greeting_result
 from agent.tags import strip_action_tags, TagSafeStream
 try:
     from graph.synaptiq_engine import synaptiq_engine
@@ -1154,32 +1155,19 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
         enhanced_messages = raw_messages
         gk_result = None
 
-    # ── Reasoning config: GatekeeperResult + ModelProfile → /no_think prefix + logit_bias ──
-    # Previene la fuga di ragionamento inglese come testo piatto (Qwen3.5)
-    _think_settings: dict = {}
+    # ── Reasoning config: IntentResult + ModelProfile → enable_thinking + logit_bias ──
+    # Previene la fuga di ragionamento inglese come testo piatto (Qwen3.5).
+    # FIX 2026-08-02: nessun prefisso testuale "/no_think " — l'helper condiviso
+    # apply_reasoning_config (core/reasoning.py) applica chat_template_kwargs +
+    # logit_bias + overrides di temperatura via options. Allineato a main.py/chat.py.
     _last_user_msg = ""
-    for m in reversed(enhanced_messages):
+    for m in reversed(raw_messages):
         if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
             _last_user_msg = m["content"]
             break
-    if gk_result and _last_user_msg:
-        try:
-            from core.reasoning import configura_richiesta_agente
-            _content_prompt, _chat_kwargs, _think_settings = configura_richiesta_agente(
-                MODEL_PROFILE, gk_result, _last_user_msg,
-            )
-            # Inject /no_think prefix nell'ultimo messaggio utente
-            if _content_prompt and _content_prompt != _last_user_msg:
-                for m in reversed(enhanced_messages):
-                    if m.get("role") == "user" and isinstance(m.get("content"), str):
-                        m["content"] = _content_prompt
-                        break
-                logger.debug(f"🔇 /no_think prefix injected for intent={gk_result.intent}")
-        except Exception as e:
-            logger.warning(f"configura_richiesta_agente failed (non critico): {e}")
 
     # ── Greeting short-circuit: saluti puri bypassano LLM ──
-    if gk_result and gk_result.intent == "greeting":
+    if is_greeting_result(gk_result):
         greeting_responses = [
             "Ciao! 👋 Come posso aiutarti oggi?",
             "Ehilà! In cosa posso esserti utile?",
@@ -1232,14 +1220,15 @@ async def chat_stream(payload: ChatStreamRequest, request: Request):
                 "repeat_penalty": MODEL_PROFILE.default_repeat_penalty,
                 "top_p": MODEL_PROFILE.default_top_p,
             }
-            # Merge chat_template_kwargs (es. enable_thinking=False) da configura_richiesta_agente
-            if _chat_kwargs:
-                _gen_opts["chat_template_kwargs"] = _chat_kwargs
-                logger.debug(f"🔇 chat_template_kwargs applied: {_chat_kwargs}")
-            # Merge logit_bias from reasoning config (blocca token <think> per Qwen)
-            if _think_settings.get("logit_bias"):
-                _gen_opts["logit_bias"] = _think_settings["logit_bias"]
-                logger.debug(f"🔇 logit_bias applied: {_think_settings['logit_bias']}")
+            # Reasoning config condivisa (helper core.reasoning.apply_reasoning_config,
+            # Fase 4.2): chat_template_kwargs (enable_thinking) + logit_bias + overrides
+            # temperatura per intent reasoning. Stesso comportamento di main.py/chat.py.
+            if gk_result and _last_user_msg:
+                try:
+                    from core.reasoning import apply_reasoning_config
+                    apply_reasoning_config(_gen_opts, gk_result, _last_user_msg, MODEL_PROFILE)
+                except Exception as e:
+                    logger.warning(f"apply_reasoning_config failed (non critico): {e}")
             gen = await engine.generate_chat_with_router(
                 enhanced_messages, tools=None, options=_gen_opts, stream=True
             )

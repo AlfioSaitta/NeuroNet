@@ -127,7 +127,7 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
     # Must match what main.py does to prevent models from outputting
     # chain-of-thought reasoning as their entire response.
     if gatekeeper_result:
-        from core.reasoning import configura_richiesta_agente
+        from core.reasoning import apply_reasoning_config
         # Find original (pre-enrichment) last user message
         _orig_msg = ""
         for m in reversed(raw_messages):
@@ -135,28 +135,10 @@ async def openai_chat_completions(payload: ChatCompletionRequestOpenAI, request:
                 _orig_msg = m.get("content", "")
                 break
         if _orig_msg:
-            _content_prompt, _chat_kwargs, _settings = configura_richiesta_agente(
-                MODEL_PROFILE, gatekeeper_result, _orig_msg,
-            )
-            # Apply chat_template_kwargs (enable_thinking, etc.)
-            options.setdefault("chat_template_kwargs", {}).update(_chat_kwargs)
-            # Apply logit_bias to block thinking tokens
-            if _settings.get("logit_bias"):
-                options.setdefault("logit_bias", {}).update(_settings["logit_bias"])
-            # Temperature/top_p overrides only if not explicitly set by client
-            for _key in ("temperature", "top_p", "repeat_penalty"):
-                if _key not in options and _key in _settings:
-                    options[_key] = _settings[_key]
-            # Inject /no_think prefix (prepend to enriched content, don't replace)
-            if _content_prompt and _content_prompt != _orig_msg:
-                # Extract the prefix only (e.g. "/no_think ") from content_prompt
-                _prefix = _content_prompt
-                if _orig_msg and _content_prompt.endswith(_orig_msg):
-                    _prefix = _content_prompt[:-len(_orig_msg)]
-                for m in reversed(enriched):
-                    if m.get("role") == "user":
-                        m["content"] = _prefix + m["content"]
-                        break
+            apply_reasoning_config(options, gatekeeper_result, _orig_msg, MODEL_PROFILE)
+            # FIX 2026-08-02: nessuna iniezione testuale "/no_think " nel messaggio
+            # utente (helper condiviso apply_reasoning_config) — il blocco del
+            # thinking è garantito da chat_template_kwargs + logit_bias.
 
     tools = body.get("tools")
     # Propaga tool_choice alle options per forzatura Qwen XML tool call
