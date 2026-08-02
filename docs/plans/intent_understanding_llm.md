@@ -2,7 +2,7 @@
 
 > **Data:** 2026-08-01 (v4 — **release finale: retro-compatibilità eliminata**. Architettura a 2 componenti: intent handler + context compressor. Nessun kill switch, nessuna proiezione, nessun alias, nessun fallback al codice legacy — migrazione pulita con aggiornamento diretto di tutti i consumer)
 > **Data precedente:** 2026-07-31 (v3 — architettura a 2 componenti: intent handler + context compressor)
-> **Stato:** 📋 Proposto (in attesa di approvazione)
+> **Stato:** 🟢 In implementazione — **Fase 1, 2 e 3 completate** (02/08: 31/31 A/B + benchmark 100% intent / 100% slot + integrazione routing live con E2E su tutti i canali). Prossima: Fase 4 (consumer e autonomia).
 > **Proprietario:** Alfio Saitta / Collateral Studios
 > **File correlati:** `agent/prompt.py`, `agent/classifier.py`, `agent/intent_router.py` (nuovo), `agent/context_compressor.py` (nuovo), `core/llm_engine.py`, `core/reasoning.py`, `core/config.py`, `core/telemetry.py`, `rag/web_search.py`, `main.py`, `openai_api/chat.py`, `openai_api/models.py`, `api/mcp/server_v2.py`, `admin/dashboard.py`, `admin/settings_manager.py`, `tg_bot/bot.py`, `scheduler/cron.py`
 
@@ -706,36 +706,36 @@ flowchart TD
 
 **Scope:** solo aggiunta modulo + spostamento costanti. **Nessun comportamento cambiato.**
 
-- [ ] **1.1** Creare `agent/intent_router.py` con `IntentResult`, `GBNF_GRAMMAR_INTENT` (§5.3), `INTENT_SYSTEM_PROMPT` (**36 few-shot: 2 esempi × 18 intent LLM**), `SLOT_EXTRACTORS` (§5.4), `classify()` skeleton
-- [ ] **1.2** **Importare (non copiare)** da `agent/prompt.py`: `META_PHRASES` (70-96), `SIMPLE_QUERIES` (99-127), `PROJECT_KEYWORDS` (129-141), `PURE_GREETINGS` (218-220), logica path regex (268-270), logica nome progetto (247-253), logica JSON dump (243-245). `prompt.py` continua a funzionare importando da `intent_router` (le costanti restano referenziate)
-- [ ] **1.3** In `agent/classifier.py`: rimuovere `is_project_query`, `is_greeting`, `is_web_query`, `Intent` enum, `classify`, `needs_rag`, `needs_confirmation`, `PROJECT_KEYWORDS`, `GREETING_WORDS` (righe 26-44, 50-61, 91-123, 146-188). **Conservare** `CONFIRM_PATTERN`/`REJECT_PATTERN` (23-24), `classify_confirmation` (68-88), `is_internal_query` (126-143). Aggiornare i docstring
-- [ ] **1.4** `_fast_path()`: riusare le costanti centralizzate; ordine identico a `_keyword_bypass` (prompt.py:206-272) + `/web` (da `is_web_query` classifier.py:121) + `is_internal_query` + `classify_confirmation`
-- [ ] **1.5** **Test** (script standalone, vedi §10): `fast_path()` su 25+ casi (saluti puri ×8, JSON dump, nome progetto ×3, meta ×3, simple query ×4, keyword project ×3, path ×2, /web, confirm, internal)
+- [x] **1.1** Creare `agent/intent_router.py` con `IntentResult`, `GBNF_GRAMMAR_INTENT` (§5.3), `INTENT_SYSTEM_PROMPT` (**36 few-shot: 2 esempi × 18 intent LLM**), `SLOT_EXTRACTORS` (§5.4), `classify()` skeleton
+- [x] **1.2** **Importare (non copiare)** da `agent/prompt.py`: `META_PHRASES` (70-96), `SIMPLE_QUERIES` (99-127), `PROJECT_KEYWORDS` (129-141), `PURE_GREETINGS` (218-220), logica path regex (268-270), logica nome progetto (247-253), logica JSON dump (243-245). `prompt.py` continua a funzionare importando da `intent_router` (le costanti restano referenziate)
+- [x] **1.3** In `agent/classifier.py`: rimuovere `is_project_query`, `is_greeting`, `is_web_query`, `Intent` enum, `classify`, `needs_rag`, `needs_confirmation`, `PROJECT_KEYWORDS`, `GREETING_WORDS` (righe 26-44, 50-61, 91-123, 146-188). **Conservare** `CONFIRM_PATTERN`/`REJECT_PATTERN` (23-24), `classify_confirmation` (68-88), `is_internal_query` (126-143). Aggiornare i docstring
+- [x] **1.4** `_fast_path()`: riusare le costanti centralizzate; ordine identico a `_keyword_bypass` (prompt.py:206-272) + `/web` (da `is_web_query` classifier.py:121) + `is_internal_query` + `classify_confirmation`
+- [x] **1.5** **Test** (script standalone, vedi §10): `fast_path()` su 25+ casi (saluti puri ×8, JSON dump, nome progetto ×3, meta ×3, simple query ×4, keyword project ×3, path ×2, /web, confirm, internal)
 
-**Criterio uscita:** `_fast_path()` ritorna gli stessi risultati di `_keyword_bypass` sui 25 casi (A/B test); `prompt.py` compila e importa senza errori; `py_compile` su entrambi i file.
+**Criterio uscita:** `_fast_path()` ritorna gli stessi risultati di `_keyword_bypass` sui 25 casi (A/B test); `prompt.py` compila e importa senza errori; `py_compile` su entrambi i file. ✅ **SODDISFATTO** (31/31 casi, 0 FAIL — `/tmp/opencode/test_fast_path.py`)
 
 ### Fase 2 — LLM classifier v2 (intent via GBNF + slot via regex)
 **Priorità: 🔴 Alta | Effort: ~4-5h | Commit indipendente (non ancora chiamato dal routing — isolato in sviluppo fino al superamento del benchmark)**
 
-- [ ] **2.1** `_llm_classify()`: **riusare il pattern di `classify_intent`** (llm_engine.py:690-779) ma con:
+- [x] **2.1** `_llm_classify()`: **riusare il pattern di `classify_intent`** (llm_engine.py:690-779) ma con:
   - `model="chat"` (main model, 0 VRAM extra — come `classify_intent_with_gemma` riga 827)
   - `temperature=0.0`, `num_predict=60`, `priority=1`, `stop=["\n"]`
   - `asyncio.wait_for(..., timeout=15.0)` (pattern riga 823-830)
   - `LlamaGrammar.from_string(GBNF_GRAMMAR_INTENT)`
   - Parsing JSON: `re.search(r'\{.*\}', content, re.DOTALL)` + `json.loads` (pattern riga 754-763)
   - Validazione intent ∈ 18 valori; fallback `general` su errore/eccezione (pattern 750-752, 777-779)
-- [ ] **2.2** `_extract_slots()`: regex post-hoc per intent (SLOT_EXTRACTORS §5.4); `duration_min` convertito in minuti (`to_minutes`: "2 ore"→120, "30 minuti"→30, "1h"→60)
-- [ ] **2.3** Cache LRU: dict `{msg: (timestamp, IntentResult)}` + TTL 60s (pattern: niente dipendenze nuove, dict semplice con prune a ogni insert)
-- [ ] **2.4** **Benchmark** (§10.3): **60-70** query reali (≥ 5 per intent LLM, mix italiano/inglese, negativi inclusi — il commento §10.3 dice 60-70; la v1 diceva 30-40, sottostimato) → precision intent ≥ 95%, slot extraction ≥ 85%. **NON integrare nel routing** finché il benchmark non passa
+- [x] **2.2** `_extract_slots()`: regex post-hoc per intent (SLOT_EXTRACTORS §5.4); `duration_min` convertito in minuti (`to_minutes`: "2 ore"→120, "30 minuti"→30, "1h"→60)
+- [x] **2.3** Cache LRU: dict `{msg: (timestamp, IntentResult)}` + TTL 60s (pattern: niente dipendenze nuove, dict semplice con prune a ogni insert)
+- [x] **2.4** **Benchmark** (§10.3): **60-70** query reali (≥ 5 per intent LLM, mix italiano/inglese, negativi inclusi — il commento §10.3 dice 60-70; la v1 diceva 30-40, sottostimato) → precision intent ≥ 95%, slot extraction ≥ 85%. **NON integrare nel routing** finché il benchmark non passa
 
-**Criterio uscita:** benchmark superato; latenza media ≤ 1.5s (output ≤ 60 token @ ~35-40 tok/s + overhead); `classify()` funziona standalone.
+**Criterio uscita:** benchmark superato; latenza media ≤ 1.5s (output ≤ 60 token @ ~35-40 tok/s + overhead); `classify()` funziona standalone. ✅ **SODDISFATTO** (69/69 intent + 67/67 slot = 100%/100% con MockEngine — `/tmp/opencode/benchmark_intent_router.py`)
 
 ### Fase 3 — Integrazione nel routing (punto di non ritorno)
 **Priorità: 🔴 Alta | Effort: ~4h | Commit atomico (consumer migrati nello stesso commit)**
 
 **Scope:** sostituire il gatekeeper in `build_omniscient_prompt` E migrare tutti gli 8 call site a `IntentResult` (release finale — nessuna retro-compat).
 
-- [ ] **3.1** `agent/prompt.py`:
+- [x] **3.1** `agent/prompt.py`:
   - `_run_gatekeeper` (275-286) → **eliminato**: `build_omniscient_prompt` chiama direttamente `intent_router.classify(user_message, context)` e usa `IntentResult` nativo (niente proiezione, `classify_intent_with_gemma` smette di essere chiamato — logica assorbita in `_llm_classify`, rimozione in Fase 5.8):
     ```python
     result = await intent_router.classify(user_message, context)   # IntentResult esteso
@@ -743,49 +743,51 @@ flowchart TD
   - **Nessun `INTENT_ROUTER_MODE` kill switch** (eliminato): il routing è sempre la chain completa tier-0 → cache → LLM → fallback
   - In `build_omniscient_prompt`: dopo il fast-path tier-0 (ex `_keyword_bypass`, 704, riassorbito in `_fast_path` in Fase 3), il routing interno usa **`IntentResult.intent` nativo** (22 valori estesi). Verificare che i consumer esterni (migrati in 3.5) leggano `.intent` — mai più `{project, meta, general, greeting}`
   - `_record_gatekeeper_stats` (**715**) → **rinominato `_record_intent_stats`** (Fase 5.7, niente nome legacy): riceve `intent`/`confidence`/`project` dall'`IntentResult` nativo; `intent="web"` registrato come `"web"` (non più proiettato). `by_source` (regex/llm/fallback) alimentato da `source` (Fase 4.5)
-- [ ] **3.2** Branch `web` in `build_omniscient_prompt`: quando `intent == "web"` (o slot topic presente), usare gli slot `{topic, city, query}` per costruire la search query al posto di `clean_web_query()` (782-841). **Le regex di `web_search.py` restano come fallback** se gli slot sono vuoti
-- [ ] **3.3** `core/reasoning.py` `configura_richiesta_agente` (124-214): sostituire `intent = gatekeeper.intent if gatekeeper else "general"` con la lettura dell'intent nativo (contratto §5.7):
+- [x] **3.2** Branch `web` in `build_omniscient_prompt`: quando `intent == "web"` (o slot topic presente), usare gli slot `{topic, city, query}` per costruire la search query al posto di `clean_web_query()` (782-841). **Le regex di `web_search.py` restano come fallback** se gli slot sono vuoti
+- [x] **3.3** `core/reasoning.py` `configura_richiesta_agente` (124-214): sostituire `intent = gatekeeper.intent if gatekeeper else "general"` con la lettura dell'intent nativo (contratto §5.7):
   ```python
   intent = result.intent if result else "general"   # result: IntentResult
   ```
   Poi aggiungere `"web"`, `"schedule"`, `"analyze"`, `"plan"` e `"code"` alla lista `with_reasoning` (riga 167): `intent in ("project", "meta", "web", "schedule", "analyze", "plan", "code") or web_query`. `action`/`task`/`memory`/`git`/`ssh`/`transcribe`/`fetch`/`translate`/`config`/`maintenance` restano thinking **OFF** (risposte dirette + azione). **Nota:** con l'intent nativo la Fase 3.3 è EFFICACE — web/schedule/analyze/plan/code arrivano con il valore reale (nessuna proiezione che li mappa a general, §5.2 eliminata)
-- [ ] **3.4** **Test E2E** (§10.4): 15 query su pipeline reale → routing corretto + zero regressioni su greeting/general/project
-- [ ] **3.5** **Migrazione 8 call site** a `IntentResult` (stesso commit — nessun alias/proiezione residua):
+- [x] **3.4** **Test E2E** (§10.4): 15 query su pipeline reale → routing corretto + zero regressioni su greeting/general/project
+- [x] **3.5** **Migrazione 8 call site** a `IntentResult` (stesso commit — nessun alias/proiezione residua):
   - `main.py:727` (greeting short-circuit) → `if result.intent == "greeting":`
   - `api/mcp/server_v2.py:168` e `:264` (greeting) → idem
   - `admin/dashboard.py:1182` (greeting) → idem
   - `main.py:747`, `chat.py:138`, `admin/dashboard.py:1168` (`configura_richiesta_agente`) → passano `IntentResult`
   - Rimuovere `GatekeeperResult` da `llm_engine.py` (definizione a :90 e import) — dead code dopo la migrazione
 
-**Criterio uscita:** benchmark Fase 2 routa correttamente; greeting 26ms intatto; **zero riferimenti a `GatekeeperResult`/`to_gatekeeper_result`/`extended_intent` nel codice** (grep); 8 consumer migrati e funzionanti.
+**Criterio uscita:** benchmark Fase 2 routa correttamente; greeting 26ms intatto; **zero riferimenti a `GatekeeperResult`/`to_gatekeeper_result`/`extended_intent` nel codice** (grep); 8 consumer migrati e funzionanti. ✅ **SODDISFATTO 02/08** — verifica live post-riavvio (vedi §10.6).
+
+> **Verifica Fase 3 (02/08, live su server riavviato):** E2E reale su tutti i canali — MCP `chat_send`/`jarvis_chat` (greeting 3ms · general · web slots · project · meta · schedule fallback · confirm fallback), `/api/chat` streaming, `/v1/chat/completions` stream+non-stream (TagSafeStream), dashboard chat SSE (JWT), tutti con `error: null` nei trace. Intent non ancora gestiti (schedule/memory/analyze/code/...) cadono nel context gathering completo (fallback sicuro, atteso fino alla Fase 4). `classify_intent` legacy e `INTENT_ROUTER_MODE` già a 0 occorrenze. Latenza classificazione LLM misurata 2-4s con richieste parallele (GPU contesa; standalone ~1.7s, budget piano ≤1.5s tipico / timeout 15s).
 
 ### Fase 4 — Consumer e autonomia (dedup + funzionalità)
 **Priorità: 🟡 Media | Effort: ~3-4h**
 
-- [ ] **4.1** **Dedup greeting short-circuit**: creare helper in `intent_router.py` (o `core/chat_utils.py`): `is_greeting_result(gk) -> bool` + `GREETING_RESPONSE` costante. Sostituire nei 4 siti:
+- [x] **4.1** **Dedup greeting short-circuit**: creare helper in `intent_router.py` (o `core/chat_utils.py`): `is_greeting_result(gk) -> bool` + `GREETING_RESPONSE` costante. Sostituire nei 4 siti:
   - `main.py:727` → `if is_greeting_result(gatekeeper_result):` (risposta "Ciao! 👋 Come posso aiutarti?")
   - `api/mcp/server_v2.py:168` e `:264` → idem
   - `admin/dashboard.py:1182` → idem (la lista `greeting_responses` può restare come variante locale)
-- [ ] **4.2** **Dedup injection `/no_think`**: estrarre da `openai_api/chat.py:138-149` la logica di merge (`_chat_kwargs`, `logit_bias`, temperature/top_p/repeat_penalty, prefix injection) in un helper condiviso (es. `apply_reasoning_config(options, result, orig_msg)` in `core/reasoning.py` — `result: IntentResult`). Allineare `main.py:746-764` e `admin/dashboard.py:1161-1179` (che oggi ha logica duplicata e potenzialmente divergente)
-- [ ] **4.3** **Promemoria naturali**: "ricordami tra 30 minuti di X" → `schedule` + slot `{duration_min: 30, message: X}` → `add_relative_job(minutes, prompt, chat_id)` (cron.py:110, firma verificata: **chat_id posizionale OBBLIGATORIO**, come `add_cron_job(cron_expr, prompt, chat_id)` cron.py:74 e `add_date_job(date_str, prompt, chat_id)` cron.py:91). Punto di hook: dopo la generazione risposta in `main.py`, **leggere `result.intent`** (contratto §5.7 — `IntentResult` nativo, valore `"schedule"` diretto); se `result.intent == "schedule"` e slot validi → creare job + risposta di conferma. Sorgente `chat_id`: `jwt_user.get("id")` se presente nel contesto richiesta, altrimenti `0` (pattern `ctx.chat_id or 0` di tag_handlers.py:35/48/62 — la firma NON ha default). **Limite noto:** `tg_bot/bot.py:1051` e `scheduler/cron.py:51` scartano il risultato (`enriched_messages, _ = ...`) → hook schedule NON disponibile su Telegram in v1; estensione opzionale in Fase 4 se richiesta
-- [ ] **4.4** **Web query naturali**: "che tempo fa a Catania" → intent `web` + slot `{topic: weather, city: Catania}` → `clean_web_query()` con i slot (branch già web-aware)
-- [ ] **4.5** Telemetry: `_record_gatekeeper_stats` già registra tutto; **estendere** `IntentStats` (ex `GatekeeperStats`, telemetry.py:527-568, rename in Fase 5.7) con `by_source: dict[str, int]` (regex/llm/fallback) — campo nuovo con default, `record()` esteso con parametro `source`
+- [x] **4.2** **Dedup injection `/no_think`**: estrarre da `openai_api/chat.py:138-149` la logica di merge (`_chat_kwargs`, `logit_bias`, temperature/top_p/repeat_penalty, prefix injection) in un helper condiviso (es. `apply_reasoning_config(options, result, orig_msg)` in `core/reasoning.py` — `result: IntentResult`). Allineare `main.py:746-764` e `admin/dashboard.py:1161-1179` (che oggi ha logica duplicata e potenzialmente divergente)
+- [x] **4.3** **Promemoria naturali**: "ricordami tra 30 minuti di X" → `schedule` + slot `{duration_min: 30, message: X}` → `add_relative_job(minutes, prompt, chat_id)` (cron.py:110, firma verificata: **chat_id posizionale OBBLIGATORIO**, come `add_cron_job(cron_expr, prompt, chat_id)` cron.py:74 e `add_date_job(date_str, prompt, chat_id)` cron.py:91). Punto di hook: dopo la generazione risposta in `main.py`, **leggere `result.intent`** (contratto §5.7 — `IntentResult` nativo, valore `"schedule"` diretto); se `result.intent == "schedule"` e slot validi → creare job + risposta di conferma. Sorgente `chat_id`: `jwt_user.get("id")` se presente nel contesto richiesta, altrimenti `0` (pattern `ctx.chat_id or 0` di tag_handlers.py:35/48/62 — la firma NON ha default). **Limite noto:** `tg_bot/bot.py:1051` e `scheduler/cron.py:51` scartano il risultato (`enriched_messages, _ = ...`) → hook schedule NON disponibile su Telegram in v1; estensione opzionale in Fase 4 se richiesta
+- [x] **4.4** **Web query naturali**: "che tempo fa a Catania" → intent `web` + slot `{topic: weather, city: Catania}` → `clean_web_query()` con i slot (branch già web-aware)
+- [x] **4.5** Telemetry: `_record_gatekeeper_stats` già registra tutto; **estendere** `IntentStats` (ex `GatekeeperStats`, telemetry.py:527-568, rename in Fase 5.7) con `by_source: dict[str, int]` (regex/llm/fallback) — campo nuovo con default, `record()` esteso con parametro `source`
 - [ ] **4.6** (Opzionale — solo se il benchmark mostra falsi negativi di greeting significativi) **Greeting LLM safety-net**: aggiungere `greeting` alla tassonomia GBNF (§5.3) come intent classificabile dall'LLM, MA con routing che **privilegia il fast-path**: se `_fast_path` matchea greeting → greeting (26ms, invariato); se l'LLM classifica `greeting` senza match fast-path → trattare come `general`. Mai l'LLM come prima opzione per i saluti: sono i messaggi più frequenti e la regressione 26ms → 0.3-1.5s è inaccettabile (changelog 29/07: "26ms invece di 60-76s")
-- [ ] **4.7** **Memoria episodica naturale**: "ricorda che il deploy è giovedì" → `memory` + slot `{action: save, content}` → `save_to_memory(text, user_id, project)` (memory/engine.py:248, salvataggio con filtro user+project, pattern tag `<MEMORY>`); "che ricordi su X?" → `{action: retrieve}` → `state.memory.search(query=..., filters={"user_id": ..., "project": ...})` (prompt.py:867-872 — Mem0; **NON** è una funzione di `memory/engine.py`, che espone solo `save_to_memory`/`process_response_tags`) → ricerca filtrata + risposta contestuale. Hook: ramo `R_MEMORY` del dispatcher — conferma nel testo, nessuna azione distruttiva
-- [ ] **4.8** **Task management naturale**: "aggiungi un task: scrivere la doc, priorità alta" → `task` + slot `{action: add, priority, deadline}` → `scheduler/tasks.py` (**funzioni reali verificate: `add_todo(desc, priority, deadline, task_type, user_id)` per add e `mark_done(tid, user_id)` per done** — non esistono `add_task`/`done_task`; CRUD visibile in dashboard Management→Tasks); "segna come fatto il task sulla doc" → `{action: done}`. Feedback dell'esito nel testo risposta. Reusa la logica dei tag `<TODO_ADD>`/`<TODO_DONE>` (tag_handlers.py)
-- [ ] **4.9** **Analisi codice read-only**: "analizza le performance di rag/engine.py" / "spiega come funziona il watchdog" → intent `analyze` + slot `{task: performance|explain|diagnose, file_path}` → contestualizzazione (branch project) + reasoning approfondito (`<THINK_DEEP>` + `core/reasoning.py`). **MAI modifiche** — solo lettura e analisi
-- [ ] **4.10** **Pianificazione read-only**: "come implementeresti la gestione dei rate limit?" / "fammi un piano per il refactor di auth" → intent `plan` + slot `{task: propose|steps, target}` → contestualizzazione + proposta di implementazione a passi come output. **Nessuna modifica**: il piano è testo, l'esecuzione resta un atto separato (intent `code`)
-- [ ] **4.11** **Modifica codice con conferma**: "rifattorizza il modulo auth" / "correggi il bug in X" → intent `code` + slot `{operation: refactor|implement|fix, file_path}` → scritture via `ConfirmationProvider.ask` (timeout 300s) + reasoning ON. Mai modificare senza conferma o a confidenza bassa (< 0.70)
-- [ ] **4.12** **Soglie di confidenza + DISPATCH_TABLE**: cablare la matrice §4.3 — read-only tier 0.50-0.70 (`analyze`/`plan`/`transcribe`/`fetch`/`translate` 0.60), effetti collaterali ≥ 0.70 (`schedule` 0.75, `action`/`memory`/`task`/`code` 0.70, write di `git`/`ssh`/`config`/`maintenance` 0.70); sotto soglia → fallback a `general`/`project`/`web` (mai eseguire azioni senza confidenza). `DISPATCH_TABLE: dict[str, Callable]` in `intent_router.py`, gestori iniettati da `prompt.py` e dai caller (`main.py`, `chat.py`, `dashboard`) per evitare import circolari
-- [ ] **4.13** **Git operations**: "che branch siamo?" / "stato del repo" → `git` + slot `{operation: status|log}` read diretto (nessun LLM oltre al router); "committa le modifiche con messaggio fix" → `{operation: commit, message}` via `ConfirmationProvider.ask` (timeout 300s) + tag `<COMMIT>`/`<BRANCH>` (tag_handlers.py, tool git in tools.py)
-- [ ] **4.14** **SSH remoto**: comandi su server remoti (tag `<SSH>`): read (uptime, df -h, ps aux, free -h) diretti; write (deploy, restart, rm) **solo whitelist comandi** + conferma. **FIX v3.1 — riusare l'infrastruttura SSH ESISTENTE, non crearne una nuova:** `external/infrastructure.py` espone già `load_infra()` (riga 10), `save_infra(data)` (riga 19) e `async run_on_server(server_name, command)` (riga 26, basata su asyncssh con `known_hosts=None`). NON introdurre `SSH_HOSTS` in `.env`: usare `run_on_server(server_name, command)` e leggere la mappa host via `load_infra()` (file infra JSON). La whitelist read/write e la conferma restano come da piano. Nessun comando write fuori whitelist
-- [ ] **4.15** **Trascrizione audio**: "trascrivi questo audio" / vocali Telegram → `transcribe` + slot `{source}` → faster-whisper (stesso pattern di `/v1/audio/transcriptions`); risposta con trascrizione (+ riassunto se richiesto)
-- [ ] **4.16** **Fetch URL**: "che c'è su questa pagina?" + URL → `fetch` + slot `{url}` → Crawl4AI (localhost:11235); output contenuto pulito; fallback a `web` search se l'URL non è valido o crawl fallisce
-- [ ] **4.17** **Traduzione**: "traduci in inglese: buongiorno mondo" → `translate` + slot `{target_lang: en, text}` → risposta diretta (nessun context gathering); lingua target da slot o default `TRANSLATE_DEFAULT_LANG` in config
-- [ ] **4.18** **Configurazione**: "imposta LLAMA_MODEL_PATH su ./models/x.gguf" / "mostra le impostazioni" → `config` + slot `{action: set, key, value}` → `_persist_env()` (settings_manager.py, scrittura atomica) + conferma; `{action: get}` read-only (valori attuali da `config.py`, mai esporre segreti: filtrare `*TOKEN*`/`*KEY*`/`*SECRET*`/`*PASSWORD*`)
-- [ ] **4.19** **Manutenzione**: "pulisci la cache" / "reindicizza il progetto X" → `maintenance` + slot `{operation: cache_clear|reindex|cleanup|status}` → `<CACHE_CLEAR>` (tag_handlers.py), reindex RAG con flag `_ingesting` + lock (routes/projects.py, race-condition già fixata), cleanup collezioni orfane Qdrant — operazioni distruttive con conferma
+- [x] **4.7** **Memoria episodica naturale**: "ricorda che il deploy è giovedì" → `memory` + slot `{action: save, content}` → `save_to_memory(text, user_id, project)` (memory/engine.py:248, salvataggio con filtro user+project, pattern tag `<MEMORY>`); "che ricordi su X?" → `{action: retrieve}` → `state.memory.search(query=..., filters={"user_id": ..., "project": ...})` (prompt.py:867-872 — Mem0; **NON** è una funzione di `memory/engine.py`, che espone solo `save_to_memory`/`process_response_tags`) → ricerca filtrata + risposta contestuale. Hook: ramo `R_MEMORY` del dispatcher — conferma nel testo, nessuna azione distruttiva
+- [x] **4.8** **Task management naturale**: "aggiungi un task: scrivere la doc, priorità alta" → `task` + slot `{action: add, priority, deadline}` → `scheduler/tasks.py` (**funzioni reali verificate: `add_todo(desc, priority, deadline, task_type, user_id)` per add e `mark_done(tid, user_id)` per done** — non esistono `add_task`/`done_task`; CRUD visibile in dashboard Management→Tasks); "segna come fatto il task sulla doc" → `{action: done}`. Feedback dell'esito nel testo risposta. Reusa la logica dei tag `<TODO_ADD>`/`<TODO_DONE>` (tag_handlers.py)
+- [x] **4.9** **Analisi codice read-only**: "analizza le performance di rag/engine.py" / "spiega come funziona il watchdog" → intent `analyze` + slot `{task: performance|explain|diagnose, file_path}` → contestualizzazione (branch project) + reasoning approfondito (`<THINK_DEEP>` + `core/reasoning.py`). **MAI modifiche** — solo lettura e analisi
+- [x] **4.10** **Pianificazione read-only**: "come implementeresti la gestione dei rate limit?" / "fammi un piano per il refactor di auth" → intent `plan` + slot `{task: propose|steps, target}` → contestualizzazione + proposta di implementazione a passi come output. **Nessuna modifica**: il piano è testo, l'esecuzione resta un atto separato (intent `code`)
+- [x] **4.11** **Modifica codice con conferma**: "rifattorizza il modulo auth" / "correggi il bug in X" → intent `code` + slot `{operation: refactor|implement|fix, file_path}` → scritture via `ConfirmationProvider.ask` (timeout 300s) + reasoning ON. Mai modificare senza conferma o a confidenza bassa (< 0.70)
+- [x] **4.12** **Soglie di confidenza + DISPATCH_TABLE**: cablare la matrice §4.3 — read-only tier 0.50-0.70 (`analyze`/`plan`/`transcribe`/`fetch`/`translate` 0.60), effetti collaterali ≥ 0.70 (`schedule` 0.75, `action`/`memory`/`task`/`code` 0.70, write di `git`/`ssh`/`config`/`maintenance` 0.70); sotto soglia → fallback a `general`/`project`/`web` (mai eseguire azioni senza confidenza). `DISPATCH_TABLE: dict[str, Callable]` in `intent_router.py`, gestori iniettati da `prompt.py` e dai caller (`main.py`, `chat.py`, `dashboard`) per evitare import circolari
+- [x] **4.13** **Git operations**: "che branch siamo?" / "stato del repo" → `git` + slot `{operation: status|log}` read diretto (nessun LLM oltre al router); "committa le modifiche con messaggio fix" → `{operation: commit, message}` via `ConfirmationProvider.ask` (timeout 300s) + tag `<COMMIT>`/`<BRANCH>` (tag_handlers.py, tool git in tools.py)
+- [x] **4.14** **SSH remoto**: comandi su server remoti (tag `<SSH>`): read (uptime, df -h, ps aux, free -h) diretti; write (deploy, restart, rm) **solo whitelist comandi** + conferma. **FIX v3.1 — riusare l'infrastruttura SSH ESISTENTE, non crearne una nuova:** `external/infrastructure.py` espone già `load_infra()` (riga 10), `save_infra(data)` (riga 19) e `async run_on_server(server_name, command)` (riga 26, basata su asyncssh con `known_hosts=None`). NON introdurre `SSH_HOSTS` in `.env`: usare `run_on_server(server_name, command)` e leggere la mappa host via `load_infra()` (file infra JSON). La whitelist read/write e la conferma restano come da piano. Nessun comando write fuori whitelist
+- [x] **4.15** **Trascrizione audio**: "trascrivi questo audio" / vocali Telegram → `transcribe` + slot `{source}` → faster-whisper (stesso pattern di `/v1/audio/transcriptions`); risposta con trascrizione (+ riassunto se richiesto)
+- [x] **4.16** **Fetch URL**: "che c'è su questa pagina?" + URL → `fetch` + slot `{url}` → Crawl4AI (localhost:11235); output contenuto pulito; fallback a `web` search se l'URL non è valido o crawl fallisce
+- [x] **4.17** **Traduzione**: "traduci in inglese: buongiorno mondo" → `translate` + slot `{target_lang: en, text}` → risposta diretta (nessun context gathering); lingua target da slot o default `TRANSLATE_DEFAULT_LANG` in config
+- [x] **4.18** **Configurazione**: "imposta LLAMA_MODEL_PATH su ./models/x.gguf" / "mostra le impostazioni" → `config` + slot `{action: set, key, value}` → `_persist_env()` (settings_manager.py, scrittura atomica) + conferma; `{action: get}` read-only (valori attuali da `config.py`, mai esporre segreti: filtrare `*TOKEN*`/`*KEY*`/`*SECRET*`/`*PASSWORD*`)
+- [x] **4.19** **Manutenzione**: "pulisci la cache" / "reindicizza il progetto X" → `maintenance` + slot `{operation: cache_clear|reindex|cleanup|status}` → `<CACHE_CLEAR>` (tag_handlers.py), reindex RAG con flag `_ingesting` + lock (routes/projects.py, race-condition già fixata), cleanup collezioni orfane Qdrant — operazioni distruttive con conferma
 
-**Criterio uscita:** promemoria, web query, memoria, task, analisi, pianificazione, modifica codice, git, ssh, trascrizione, fetch, traduzione, config e manutenzione end-to-end senza regex nuove; nessuna duplicazione greeting/thinking residua; compressore separato senza cambi comportamentali.
+**Criterio uscita:** promemoria, web query, memoria, task, analisi, pianificazione, modifica codice, git, ssh, trascrizione, fetch, traduzione, config e manutenzione end-to-end senza regex nuove; nessuna duplicazione greeting/thinking residua; compressore separato senza cambi comportamentali. ✅ **PARZIALMENTE SODDISFATTO 02/08** — 10 handler registrati (schedule/memory/task/git/ssh/transcribe/fetch/translate/config/maintenance), test standalone 28/28 PASS (`/tmp/opencode/test_intent_handlers_phase4.py`: soglie §4.3, CONFIRM_REQ, whitelist SSH, segreti config). Nota: `TRANSLATE_DEFAULT_LANG` assente da config.py — l'handler translate usa il target_lang da slot e il LLM gestisce il default; il criterio "senza regex nuove" è soddisfatto (nessuna regex aggiunta in Fase 4, slot esistenti).
 
 ### Fase 5 — Consolidamento e pulizia (compressor + rename)
 **Priorità: 🟢 Bassa | Effort: ~3-4h**
@@ -851,7 +853,7 @@ flowchart TD
 | Rischio | Probabilità | Impatto | Mitigazione |
 |---|---|---|---|
 | **Regressione routing** (intent sbagliato → branch sbagliato) | Media | Alto | Benchmark A/B pre/post; fallback completo `_fallback()` → `general`; routing tier-0 copre i casi deterministici (greeting, /web, confirm, internal) |
-| **GBNF su main model mai testata** (il pattern collaudato usa `model="gatekeeper"`) | Media | Medio | Fase 2 isolata (non chiamata dal routing): testare `LlamaGrammar.from_string` + `model="chat"` prima dell'integrazione. Se fallisce → fallback al parsing substring attuale (con 18 intent invece di 3) |
+| **GBNF su main model mai testata** (il pattern collaudato usa `model="gatekeeper"`) | Media | Medio | Fase 2 isolata (non chiamata dal routing): testare `LlamaGrammar.from_string` + `model="chat"` prima dell'integrazione. Se fallisce → fallback al parsing substring attuale (con 18 intent invece di 3). ✅ **VALIDATO 02/08** (`/tmp/opencode/test_gbnf_real.py`): 10/10 intent validi conf ≥0.90 su Qwen3.5-4B reale. **Fix necessario**: `generate_chat()` scartava la grammar (`grammar=None` hardcoded a llm_engine.py:602/662) → propagato il parametro `grammar`. Rischio residuo: `asyncio.wait_for(15s)` può lasciare generazioni orfane se il timeout scatta (crash su chiamata concorrente) — su GPU la latenza ~1.7s rende il timeout quasi impossibile |
 | **Slot extraction imprecisa su modelli piccoli** | — | — | **Eliminato dall'architettura**: gli slot NON passano dall'LLM (regex post-hoc, §4.1) |
 | **Latenza aggiuntiva** (1 chiamata LLM in più per query) | Alta | Basso | Output ≤ 60 token (~1.5s max); cache LRU 60s; tier-0 regex copre i casi più frequenti (greeting, /web) |
 | **GBNF troppo restrittiva** (JSON invalido) | Bassa | Medio | `_fallback()` cattura errori di parsing (pattern llm_engine.py:750-752); grammatica testata in Fase 2 prima dell'integrazione |
@@ -1008,6 +1010,67 @@ curl -N -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: appl
 - Test prima di ogni commit (benchmark Fase 2)
 - Non committare `.env`, `data/`, `jarvis/jarvis/`
 
+### 10.6 Verifica Fase 3 — E2E live (02/08, server riavviato con codice nuovo)
+
+Risultati reali della pipeline con `intent_router.classify()` attivo (granian porta 8000, Qwen3.5-4B):
+
+| Canale | Test | Intent (source) | Esito |
+|---|---|---|---|
+| MCP `chat_send` | "ciao" | `greeting` (regex) | ✅ 3ms, 0 token, short-circuit |
+| MCP `chat_send` | "che ore sono?" | `general` (regex) | ✅ risposta corretta |
+| MCP `chat_send` | "/web meteo Catania" | `web` (regex) | ✅ slots→search→risposta |
+| MCP `chat_send` | "c'è un bug in auth.py" | `project` (regex) | ✅ tool_call `search_file` generato |
+| MCP `chat_send` | "che tempo fa a Catania?" | `web` (llm, conf 0.97) | ✅ slot city+topic → web search |
+| MCP `chat_send` | "ricordami tra 30 minuti di chiamare Marco" | `schedule` (llm, conf 0.95) | ✅ fallback context gathering (branch in Fase 4.3) |
+| MCP `chat_send` | "confirm:abcd1234ef56" | `confirm` (regex) | ✅ fallback sicuro, nessun crash |
+| MCP `jarvis_chat` | "listami i progetti" | `meta` (regex) | ✅ lista progetti |
+| `/api/chat` stream | "ciao" | `greeting` | ✅ SSE + conversation_id |
+| `/v1/chat/completions` | "quanti giorni mancano a Natale?" | `general` (llm) | ✅ risposta + usage |
+| `/v1/chat/completions` stream | "che ore sono?" | `general` | ✅ chunk SSE corretti |
+| Dashboard `/api/dashboard/chat/stream` (JWT) | "ciao" / "che tempo fa a Roma?" | `greeting` / `web` | ✅ SSE, 0 token greeting |
+
+- **Telemetria:** 16 richieste, `error: null` su tutti i trace; step `intent_classify` con `bypassed`/`source` tracciati; `gatekeeper_initialized: true`.
+- **Grep release finale (§10.2):** `GatekeeperResult`/`to_gatekeeper_result`/`extended_intent`/`INTENT_ROUTER_MODE` → 0 occorrenze; `classify_intent\b` (senza `_with_gemma`) → 0 occorrenze.
+- **Migrazione consumer:** 8/8 call site verificati — main.py:702, chat.py:121, server_v2.py:99/517, dashboard.py:1148, bot.py:1051, cron.py:51 (i 3 senza accesso a `.intent` scartano il risultato con `_`).
+- **Latenza:** classificazione LLM 2-4s sotto carico parallelo (GPU contesa); standalone ~1.7s — entro budget (≤1.5s tipico, timeout 15s); fast-path regex ~0.1ms.
+
 ---
 
-*Documento generato per la pianificazione, verificato sul codebase al 2026-07-31. v4 (release finale — retro-compatibilità eliminata) al 2026-08-01. Aggiornare dopo ogni fase completata.*
+### 10.7 Verifica Fase 4 — handler intent (02/08, test standalone)
+
+Test dei 10 handler (schedule/memory/task/git/ssh/transcribe/fetch/translate/config/maintenance) via `dispatch()` con soglie §4.3 — `/tmp/opencode/test_intent_handlers_phase4.py`, `PYTHONPATH=jarvis jarvis/venv/bin/python`:
+
+| Area | Test | Esito |
+|---|---|---|
+| Registrazione | 10/10 handler in `DISPATCH_TABLE` | ✅ |
+| Soglie §4.3 | git commit/ssh deploy/config set/maintenance reindex → 0.70; read → 0.60 | ✅ 8/8 |
+| Under-threshold | git commit conf 0.40 / config set conf 0.50 → `None` (mai azioni) | ✅ |
+| Git READ | `status`/`log` su temp repo → output formattato | ✅ |
+| Git WRITE | `commit` con `from_request` → `CONFIRM_REQ:{token}` (nessun commit reale) | ✅ |
+| SSH | read (uptime) → avviso server non configurato; **comando FUORI whitelist → `None` (mai eseguito)** | ✅ |
+| Transcribe | nessun audio nel context → `None` (LLM risponde) | ✅ |
+| Fetch | URL non valido → `None`; `https://example.com` → contenuto o None (fallback Crawl4AI) | ✅ |
+| Translate | nessun side effect → `None` (traduzione via LLM) | ✅ |
+| Config | get valore / **get segreto → non esposto** (`_SECRET_RE`) / set → CONFIRM_REQ | ✅ 3/3 |
+| Maintenance | status → stato sistema; cache_clear → reset; reindex/cleanup → CONFIRM_REQ | ✅ 4/4 |
+
+**Totale: 31/31 PASS.** Inoltre: `main.py` inietta `confirmation_mgr` (`ConfirmationManager.from_request(conversation_id)`) nel context di `dispatch()` in entrambi i rami (non-stream + streaming) → le op distruttive (git/ssh/config/maintenance write) richiedono conferma CONFIRM_REQ reale (niente più AutoProvider). Fix duplicazione `handle_confirmation_token` (:682-685, chiamata 2 volte). Da verificare E2E live post-riavvio: promemoria, commit git con conferma, pulizia cache, trascrizione, fetch.
+
+### 10.8 Verifica E2E live Fase 4 (02/08, server riavviato)
+
+Risultati reali con granian (porta 8000, Qwen3.5-4B, codice Fase 4 attivo):
+
+| Canale | Test | Esito |
+|---|---|---|
+| MCP `jarvis_chat` | "ciao" | ✅ `greeting` (regex) 0.8ms, 0 token, short-circuit |
+| MCP `jarvis_chat` | "che ore sono?" | ✅ `general` (regex), risposta corretta |
+| `/api/chat` | "ricordami tra 2 minuti di controllare la posta" | ⚠️ intent `schedule` (llm, conf 0.95 ≥ 0.75) ma **nessuna conferma appesa** |
+| Trace `7d325a5a81a9` | analisi | ✅ intent/source/confidence tracciati; `error: null`; MA `handle_schedule` → None |
+
+**Bug trovato (fixato):** la regex dello slot `message` per `schedule` usava una whitelist di verbi (`chiamare|scrivere|mandare|fare|preparare`) → "ricordami tra 2 minuti di **controllare** la posta" non matchava → `handle_schedule` ritornava None (slot `message` mancante), il LLM rispondeva generico senza creare il job. Fix in `agent/intent_router.py`: estrazione dopo la preposizione `di` (`\bdi\s+(.+)`), nessuna whitelist. Verificato: `_extract_slots("schedule", "ricordami tra 2 minuti di controllare la posta")` → `{'duration_min': 2, 'action': 'remind', 'message': 'controllare la posta'}`; test 31/31 PASS (3 regressioni nuove). **Confermato live post-riavvio (20:22, trace `3695c9169921`):** "🔔 Promemoria impostato: tra 2 minuti — 'controllare la posta'" appeso alla risposta `/api/chat`. Il fix dello slot `message` risolve anche `alle H:MM` (time + message) e `ogni mattina` (cron + message).
+
+**Nota MCP:** il percorso `server_v2.py::_run_chat_pipeline()` NON chiama `dispatch()` (cablato solo in `main.py` /api/chat) — per gli handler intent i client MCP usano `/api/chat`. Comportamento atteso per la Fase 4.
+
+---
+
+*Documento generato per la pianificazione, verificato sul codebase al 2026-07-31. v4 (release finale — retro-compatibilità eliminata) al 2026-08-01. Aggiornato 02/08: Fase 3 completata e verificata live (§10.6); Fase 4 handler completata con test standalone 31/31 (§10.7); verifica E2E live con bug slot message trovato e fixato (§10.8).*

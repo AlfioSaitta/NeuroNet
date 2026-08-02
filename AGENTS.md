@@ -2,7 +2,7 @@
 
 > **Questo file è destinato esclusivamente agli agenti AI che lavorano su questo progetto.**  
 > Contiene tutto il contesto necessario per operare autonomamente senza errori.  
-> **Data ultimo aggiornamento:** 2026-07-29 (Module extraction, Admin Panel fixes, Cherry Studio supporto)
+> **Data ultimo aggiornamento:** 2026-08-02 (MCP Reasoning Leak Fix, Intent Router)
 
 ---
 
@@ -106,6 +106,8 @@ Client (API HTTP) → main.py → LlamaEngine.load_models()
 | `agent/tags.py` | 21 tag XML d'azione (MEMORY, SCHEDULE, SSH, EXEC, ecc.). `TagSafeStream` per streaming. |
 | `agent/tools.py` | TOOLS_SCHEMA + dispatch table per tool-calling (file/shell/skills). |
 | `agent/classifier.py` | Classificatore intenti centralizzato. |
+| `agent/intent_router.py` | Classificazione intenti centralizzata (22 intent): `_fast_path` tier-0 (greeting 26ms), `_llm_classify` GBNF, slot extractor per intent, `DISPATCH_TABLE` + soglie §4.3 (`intent_threshold`). |
+| `agent/intent_handlers.py` | 10 intent handler (`schedule`/`memory`/`task`/`git`/`ssh`/`transcribe`/`fetch`/`translate`/`config`/`maintenance`) con firma `(result, context)`. Op distruttive via `_confirm_or_pending` (CONFIRM_REQ token-based). |
 | `agent/confirmation.py` | ConfirmationManager per tool calls con timeout 5 min. |
 | `agent/tool_handlers.py` | Handler specializzati per tool-calling (file, shell, skills). Estratto da `tools.py`. |
 | `agent/tag_handlers.py` | Esecutori per tag XML d'azione. Estratto da `tags.py`. |
@@ -349,6 +351,8 @@ Tutti i container in `ai_network`: `qdrant`, `searxng`, `crawl4ai`. Jarvis gira 
 | `admin/dashboard.py` + `admin_panel/` | ✅ **FIX** | Fix race condition restart ingestion, timeout logs (30s), pulsanti restart funzionanti in Logs view, pulizia collezioni orfane Qdrant, rimosso endpoint orfano analytics/errors. |
 | `openai_api/chat.py` | ✅ **FIX** | Cherry Studio: gatekeeper reasoning, /no_think prefix, TagSafeStream per Qwen/DeepSeek (risposte vuote). |
 | `main.py` | ✅ **FIX** | Greeting short-circuit: 26ms invece di 60-76s per saluti puri (0 token LLM). `build_omniscient_prompt()` ora restituisce tuple (messages, context). |
+| `agent/intent_handlers.py` | ✅ **ESTESO** | 10 intent handler (schedule/memory/task/git/ssh/transcribe/fetch/translate/config/maintenance) con firma unificata `(result, context)` + `register_handlers()`. Op distruttive via `_confirm_or_pending` (CONFIRM_REQ token-based, timeout 300s). Whitelist SSH read/write, mask segreti config. |
+| `main.py` | ✅ **MIGLIORATO** | Fase 4: `confirmation_mgr` token-based iniettato nel context di `dispatch()` (entrambi i rami) → write distruttive richiedono conferma. Fix duplicazione `handle_confirmation_token`. |
 
 ### ⏳ Da Completare (Operazioni Manuali sulla VPS)
 
@@ -364,6 +368,9 @@ Tutti i container in `ai_network`: `qdrant`, `searxng`, `crawl4ai`. Jarvis gira 
 
 | Data | Modifica | Impatto |
 |---|---|---|
+| **02/08** | **MCP Reasoning Leak Fix** | `api/mcp/server_v2.py`: nuovo helper `_run_chat_pipeline()` condiviso da `chat_send`/`jarvis_chat` — applica `configura_richiesta_agente()` (enable_thinking + logit_bias, come main.py) e `strip_action_tags()` sul content prima di restituirlo. `agent/tags.py`: gestione chiusura `</think>` orfana in `strip_thinking_blocks()` (Qwen emette `<think>` come token speciale non visibile, il reasoning + `</think>` leakavano nel response) + pattern plain `<think>...</think>` per famiglia qwen. Verificato live: "che ore sono?" e "listami i progetti" non leakano più reasoning/tool_call nel response MCP. |
+| **02/08** | **Fase 4 handler intent (git/ssh/transcribe/fetch/translate/config/maintenance)** | `agent/intent_handlers.py`: aggiunti 7 handler (`handle_git`, `handle_ssh`, `handle_transcribe`, `handle_fetch`, `handle_translate`, `handle_config`, `handle_maintenance`) + helper condivisi (`_git_repo_dir`, `_run_git`, `_confirm_or_pending`, `_SSH_READ_COMMANDS`/`_SSH_WRITE_COMMANDS` whitelist, `_SECRET_RE`). Registrati in `register_handlers()` (10 intent totali: + schedule/memory/task). `main.py`: iniettato `confirmation_mgr` token-based (`ConfirmationManager.from_request`) nel context di `dispatch()` in entrambi i rami (non-stream + streaming) → le op distruttive (git/ssh/config/maintenance write) richiedono conferma CONFIRM_REQ; fix duplicazione `handle_confirmation_token` (chiamata 2 volte, :682-685). `dispatch()` rispetta soglie §4.3 (read 0.60 / write 0.70). Test standalone 28/28 PASS (`/tmp/opencode/test_intent_handlers_phase4.py`). |
+| **02/08** | **Fix E2E: slot `message` schedule** | `agent/intent_router.py`: la regex dello slot `message` per `schedule` usava una whitelist di verbi (`chiamare|scrivere|mandare|fare|preparare`) → "ricordami tra 2 minuti di **controllare** la posta" non matchava → `handle_schedule` ritornava None (nessuna conferma appesa, verificato live su `/api/chat`). Fix: estrazione dopo la preposizione `di` (`\bdi\s+(.+)`) — nessuna whitelist. Test: 31/31 PASS (3 nuovi test di regressione). **Verificato live post-riavvio (20:22, trace `3695c9169921`): "🔔 Promemoria impostato: tra 2 minuti — 'controllare la posta'" appeso correttamente.** |
 | **29/07** | **Module Extraction** | Estratti 7 moduli da file oversized: `rag/chunking.py` (+437), `agent/tool_handlers.py` (+637), `agent/tag_handlers.py` (+320), `core/qdrant_utils.py` (+51), `core/chat_utils.py` (+146), `core/reasoning.py` (+334), `core/telemetry_api.py` (+98). Tutti i file < 250 LOC ora. |
 | **29/07** | **Admin Panel Fixes** | `fetchLogs()` timeout 30s, `resetSettings` classList toggle, restart buttons in Logs view, race condition `_ingest_local_documents()` con stato `_ingesting`, rimosso endpoint orfano `/analytics/errors`. |
 | **29/07** | **Cherry Studio Fix** | `openai_api/chat.py`: gatekeeper reasoning per risposte vuote, supporto `/no_think` prefix, `TagSafeStream` per Qwen/DeepSeek (sostituisce `[DONE]` mancante con `data: [DONE]`). |
