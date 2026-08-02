@@ -11,7 +11,6 @@ import numpy as np
 
 import core.state as state
 from core.config import LLM_THINKING_MODE, MODEL_PROFILE, EXTERNAL_GPU_URL, MODEL_ID, LLM_MAX_TOKENS, EMBEDDING_DIMS
-from dataclasses import dataclass
 from typing import Literal, Optional
 
 try:
@@ -84,14 +83,6 @@ class PriorityLock:
 
 class PriorityLockTimeoutError(Exception):
     pass
-
-
-@dataclass
-class GatekeeperResult:
-    """Risultato della classificazione intento a 3 stati."""
-    intent: str  # "project" | "meta" | "general"
-    project: str | None = None
-    confidence: float = 0.0
 
 
 CAVEMAN_COMPRESSOR_SYSTEM_PROMPT = """You are a data compressor. Compress the text below by removing fluff while keeping all technical details.
@@ -576,7 +567,10 @@ class LlamaEngine:
 
         # Note: JSON mode (response_format=json_object) is handled natively by
         # llama-cpp-python's create_chat_completion via response_format parameter.
-        # The grammar parameter is left as None — do NOT build a custom GBNF string here.
+        # Il parametro `grammar` (GBNF) viene PROPAGATO se fornito dal caller
+        # (es. _llm_classify in agent/intent_router.py). Se None → nessun vincolo.
+        # FIX 2026-08-02: prima era hardcoded a None — la GBNF veniva ignorata
+        # e il modello generava testo libero invece del JSON strutturato.
 
         if stream:
             _STREAM_TOTAL_TIMEOUT = 600  # max 10 min totali per streaming
@@ -599,7 +593,7 @@ class LlamaEngine:
                                     top_k=top_k,
                                     stream=True,
                                     response_format=response_format,
-                                    grammar=None,
+                                    grammar=grammar,
                                     **({"chat_template_kwargs": chat_template_kwargs} if chat_template_kwargs and _CHAT_TEMPLATE_KWARGS_SUPPORTED else {}),
                                     logit_bias=logit_bias or None,
                                 )
@@ -659,7 +653,7 @@ class LlamaEngine:
                                     top_k=top_k,
                                     stream=False,
                                     response_format=response_format,
-                                    grammar=None,
+                                    grammar=grammar,
                                     **({"chat_template_kwargs": chat_template_kwargs} if chat_template_kwargs and _CHAT_TEMPLATE_KWARGS_SUPPORTED else {}),
                                     logit_bias=logit_bias or None,
                                 )
@@ -682,192 +676,6 @@ class LlamaEngine:
                 except asyncio.TimeoutError:
                     logger.error(f"LLM inference timed out after 300s (max_tokens={max_tokens})")
                     return {"error": "LLM inference timed out", "choices": [{"message": {"role": "assistant", "content": "Mi dispiace, la generazione della risposta ha superato il tempo limite. Prova con una domanda più specifica."}}]}  # noqa
-
-    # ════════════════════════════════════════════════════════════════
-    # 3-CLASS INTENT CLASSIFIER (Qwen3.5 su CPU con LlamaGrammar)
-    # ════════════════════════════════════════════════════════════════
-
-    async def classify_intent(self, user_message: str, context: dict) -> GatekeeperResult:
-        """Classifica intento utente in project/meta/general usando Qwen3.5 (OpA).
-
-        Usa 6 few-shot esempi con LlamaGrammar per output JSON vincolato.
-        GATEKEEPER_N_CTX=4096 permette esempi + contesto senza troncare.
-
-        Args:
-            user_message: Query utente grezza.
-            context: Dict con active_project, projects_available, recent_messages.
-
-        Returns:
-            GatekeeperResult con intent, project (se project), confidence.
-        """
-        active_project = context.get("active_project") or "nessuno"
-        projects_str = ", ".join(context.get("projects_available", [])) or "nessuno"
-        recent_msgs = context.get("recent_messages", [])
-        recent_str = " | ".join(recent_msgs[-3:]) if recent_msgs else "nessuno"
-
-        prompt = f"""Contesto:
-- Progetto attivo: {active_project}
-- Progetti disponibili: {projects_str}
-- Messaggi recenti: {recent_str}
-
-Esempi:
-1. Richiesta: "aggiungi una funzione di login"
-   {{"intent":"project","project":"null","confidence":0.95}}
-2. Richiesta: "quali progetti hai in memoria?"
-   {{"intent":"meta","project":"null","confidence":0.98}}
-3. Richiesta: "ciao come stai?"
-   {{"intent":"general","project":"null","confidence":0.99}}
-4. Richiesta: "c'è un bug in auth.py"
-   {{"intent":"project","project":"null","confidence":0.90}}
-5. Richiesta: "raccontami una barzelletta"
-   {{"intent":"general","project":"null","confidence":0.95}}
-6. Richiesta: "cosa contiene il progetto Jarvis?"
-   {{"intent":"project","project":"Jarvis","confidence":0.92}}
-
-Richiesta: "{user_message[:1000]}"
-
-Classifica: project (codice/file/progetto), meta (lista/capacità/chi sei), general (conversazione).
-JSON esatto: {{"intent":"project|meta|general","project":"null|Nome","confidence":0.95}}
-"""
-        from llama_cpp import LlamaGrammar
-        grammar_str = r'''root ::= "{\"intent\": " intent ", \"project\": " projval ", \"confidence\": " number "}"
-intent ::= "\"project\"" | "\"meta\"" | "\"general\""
-projval ::= string | "null"
-string ::= "\"" word "\""
-word ::= [a-zA-Z] ([a-zA-Z0-9_.-])*
-number ::= [0-1] "." digit+ | "1" "." "0"+
-digit ::= [0-9]'''
-
-        try:
-            grammar_obj = LlamaGrammar.from_string(grammar_str)
-            messages = [{"role": "user", "content": prompt}]
-            response = await self.generate_chat(
-                messages, stream=False,
-                options={"temperature": 0.0, "num_predict": 60},
-                grammar=grammar_obj,
-                model="gatekeeper",
-            )
-            if "error" in response:
-                logger.warning(f"Gatekeeper: errore LLM → fallback general ({response['error']})")
-                return GatekeeperResult(intent="general", confidence=0.0)
-
-            content = extract_content(response)
-            match = re.search(r'\{.*\}', content, re.DOTALL)
-            if not match:
-                logger.warning(f"Gatekeeper: JSON non trovato in '{content[:60]}...' → fallback general")
-                return GatekeeperResult(intent="general", confidence=0.0)
-
-            result = json.loads(match.group(0))
-            intent = result.get("intent", "general")
-            project = result.get("project")
-            confidence = float(result.get("confidence", 0.0))
-
-            available = context.get("projects_available", [])
-            if project and project not in available:
-                project = None
-            if intent not in ("project", "meta", "general"):
-                intent = "general"
-
-            logger.info(f"🧠 Gatekeeper Qwen3.5: {intent} | project={project} | conf={confidence:.2f}")
-            return GatekeeperResult(
-                intent=intent,
-                project=project if intent == "project" else None,
-                confidence=confidence,
-            )
-        except Exception as e:
-            logger.warning(f"Gatekeeper: eccezione → fallback general ({repr(e)})")
-            return GatekeeperResult(intent="general", confidence=0.0)
-
-    # ════════════════════════════════════════════════════════════════
-    # GEMMA 4 INTENT CLASSIFIER (OpB — senza grammatica GBNF)
-    # ════════════════════════════════════════════════════════════════
-
-    async def classify_intent_with_gemma(self, user_message: str, context: dict) -> GatekeeperResult:
-        """Classifica intento usando Gemma 4 (modello chat già in VRAM).
-
-        Vantaggi rispetto a Qwen3.5:
-        - 0 VRAM extra (riusa modello già caricato su GPU)
-        - Qualità superiore (Gemma 4 2.1B vs Qwen3.5 0.8B)
-        - Generazione velocissima: 1-5 token di output
-        - Nessuna grammatica GBNF — parsing diretto della risposta
-
-        Lo svantaggio: condivide la coda del modello chat (PriorityLock). Ma
-        generando solo 1-5 token, il tempo di attesa è trascurabile anche
-        durante una generazione concorrente.
-
-        Args:
-            user_message: Query utente grezza.
-            context: Dict con active_project, projects_available, recent_messages.
-
-        Returns:
-            GatekeeperResult con intent, project (se project), confidence.
-        """
-        active_project = context.get("active_project") or "nessuno"
-        projects_str = ", ".join(context.get("projects_available", [])) or "nessuno"
-
-        prompt = f"""Contesto:
-- Progetto attivo: {active_project}
-- Progetti disponibili: {projects_str}
-
-Richiesta: "{user_message[:800]}"
-
-Classifica in UNA SOLA parola (project|meta|general):
-- project: richiede contesto progetto (codice, file, bug, API, deployment)
-- meta: richiede lista progetti, capacità, help su Jarvis
-- general: conversazione generica (saluti, data/ora, meteo, barzellette, definizioni, posizione)
-
-project|meta|general:"""
-
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            response = await asyncio.wait_for(
-                self.generate_chat(
-                    messages, stream=False,
-                    options={"temperature": 0.0, "num_predict": 5, "max_tokens": 10, "stop": ["\n", "|"]},
-                    model="chat", priority=1,
-                ),
-                timeout=15.0,  # gatekeeper: max 15s per classification
-            )
-            if "error" in response:
-                logger.warning(f"Gemma Gatekeeper: errore → fallback general ({response['error']})")
-                return GatekeeperResult(intent="general", confidence=0.0)
-
-            content = (extract_content(response) or "").strip().lower()
-
-            # Parsing diretto: cerca la parola chiave nella risposta
-            if "project" in content:
-                intent = "project"
-                confidence = 0.95
-            elif "meta" in content:
-                intent = "meta"
-                confidence = 0.95
-            else:
-                intent = "general"
-                confidence = 0.80
-
-            # Se è project, prova a estrarre il nome progetto dal messaggio
-            project = None
-            if intent == "project":
-                available = context.get("projects_available", [])
-                msg_lower = user_message.lower()
-                for proj in available:
-                    for variant in (proj.lower(), proj.lower().replace('_', '-'), proj.lower().replace('_', ' ')):
-                        if variant in msg_lower:
-                            project = proj
-                            confidence = min(confidence + 0.03, 0.99)
-                            break
-                    if project:
-                        break
-
-            logger.info(f"🧠 Gatekeeper Gemma 4: {intent} | project={project} | conf={confidence:.2f}")
-            return GatekeeperResult(
-                intent=intent,
-                project=project if intent == "project" else None,
-                confidence=confidence,
-            )
-        except Exception as e:
-            logger.warning(f"Gemma Gatekeeper: eccezione → fallback general ({repr(e)})")
-            return GatekeeperResult(intent="general", confidence=0.0)
 
     # ════════════════════════════════════════════════════════════════
     # CAVEMAN PROMPT COMPRESSOR (Qwen3.5 su CPU)
@@ -1059,6 +867,13 @@ def _strip_thinking(text: str) -> str:
     text = _re.sub(r'(?m)^\d+\.\s+\*\*.*?\*\*:.*', '', text).strip()
     # Righi tipo "*   **Project Name:** SlotBuilder" (liste di analisi)
     text = _re.sub(r'(?m)^\s*\*\s+\*\*.*?\*\*:.*', '', text).strip()
+    # FIX 2026-08-02: chiusura </think> orfana senza apertura visibile.
+    # Il modello Qwen emette <think> come token speciale del template chat
+    # (non compare nel content), ma il testo reasoning + </think> restano.
+    # Se le chiusure superano le aperture, tutto ciò che precede la prima
+    # chiusura è reasoning da scartare.
+    if text.count('</think>') > text.count('<think>'):
+        text = _re.sub(r'^.*?</think>', '', text, flags=_re.DOTALL).strip()
     return text
 
 

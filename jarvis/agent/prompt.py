@@ -2,8 +2,9 @@
 Prompt Builder — Pipeline di generazione prompt a 4 step con Caveman Compression.
 
 FLUSSO:
-  STEP 1: Keyword Bypass (regex, 0 LLM) + Simple Query bypass
-  STEP 2: Qwen3.5-4B Gatekeeper (main model su GPU, 0 VRAM extra, 1-5 token output)
+  STEP 1: Intent Router (agent/intent_router.py) — fast-path regex 0 LLM +
+          classificazione LLM su intent nativo (22 valori)
+  STEP 2: Routing per intent (greeting/general/meta/project/web/...)
   STEP 3: Qwen3.5 Caveman Prompt Architect (CPU, compressione 40-60%)
           Skip automatico se contesto < 1000 chars (Op1/Op8)
   STEP 4: Qwen3.5-4B su GPU → risposta
@@ -23,7 +24,8 @@ from memory.engine import extract_memories, save_to_memory
 from rag.web_search import perform_web_search_and_crawl, is_web_requiring_query, clean_web_query
 from agent.tags import build_tag_instructions
 from scheduler.tasks import get_open_tasks
-from core.llm_engine import engine, extract_content, GatekeeperResult
+from core.llm_engine import engine, extract_content
+from agent import intent_router
 try:
     from graph.synaptiq_engine import synaptiq_engine
 except ImportError:
@@ -66,79 +68,9 @@ def _datetime_context() -> str:
 # ════════════════════════════════════════════════════════════════
 # STEP 1: FAST PATHS — Keyword Bypass (0 LLM calls)
 # ════════════════════════════════════════════════════════════════
-
-META_PHRASES = re.compile(
-    # ITALIANO: richieste di progetto/elenco
-    r'(quali\s+(sono\s+)?(i\s+|i\s+tuoi\s+|i\s+nostri\s+)?progetti'
-    r'|dammi\s+(la\s+)?lista(\s+dei)?(\s+\w+)?\s+progetti'
-    r'|mostra\s+(la\s+)?lista(\s+dei)?(\s+\w+)?\s+progetti'
-    r'|lista\s+(dei\s+)?(\w+\s+)?progetti'
-    r'|che\s+progetti'
-    r'|progetti\s+in\s+(memoria|rag)'
-    r'|elenco\s+(dei\s+)?(\w+\s+)?progetti'
-    r'|quanti\s+progetti'
-    r'|progetti\s+(hai|conosci|hai\s+in|in\s+corso|ci\s+sono|sono\s+disponibili)'
-    r'|a\s+quali\s+progetti'
-    r'|quali\s+sono\s+(i\s+)?(tuoi\s+|nostri\s+|miei\s+|vostri\s+|suoi\s+)?progetti'
-    # INGLESE: project listing requests
-    r'|which\s+(are\s+)?(the\s+)?(your\s+|our\s+|all\s+)?projects'
-    r'|list\s+(of\s+)?(the\s+)?(your\s+|our\s+|all\s+)?projects'
-    r'|give\s+me\s+(the\s+)?(list\s+of\s+)?(the\s+)?(your\s+|our\s+|all\s+)?projects'
-    r'|show\s+me\s+(the\s+)?(list\s+of\s+)?(the\s+)?(your\s+|our\s+|all\s+)?projects'
-    r'|projects\s+in\s+(memory|rag)'
-    # CAPACITÀ / HELP
-    r'|cosa\s+sai\s+fare'
-    r'|what\s+can\s+you\s+do'
-    r'|come\s+funzioni'
-    r'|how\s+(do\s+)?you\s+work'
-    r'|quali\s+(sono\s+)?le\s+tue\s+capacit)',
-    re.IGNORECASE
-)
-
-# Query fattuali semplici che NON richiedono contesto progetto (bypass→general)
-SIMPLE_QUERIES = re.compile(
-    # ITALIANO: data, ora, tempo, posizione
-    r'(che\s+ora\s+)?(è|sono)\??$'
-    r'|(che\s+)?ore\s+sono\??$'
-    r'|che\s+(giorno|data)\s+(è|siamo)\??$'
-    r'|dammi\s+(la\s+)?(data|ora|data\s+e\s+ora)(\s+attuale)?\??$'
-    r'|che\s+tempo\s+(fa|farà)\??$'
-    r'|com\'è\s+il\s+tempo\??$'
-    r'|dove\s+mi\s+trovo\??$'
-    r'|dove\s+sono\??$'
-    r'|posizione\s+(attuale|corrente)\??$'
-    r'|racconta\s+una\s+barzelletta'
-    r'|definizione\s+di\s+\w+'
-    # INGLESE: date, time, weather, location
-    r'|what\s+(time|date|day)\s+is\s+it\??$'
-    r'|current\s+(date|time|date\s+and\s+time)\??$'
-    r'|tell\s+me\s+(the\s+)?(date|time|date\s+and\s+time)\??$'
-    r'|what.s\s+the\s+weather(\s+like)?\??$'
-    r'|where\s+am\s+i\??$'
-    r'|tell\s+me\s+a\s+joke'
-    # CAMBIO LINGUA / LANGUAGE SWITCH
-    r'|parla\s+(in\s+)?\w+(\s+con\s+me)?'
-    r'|speak\s+\w+(\s+(with|to)\s+me)?'
-    r'|(parli|puoi\s+parlare)\s+\w+'
-    r'|(can\s+(you\s+)?speak)\s+\w+'
-    r'|in\s+italiano\s*(per\s+favore|please)?'
-    r'|change\s+(the\s+)?language\s+to\s+\w+',
-    re.IGNORECASE
-)
-
-PROJECT_KEYWORDS = {
-    'codice', 'progetto', 'file', 'script', 'funzione', 'classe', 'metodo',
-    'bug', 'errore', 'riga', 'cartella', 'struttura', 'repo', 'repository',
-    'implementa', 'refactor', 'test', 'compila', 'variabile', 'log', 'modifica',
-    'aggiungi', 'rimuovi', 'codebase',
-    'configurazione', 'gestione', 'sicurezza', 'autenticazione', 'connessione',
-    'websocket', 'database', 'api', 'endpoint', 'middleware', 'protocollo',
-    'server', 'client', 'richiesta', 'risposta', 'proxy', 'rete', 'network',
-    'pool', 'worker', 'buffer', 'cache', 'thread', 'processo', 'memoria',
-    'algoritmo', 'compressione', 'crittografia', 'token', 'sessione',
-    'debug', 'deploy', 'build', 'config', 'runtime', 'dependency', 'package',
-    'versione', 'release', 'commit', 'branch', 'migrazione', 'backup'
-}
+# Le costanti di routing (META_PHRASES, SIMPLE_QUERIES, PROJECT_KEYWORDS,
+# PURE_GREETINGS) sono centralizzate in agent.intent_router (importate sopra):
+# Fase 1 del piano intent_understanding_llm.md — unica fonte di verità.
 
 # System prompt per Gemma 4 in risposta diretta ma naturale
 CAVEMAN_GEMMA_SYSTEM = (
@@ -196,102 +128,29 @@ GENERAL_CONVERSATION_SYSTEM = (
     "- NEVER narrate your thought process or internal instructions.\n"
     "- Respond in the SAME LANGUAGE as the user.\n"
     "- No thinking tags, no XML tags of any kind.\n"
-    "- Be concise but warm.\n"
+    "- Be concise but warm.\n\n"
+    "[CURRENT DATE/TIME]\n"
+    "The user message contains the current date and time in square brackets.\n"
+    "- USE it ONLY when the user's request requires time/date information: "
+    "\"che ore sono?\", \"what time is it?\", \"quando ho fatto l'ultima modifica "
+    "al codice?\", \"quanti giorni mancano all'evento X?\", deadlines, countdowns.\n"
+    "- IGNORE it for all other requests: general chat, greetings, coding help, "
+    "explanations. Do NOT mention, reason about, or comment on the date unless "
+    "the request asks for it.\n"
+    "- NEVER write code (Python datetime, shell date, etc.) to compute the current "
+    "time/date — the value is ALREADY provided in the prompt. Just read it and answer.\n"
 )
 
 # ════════════════════════════════════════════════════════════════
 # FUNZIONI DI SUPPORTO (estratte da build_omniscient_prompt)
 # ════════════════════════════════════════════════════════════════
 
-async def _keyword_bypass(user_message: str, context: dict) -> GatekeeperResult | None:
-    """STEP 1: Fast path bypass — 0 LLM calls.
-
-    Returns GatekeeperResult se matcha, None se deve passare a STEP 2.
-    """
-    msg_lower = user_message.lower().strip()
-    if len(msg_lower) < 3:
-        return GatekeeperResult(intent="general", confidence=1.0)
-
-    # ── Pure greeting detection (0 LLM, short-circuit per saluti) ──
-    # Rileva messaggi composti solo da parole di saluto (max 2 parole)
-    # Gestisce sia singole parole ("ciao") che multi-parola ("buona sera", "good morning")
-    PURE_GREETINGS = frozenset({'ciao', 'hello', 'hi', 'hey', 'buongiorno', 'buonasera',
-                                 'buona sera', 'buon pomeriggio', 'salve', 'saluti', 'buondì',
-                                 'good morning', 'good evening', 'good afternoon'})
-    if len(msg_lower) < 30:
-        # Direct match on full message (handles multi-word greetings like "buona sera")
-        if msg_lower.strip() in PURE_GREETINGS:
-            logger.info(f"👋 Bypass: GREETING (saluto puro: '{msg_lower}')")
-            return GatekeeperResult(intent="greeting", confidence=1.0)
-        # Word-by-word check: every word must be a known greeting word
-        _greeting_words = set(re.findall(r'\b\w+\b', msg_lower))
-        if _greeting_words and len(_greeting_words) <= 2:
-            _all_pure = True
-            for w in _greeting_words:
-                if w not in PURE_GREETINGS:
-                    _all_pure = False
-                    break
-            if _all_pure:
-                logger.info(f"👋 Bypass: GREETING (saluto puro: '{msg_lower}')")
-                return GatekeeperResult(intent="greeting", confidence=1.0)
-
-    # ── Cherry Studio / client JSON conversation dump detection ──
-    # I client a volte inviano la cronologia chat come JSON array.
-    # Es: '[{"role":"user","mainText":"Salve"},{"role":"assistant","mainText":"Ciao"}]'
-    # Non è una vera richiesta utente → bypass→general immediato.
-    _stripped = user_message.strip()
-    if (_stripped.startswith('[') and '{"role"' in _stripped) or _stripped.startswith('[{"role"'):
-        logger.info(f"🧠 Bypass: GENERAL (JSON conversation dump, {len(_stripped)}ch)")
-        return GatekeeperResult(intent="general", confidence=1.0)
-
-    projects = context.get("projects_available", [])
-    for proj in projects:
-        proj_lower = proj.lower()
-        for variant in (proj_lower, proj_lower.replace('_', '-'), proj_lower.replace('_', ' ')):
-            if variant in msg_lower:
-                logger.info(f"🧠 Bypass: PROJECT (nome progetto in query: {proj})")
-                return GatekeeperResult(intent="project", project=proj, confidence=1.0)
-
-    if META_PHRASES.search(msg_lower):
-        logger.info("🧠 Bypass: META (frase match)")
-        return GatekeeperResult(intent="meta", confidence=1.0)
-
-    # Simple factual queries (data, ora, meteo, posizione) — bypass→general
-    if SIMPLE_QUERIES.match(msg_lower):
-        logger.info(f"🧠 Bypass: GENERAL (query fattuale semplice: '{msg_lower[:50]}')")
-        return GatekeeperResult(intent="general", confidence=1.0)
-
-    words = set(re.findall(r'\b\w+\b', msg_lower))
-    if words.intersection(PROJECT_KEYWORDS):
-        logger.info("🧠 Bypass: PROJECT (keyword match)")
-        return GatekeeperResult(intent="project", confidence=1.0)
-    if re.search(r'(\.[a-z]{1,4}\b|\b(src|app|lib|bin)/)', msg_lower):
-        logger.info("🧠 Bypass: PROJECT (path regex match)")
-        return GatekeeperResult(intent="project", confidence=1.0)
-
-    return None  # Nessun bypass → STEP 2
-
-
-async def _run_gatekeeper(user_message: str, context: dict) -> GatekeeperResult:
-    """STEP 2: Classificazione intento via main model (Qwen3.5-4B su GPU).
-
-    Usa engine.classify_intent_with_gemma() che invoca il MAIN CHAT MODEL
-    (Qwen3.5-4B, full GPU, N_GPU_LAYERS=-1). 0 VRAM extra — riusa il modello
-    già caricato. Genera solo 1-5 token di output → ~ms su GPU.
-    Nessuna grammatica GBNF — parsing diretto della risposta.
-
-    La compressione caveman (se necessaria) è gestita separatamente da
-    _run_compression() con Qwen3.5 0.8B su CPU.
-    """
-    return await engine.classify_intent_with_gemma(user_message, context)
-
-
-def _record_gatekeeper_stats(intent: str, confidence: float, bypassed: bool, project: str | None = None):
-    """Aggiorna le statistiche cumulative del Gatekeeper (esposte via MCP)."""
+def _record_intent_stats(intent: str, confidence: float, bypassed: bool, project: str | None = None, source: str | None = None):
+    """Aggiorna le statistiche cumulative del gatekeeper (esposte via MCP)."""
     try:
         if state.gatekeeper_stats is None:
             state.gatekeeper_stats = GatekeeperStats()
-        state.gatekeeper_stats.record(intent, confidence, bypassed, project)
+        state.gatekeeper_stats.record(intent, confidence, bypassed, project, source)
     except Exception as exc:
         logger.warning(f"Errore aggiornamento gatekeeper_stats: {exc}")
 
@@ -597,11 +456,12 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     Pipeline di arricchimento a 4 step con Caveman Compression.
 
     FLUSSO:
-      STEP 1: Keyword Bypass (regex, 0 LLM) + Simple Query bypass
-      STEP 2: Gemma 4 Gatekeeper (GPU, classificazione intento, 0 VRAM extra)
-      STEP 3: Qwen3.5 Caveman Compression (GPU, comprime RAG+history+query)
+      STEP 1: Intent Router (agent/intent_router.py) — fast-path regex 0 LLM +
+              classificazione LLM su intent nativo (22 valori)
+      STEP 2: Routing per intent (greeting/general/meta/project/web/...)
+      STEP 3: Qwen3.5 Caveman Compression (CPU, comprime RAG+history+query)
               Skip automatico se contesto < 1000 chars (Op1/Op8)
-      STEP 4: Gemma 4 (GPU) → risposta caveman
+      STEP 4: Qwen3.5-4B (GPU) → risposta
 
     Se concise=True, salta RAG/memoria/web e usa compressed prompt minimo.
 
@@ -700,19 +560,14 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         "projects_available": _all_projects,
         "recent_messages": _recent_user_msgs,
     }
-    tracer.start_step("keyword_bypass")
-    gk = await _keyword_bypass(latest_msg, _gk_context)
-    _bypassed = gk is not None
-    tracer.end_step("keyword_bypass", details={"bypassed": _bypassed, "intent": gk.intent if gk else None, "project": gk.project if gk else None})
-
-    if gk is None:
-        tracer.start_step("gatekeeper_llm")
-        gk = await _run_gatekeeper(latest_msg, _gk_context)
-        tracer.end_step("gatekeeper_llm", details={"intent": gk.intent, "project": gk.project, "confidence": gk.confidence})
+    tracer.start_step("intent_classify")
+    gk = await intent_router.classify(latest_msg, _gk_context)
+    _bypassed = gk.source in ("regex", "fallback")
+    tracer.end_step("intent_classify", details={"intent": gk.intent, "project": gk.project, "confidence": gk.confidence, "source": gk.source, "bypassed": _bypassed})
 
     tracer.set_gatekeeper(intent=gk.intent, project=gk.project, confidence=gk.confidence, bypassed=_bypassed)
-    tracer._gatekeeper_model = "bypass" if _bypassed else "gemma"
-    _record_gatekeeper_stats(gk.intent, gk.confidence, _bypassed, gk.project)
+    tracer._gatekeeper_model = "bypass" if _bypassed else "llm"
+    _record_intent_stats(gk.intent, gk.confidence, _bypassed, gk.project, gk.source)
 
     # ════════════════════════════════════════════════════
     # ROUTING: project / meta / general
@@ -727,7 +582,10 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             rag_ctx = "📚 Progetti indicizzati nel RAG:\n" + "\n".join(f"- {p}" for p in _all_projects)
         logger.info("🗂️ Gatekeeper META: lista progetti, contesto progetto saltato")
 
-    elif gk.intent == "project":
+    elif gk.intent in ("project", "analyze", "plan", "code"):
+        # Fase 4.9-4.11: analyze/plan/code seguono il branch project — richiedono
+        # contesto codice (RAG + Synaptiq + memoria) per analisi/piani/modifiche.
+        # (Matrice §4.3: fallback di analyze/plan/code → project.)
         _is_project_query = True
         if gk.project and gk.project in _all_projects:
             active_project = gk.project
@@ -738,7 +596,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
             if active_project:
                 logger.info(f"📁 Progetto ripristinato dal contesto: {active_project}")
         if active_project:
-            logger.info(f"📁 Progetto attivo: {active_project}")
+            logger.info(f"📁 Progetto attivo (intent={gk.intent}): {active_project}")
             state.set_last_project(current_user_id, conversation_id, active_project)
 
     clean_msg = latest_msg  # per save_to_memory in _bg_add (Python 3.13 free variable scoping)
@@ -756,40 +614,59 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
     # ════════════════════════════════════════════════════
     # EARLY RETURNS: greeting / general / meta
     # ════════════════════════════════════════════════════
-    if gk.intent == "greeting":
+    if intent_router.is_greeting_result(gk):
         logger.info(f"👋 Intento GREETING: saluto puro, skip LLM, messaggio originale preservato")
         tracer.step("context_gathering", status="skipped", details={"reason": "greeting_intent"})
         tracer.step("caveman_compression", status="skipped", details={"reason": "greeting_intent"})
-        # Remove datetime context same as general intent, inject minimal system prompt
+        # FIX 2026-08-02: datetime preservato (coerente con ramo general).
+        # Il saluto è short-circuited da main.py (0 token LLM), ma se il modello
+        # viene comunque chiamato, GENERAL_CONVERSATION_SYSTEM gli dice di
+        # ignorare il datetime quando non serve. Rimuoviamo solo il system
+        # datetime duplicato (la fonte è il prefisso user).
         if messages:
             messages[:] = [m for m in messages if not (m.get("role") == "system" and "Current date" in m.get("content", ""))]
-            for m in messages:
-                if m["role"] == "user" and m.get("content", "").startswith("[Current date/time:"):
-                    m["content"] = m["content"].split("\n\n", 1)[1] if "\n\n" in m["content"] else m["content"]
-            # Inject system prompt to prevent CoT leakage
             messages.insert(0, {"role": "system", "content": GENERAL_CONVERSATION_SYSTEM})
         if finalize_trace:
             tracer.finish()
         return (messages, gk)
 
-    if gk.intent == "general":
-        logger.info("🗣️ Intento GENERAL: skip caveman compression, messaggio originale preservato")
-        tracer.step("context_gathering", status="skipped", details={"reason": "general_intent"})
-        tracer.step("caveman_compression", status="skipped", details={"reason": "general_intent"})
+    if gk.intent in ("general", "web"):
+        logger.info(f"🗣️ Intento {gk.intent.upper()}: skip caveman compression, messaggio originale preservato")
+        tracer.step("context_gathering", status="skipped", details={"reason": f"{gk.intent}_intent"})
+        tracer.step("caveman_compression", status="skipped", details={"reason": f"{gk.intent}_intent"})
 
         # ── Web-aware general: query che richiedono dati live (meteo, news, prezzi) ──
         # Normalmente il branch general risponde immediatamente SENZA contesto, e il
         # modello usa la conoscenza interna (stantia). Se la query richiede dati
         # attuali, esegue una web search e inietta i risultati nel prompt.
+        # Fase 3.2: intent nativo "web" → query costruita dagli SLOTS del router
+        # ({query} esplicita > {topic}+{city} > {topic} > clean_web_query fallback);
+        # intent "general" → legacy is_web_requiring_query + clean_web_query.
         web_ctx_general = ""
-        if is_web_requiring_query(clean_msg):
+        _search_query = ""
+        if gk.intent == "web":
+            _slot_q = (gk.slots.get("query") or "").strip()
+            _topic = (gk.slots.get("topic") or "").strip()
+            _city = (gk.slots.get("city") or "").strip()
+            if _slot_q:
+                _search_query = _slot_q
+            elif _topic and _city:
+                _search_query = f"{_topic} {_city}"
+            elif _topic:
+                _search_query = _topic
+            else:
+                _search_query = clean_web_query(clean_msg)
+        elif is_web_requiring_query(clean_msg):
+            _search_query = clean_web_query(clean_msg)
+
+        if _search_query:
             tracer.start_step("web_general_search")
             try:
-                search_query = clean_web_query(clean_msg)
+                search_query = _search_query
                 web_ctx_general = await search_web_knowledge(search_query)
                 if not web_ctx_general:
                     web_ctx_general, _ = await asyncio.wait_for(
-                        perform_web_search_and_crawl(clean_msg, force=True),
+                        perform_web_search_and_crawl(search_query, force=True),
                         timeout=45.0,
                     )
                     if web_ctx_general and web_ctx_general != "Nessun risultato online.":
@@ -797,25 +674,27 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
                         await save_web_knowledge(search_query, web_ctx_general, sources)
                         tracer._web_search_performed = True
                         async def _bg_save_web_general():
-                            summary = f"[Web Knowledge] Query: {clean_msg[:200]}\nFonti: {', '.join(sources[:3])}\nRisultati: {web_ctx_general[:600]}"
+                            summary = f"[Web Knowledge] Query: {search_query[:200]}\nFonti: {', '.join(sources[:3])}\nRisultati: {web_ctx_general[:600]}"
                             await save_to_memory(summary, user_id=current_user_id)
                         task = asyncio.create_task(_bg_save_web_general())
                         state.background_tasks.add(task)
                         task.add_done_callback(state.background_tasks.discard)
                 if web_ctx_general:
-                    logger.info(f"🌐 Web context per general query: {len(web_ctx_general)} chars")
+                    logger.info(f"🌐 Web context per query: {len(web_ctx_general)} chars")
             except Exception as e:
                 logger.warning(f"Web search fallita in branch general (non critico): {e}")
             tracer.end_step("web_general_search", details={"web_len": len(web_ctx_general or "")})
 
-        # Remove datetime context for clean general conversation — non serve far
-        # ragionare il modello sulla data per un saluto o chiacchiera
-        # Inietta system prompt minimo per prevenire leakage di CoT (Qwen)
+        # FIX 2026-08-02: datetime PRESERVATO in tutti i rami. Le query fattuali
+        # (data/ora/tempo) passano da questo ramo e il modello DEVE avere il valore
+        # corrente per rispondere — senza, un modello coding (Qwen3.5-super-coder)
+        # scrive codice Python per calcolarlo. GENERAL_CONVERSATION_SYSTEM istruisce
+        # il modello a usare il datetime SOLO quando la richiesta lo richiede.
+        # Rimuoviamo solo il system message datetime DUPLICATO (iniettato due volte
+        # da _inject_datetime): il prefisso "[Current date/time: ...]" nel user
+        # message è la fonte unica — GENERAL_CONVERSATION_SYSTEM vi fa riferimento.
         if messages:
             messages[:] = [m for m in messages if not (m.get("role") == "system" and "Current date" in m.get("content", ""))]
-            for m in messages:
-                if m["role"] == "user" and m.get("content", "").startswith("[Current date/time:"):
-                    m["content"] = m["content"].split("\n\n", 1)[1] if "\n\n" in m["content"] else m["content"]
             if web_ctx_general:
                 # Web context iniettato: system prompt dedicato + user content con [WEB]
                 web_system = GENERAL_CONVERSATION_SYSTEM + (

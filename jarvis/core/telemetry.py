@@ -182,9 +182,9 @@ class PipelineTracer:
 
     Usage:
         tracer = PipelineTracer.begin(user_message="...", user_id="...")
-        tracer.start_step("keyword_bypass")
+        tracer.start_step("intent_classify")
         ... esegue step ...
-        tracer.end_step("keyword_bypass", status="ok", details={"bypassed": True})
+        tracer.end_step("intent_classify", status="ok", details={"intent": "project"})
         ...
         tracer.finish()
         # → automaticamente inserito in state.pipeline_traces
@@ -536,11 +536,13 @@ class GatekeeperStats:
         self.llm_called: int = 0    # STEP 2 invocato (Qwen)
         self.by_intent: dict[str, int] = {}
         self.by_intent_with_bypass: dict[str, dict] = {}  # intent -> {bypass: N, llm: N}
+        self.by_source: dict[str, int] = {}  # source (regex/llm/fallback) -> N
         self.confidence_sum: float = 0.0
         self.confidence_count: int = 0
 
     def record(
-        self, intent: str, confidence: float, bypassed: bool, project: Optional[str] = None
+        self, intent: str, confidence: float, bypassed: bool,
+        project: Optional[str] = None, source: Optional[str] = None,
     ):
         self.total_classified += 1
         if bypassed:
@@ -551,6 +553,9 @@ class GatekeeperStats:
 
         bucket = self.by_intent_with_bypass.setdefault(intent, {"bypass": 0, "llm": 0})
         bucket["bypass" if bypassed else "llm"] += 1
+
+        _source = source or "unknown"
+        self.by_source[_source] = self.by_source.get(_source, 0) + 1
 
         self.confidence_sum += confidence
         self.confidence_count += 1
@@ -570,6 +575,7 @@ class GatekeeperStats:
             "by_intent_with_bypass": {
                 k: dict(v) for k, v in self.by_intent_with_bypass.items()
             },
+            "by_source": dict(self.by_source),
             "avg_confidence": self.avg_confidence,
         }
 

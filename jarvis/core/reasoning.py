@@ -1,19 +1,19 @@
 """
 Reasoning Metadata & Agent Configuration Engine.
 
-Integra ModelProfile + GatekeeperResult per decidere se attivare il
-ragionamento complesso (thinking) durante la generazione LLM, e converte
-l'output streaming in blocchi <details> HTML per UI esterne.
+Integra ModelProfile + IntentResult (agent.intent_router) per decidere se
+attivare il ragionamento complesso (thinking) durante la generazione LLM,
+e converte l'output streaming in blocchi <details> HTML per UI esterne.
 
 Elimina qualsiasi controllo manuale sul testo (liste saluti hardcoded)
-usando lo stato del Gatekeeper per ogni decisione architetturale.
+usando l'intento nativo del router per ogni decisione architetturale.
 """
 
 import json
 import logging
 from typing import AsyncGenerator, Optional
 
-from core.llm_engine import GatekeeperResult
+from agent.intent_router import IntentResult
 from core.model_profiles import ModelProfile
 
 logger = logging.getLogger(__name__)
@@ -25,8 +25,10 @@ logger = logging.getLogger(__name__)
 #   start_tag / end_tag: delimitatori di pensiero nel token stream
 #   stop_token_id:       ID del token di start, da bloccare via logit_bias
 #                        quando il reasoning è disabilitato
-#   no_think_prefix:     prefisso testuale da prependere al prompt utente
-#                        per modelli che lo supportano (es. Qwen /no_think)
+#   no_think_prefix:     prefisso testuale per modelli che lo supportano
+#                        nativamente (es. Qwen /no_think). FIX 2026-08-02:
+#                        NON viene più iniettato nel contenuto utente — i
+#                        modelli restricted ci ragionano sopra.
 #   penalty_tokens:      token addizionali da penalizzare quando reasoning off
 
 REASONING_METADATA: dict[str, dict] = {
@@ -123,48 +125,52 @@ def _is_web_requiring_query(user_input: str) -> bool:
 
 def configura_richiesta_agente(
     profile: ModelProfile,
-    gatekeeper: Optional[GatekeeperResult],
+    result: Optional[IntentResult],
     user_input: str,
 ) -> tuple:
-    """Configura la richiesta LLM basandosi su ModelProfile + GatekeeperResult.
+    """Configura la richiesta LLM basandosi su ModelProfile + IntentResult.
 
     Il ragionamento viene attivato SOLO se:
     - il modello lo supporta (profile.thinking_support == True)
-    - E l'intento dell'utente è strutturato ("project" o "meta")
+    - E l'intento dell'utente è strutturato ("project", "meta", "web",
+      "schedule", "analyze", "plan" o "code")
     - OPPURE la richiesta richiede dati live/web (meteo, news, prezzi)
 
     Se l'intento è "general", il ragionamento viene spento per evitare
     cicli inutili su saluti e chiacchiere. Il blocco fisico avviene tramite
     logit_bias[stop_token_id] = -100 per i modelli nativamente reasoning.
 
-    ECCEZIONE: le web queries (dati live) mantengono il reasoning attivo e
-    NON ricevono il prefisso /no_think: il modello deve sintetizzare il
-    contesto [WEB] fresco invece di rispondere dalla conoscenza interna
-    stantia.
+    ECCEZIONE: le web queries (dati live) mantengono il reasoning attivo: il
+    modello deve sintetizzare il contesto [WEB] fresco invece di rispondere
+    dalla conoscenza interna stantia.
 
     Args:
         profile: Profilo del modello attualmente caricato.
-        gatekeeper: Risultato della classificazione intento (None = default general).
+        result: Risultato della classificazione intento (None = default general).
         user_input: Testo originale dell'ultimo messaggio utente.
 
     Returns:
         (content_prompt, chat_template_kwargs, settings):
-            content_prompt:       Testo da usare come contenuto utente (con
-                                  eventuale prefisso no_think).
+            content_prompt:       Testo da usare come contenuto utente
+                                  (FIX 2026-08-02: sempre == user_input,
+                                  nessun prefisso no_think testuale).
             chat_template_kwargs: Dict da passare a create_chat_completion
                                   per il template di chat (enable_thinking).
             settings:             Dict di parametri di generazione (temperature,
                                   top_p, logit_bias, ecc.).
     """
     meta = get_reasoning_meta(profile.family)
-    intent = gatekeeper.intent if gatekeeper else "general"
+    intent = result.intent if result else "general"
 
     # Le web queries trasportano contesto [WEB] fresco nel prompt: il
     # reasoning va mantenuto attivo per sintetizzare i dati live.
     web_query = _is_web_requiring_query(user_input)
 
-    # Decisione architetturale basata sul Gatekeeper
-    with_reasoning = profile.thinking_support and (intent in ("project", "meta") or web_query)
+    # Decisione architetturale basata sull'intento nativo del router.
+    # Intent strutturati (project/meta/web/schedule/analyze/plan/code) o
+    # query web live → reasoning attivo; saluti/chiacchiere → spento.
+    _REASONING_INTENTS = ("project", "meta", "web", "schedule", "analyze", "plan", "code")
+    with_reasoning = profile.thinking_support and (intent in _REASONING_INTENTS or web_query)
 
     if with_reasoning:
         # Configurazione "Calda" per ragionamento logico strutturato
@@ -183,9 +189,13 @@ def configura_richiesta_agente(
         )
     else:
         # Intento generale/saluti o modello senza supporto reasoning.
-        # Le web queries non ricevono MAI il prefisso /no_think: porterebbe
-        # il modello a ignorare il contesto [WEB] e rispondere dalla memoria.
-        content_prompt = user_input if web_query else f"{meta['no_think_prefix']}{user_input}"
+        # FIX 2026-08-02: niente prefisso testuale "/no_think " nel contenuto
+        # utente. Le varianti restricted del modello (es. super-coder) non lo
+        # riconoscono come controllo nativo e ci ragionano sopra, producendo
+        # riflessioni su /no_think invece di rispondere. Il blocco del thinking
+        # è garantito da enable_thinking=False (chat_template_kwargs) +
+        # logit_bias sul token di apertura + stripping post-hoc dei tag.
+        content_prompt = user_input
         chat_template_kwargs = {"enable_thinking": False}
 
         # Blocco fisico del token di pensiero tramite logit_basis
@@ -212,6 +222,48 @@ def configura_richiesta_agente(
         )
 
     return content_prompt, chat_template_kwargs, settings
+
+
+def apply_reasoning_config(
+    options: dict,
+    result: Optional[IntentResult],
+    orig_msg: str,
+    profile: Optional[ModelProfile] = None,
+) -> dict:
+    """Applica la configurazione reasoning alle options di generazione.
+
+    Helper unico (Fase 4.2): sostituisce la logica di merge duplicata in
+    main.py, openai_api/chat.py, api/mcp/server_v2.py e admin/dashboard.py.
+    Il contenuto utente NON viene mai modificato (FIX 2026-08-02: niente
+    prefisso testuale "/no_think " — i modelli restricted non lo riconoscono
+    come controllo nativo e ci ragionano sopra; il blocco del thinking è
+    garantito da chat_template_kwargs + logit_bias).
+
+    Args:
+        options: Dict di opzioni di generazione (modificato in-place e ritornato).
+        result: IntentResult dalla classificazione (None → nessuna modifica).
+        orig_msg: Testo originale dell'ultimo messaggio utente.
+        profile: ModelProfile (default: MODEL_PROFILE globale da core.config).
+
+    Returns:
+        options aggiornate (stesso dict, per comodità di catena).
+    """
+    if result is None:
+        return options
+    if profile is None:
+        try:
+            from core.config import MODEL_PROFILE
+            profile = MODEL_PROFILE
+        except Exception:
+            return options
+    _, _chat_kwargs, _settings = configura_richiesta_agente(profile, result, orig_msg)
+    options.setdefault("chat_template_kwargs", {}).update(_chat_kwargs)
+    if _settings.get("logit_bias"):
+        options.setdefault("logit_bias", {}).update(_settings["logit_bias"])
+    for _key in ("temperature", "top_p", "repeat_penalty"):
+        if _key not in options and _key in _settings:
+            options[_key] = _settings[_key]
+    return options
 
 
 # ════════════════════════════════════════════════════════════════
