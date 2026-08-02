@@ -728,10 +728,23 @@ class LlamaEngine:
         ]
 
         try:
+            # FIX 2026-08-02: blocco fisico del reasoning sul compressore.
+            # Qwen3.5-0.8B è famiglia qwen con thinking_support=true: senza
+            # logit_bias emette SOLO <think>...</think> e dopo _strip_thinking
+            # l'output è vuoto → fallback raw ad ogni richiesta. Stesso
+            # pattern di apply_reasoning_config() sul chat model.
+            _options: dict = {"temperature": 0.0, "num_predict": 128}
+            try:
+                from core.reasoning import get_reasoning_meta
+                _meta = get_reasoning_meta("qwen")
+                if _meta.get("stop_token_id") is not None:
+                    _options["logit_bias"] = {int(_meta["stop_token_id"]): -100}
+            except Exception:
+                pass
             response = await self.generate_chat(
                 messages,
                 stream=False,
-                options={"temperature": 0.0, "num_predict": 128},
+                options=_options,
                 model="gatekeeper",
             )
             if "error" in response:
