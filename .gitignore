@@ -44,7 +44,9 @@ models/
 
 # Log e File Temporanei
 *.log
+*.log.*
 jarvis/scratch/
+jarvis/scheduler/cron_jobs.json
 .system_generated/
 *.tmp
 *.bak
