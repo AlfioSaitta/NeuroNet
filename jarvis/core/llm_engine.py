@@ -140,6 +140,11 @@ class LlamaEngine:
         self.chat_model = None       # Qwen3.5-4B su GPU (main_brain)
         self.fastembed_model = None  # FastEmbed (ONNX CPU) per embedding
         self.gatekeeper_model = None # Qwen3.5-0.8B (classify + compress, CPU default)
+        # Token ID del <think> per il compressore: derivato dal tokenizer al
+        # caricamento (le costanti per-famiglia sono inaffidabili tra varianti
+        # GGUF — es. 151649 vs 248068). Usato da compress_prompt per bloccare
+        # fisicamente il reasoning con logit_bias.
+        self._gk_think_token_id: Optional[int] = None
         # Thread pool per non bloccare l'event loop di FastAPI (concurrency safe)
         self.executor = ThreadPoolExecutor(max_workers=8)
         # Lock separati: ogni modello Llama è indipendente, non devono bloccarsi
@@ -270,6 +275,20 @@ class LlamaEngine:
             logger.info("✅ Gatekeeper Model warmup completato")
         except Exception as e:
             logger.warning(f"⚠️ Gatekeeper Model warmup fallito (non critico): {e}")
+
+        # FIX 2026-08-02: deriva il token ID di apertura thinking dal tokenizer
+        # del modello reale. Le costanti per-famiglia (es. qwen→151649) variano
+        # tra varianti GGUF (super-coder/UD/unsloth usano 248068). Tokenizzare
+        # "<think>" restituisce l'ID esatto da bloccare via logit_bias.
+        try:
+            _ids = self.gatekeeper_model.tokenize(b"<think>", add_bos=False)
+            if len(_ids) == 1:
+                self._gk_think_token_id = int(_ids[0])
+                logger.info(f"🧠 Compressore think token_id: {self._gk_think_token_id} (da tokenizer)")
+            else:
+                logger.warning(f"⚠️ <think> tokenizzato in {len(_ids)} pezzi, blocco thinking via logit_bias non disponibile")
+        except Exception as _tk_err:
+            logger.warning(f"⚠️ Impossibile derivare think token_id: {_tk_err}")
 
     # ── Caricamento orchestrato ──────────────────────────────────────
 
@@ -731,16 +750,21 @@ class LlamaEngine:
             # FIX 2026-08-02: blocco fisico del reasoning sul compressore.
             # Qwen3.5-0.8B è famiglia qwen con thinking_support=true: senza
             # logit_bias emette SOLO <think>...</think> e dopo _strip_thinking
-            # l'output è vuoto → fallback raw ad ogni richiesta. Stesso
-            # pattern di apply_reasoning_config() sul chat model.
+            # l'output è vuoto → fallback raw ad ogni richiesta. Il token ID
+            # deriva dal tokenizer al caricamento (self._gk_think_token_id) —
+            # le costanti per-famiglia variano tra varianti GGUF.
             _options: dict = {"temperature": 0.0, "num_predict": 128}
-            try:
-                from core.reasoning import get_reasoning_meta
-                _meta = get_reasoning_meta("qwen")
-                if _meta.get("stop_token_id") is not None:
-                    _options["logit_bias"] = {int(_meta["stop_token_id"]): -100}
-            except Exception:
-                pass
+            if self._gk_think_token_id is not None:
+                _options["logit_bias"] = {self._gk_think_token_id: -100}
+            else:
+                # Fallback: costante per-famiglia (core.reasoning)
+                try:
+                    from core.reasoning import get_reasoning_meta
+                    _meta = get_reasoning_meta("qwen")
+                    if _meta.get("stop_token_id") is not None:
+                        _options["logit_bias"] = {int(_meta["stop_token_id"]): -100}
+                except Exception:
+                    pass
             response = await self.generate_chat(
                 messages,
                 stream=False,
