@@ -795,6 +795,21 @@ class LlamaEngine:
                 return raw_data[:4096]
 
             logger.info(f"🗜️ Caveman compression: {raw_len} → {comp_len} char ({ratio:.0f}% riduzione)")
+
+            # FIX 2026-08-02: la query utente va SEMPRE in coda all'output
+            # compresso. Il modello 0.8B comprime il RAG context ma spesso
+            # omette la domanda nel riassunto (verificato nel trace
+            # 8859818da1a5: output senza la query → il chat model risponde
+            # fuori tema, ripetendo le regole di sistema). Il ramo fallback
+            # raw includeva "Query: ..." nel fallback parts; il ramo di
+            # compressione riuscita no. Un check fuzzy non è affidabile (un
+            # riassunto che risponde bene non cita le parole della domanda),
+            # quindi la reiniezione è incondizionata. Se il compressore ha
+            # già incluso la query, la riga "Domanda:" è duplicata ma
+            # innocua — anzi, rafforza l'istruzione finale al chat model.
+            if user_query:
+                compressed = f"{compressed}\n\nDomanda: {user_query}"
+
             return compressed.strip()
 
         except Exception as e:
