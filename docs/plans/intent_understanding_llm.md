@@ -2,7 +2,7 @@
 
 > **Data:** 2026-08-01 (v4 — **release finale: retro-compatibilità eliminata**. Architettura a 2 componenti: intent handler + context compressor. Nessun kill switch, nessuna proiezione, nessun alias, nessun fallback al codice legacy — migrazione pulita con aggiornamento diretto di tutti i consumer)
 > **Data precedente:** 2026-07-31 (v3 — architettura a 2 componenti: intent handler + context compressor)
-> **Stato:** 🟢 In implementazione — **Fase 1, 2 e 3 completate** (02/08: 31/31 A/B + benchmark 100% intent / 100% slot + integrazione routing live con E2E su tutti i canali). Prossima: Fase 4 (consumer e autonomia).
+> **Stato:** ✅ **Fasi 1-4 COMPLETATE e VERIFICATE** (02/08: 31/31 fast-path + benchmark 100% intent / 100% slot + 31/31 handler + E2E live su tutti i canali + commit pushati). Prossima: Fase 5 (consolidamento: compressor + rename).
 > **Proprietario:** Alfio Saitta / Collateral Studios
 > **File correlati:** `agent/prompt.py`, `agent/classifier.py`, `agent/intent_router.py` (nuovo), `agent/context_compressor.py` (nuovo), `core/llm_engine.py`, `core/reasoning.py`, `core/config.py`, `core/telemetry.py`, `rag/web_search.py`, `main.py`, `openai_api/chat.py`, `openai_api/models.py`, `api/mcp/server_v2.py`, `admin/dashboard.py`, `admin/settings_manager.py`, `tg_bot/bot.py`, `scheduler/cron.py`
 
@@ -787,7 +787,7 @@ flowchart TD
 - [x] **4.18** **Configurazione**: "imposta LLAMA_MODEL_PATH su ./models/x.gguf" / "mostra le impostazioni" → `config` + slot `{action: set, key, value}` → `_persist_env()` (settings_manager.py, scrittura atomica) + conferma; `{action: get}` read-only (valori attuali da `config.py`, mai esporre segreti: filtrare `*TOKEN*`/`*KEY*`/`*SECRET*`/`*PASSWORD*`)
 - [x] **4.19** **Manutenzione**: "pulisci la cache" / "reindicizza il progetto X" → `maintenance` + slot `{operation: cache_clear|reindex|cleanup|status}` → `<CACHE_CLEAR>` (tag_handlers.py), reindex RAG con flag `_ingesting` + lock (routes/projects.py, race-condition già fixata), cleanup collezioni orfane Qdrant — operazioni distruttive con conferma
 
-**Criterio uscita:** promemoria, web query, memoria, task, analisi, pianificazione, modifica codice, git, ssh, trascrizione, fetch, traduzione, config e manutenzione end-to-end senza regex nuove; nessuna duplicazione greeting/thinking residua; compressore separato senza cambi comportamentali. ✅ **PARZIALMENTE SODDISFATTO 02/08** — 10 handler registrati (schedule/memory/task/git/ssh/transcribe/fetch/translate/config/maintenance), test standalone 28/28 PASS (`/tmp/opencode/test_intent_handlers_phase4.py`: soglie §4.3, CONFIRM_REQ, whitelist SSH, segreti config). Nota: `TRANSLATE_DEFAULT_LANG` assente da config.py — l'handler translate usa il target_lang da slot e il LLM gestisce il default; il criterio "senza regex nuove" è soddisfatto (nessuna regex aggiunta in Fase 4, slot esistenti).
+**Criterio uscita:** promemoria, web query, memoria, task, analisi, pianificazione, modifica codice, git, ssh, trascrizione, fetch, traduzione, config e manutenzione end-to-end senza regex nuove; nessuna duplicazione greeting/thinking residua; compressore separato senza cambi comportamentali. ✅ **SODDISFATTO 02/08** — 10 handler registrati (schedule/memory/task/git/ssh/transcribe/fetch/translate/config/maintenance), test standalone **31/31 PASS** (`/tmp/opencode/test_intent_handlers_phase4.py`: soglie §4.3, CONFIRM_REQ, whitelist SSH, segreti config) + verifica E2E live (§10.8). Nota: `TRANSLATE_DEFAULT_LANG` assente da config.py — l'handler translate usa il target_lang da slot e il LLM gestisce il default; il criterio "senza regex nuove" è soddisfatto (nessuna regex aggiunta in Fase 4, slot esistenti).
 
 ### Fase 5 — Consolidamento e pulizia (compressor + rename)
 **Priorità: 🟢 Bassa | Effort: ~3-4h**
@@ -1071,6 +1071,25 @@ Risultati reali con granian (porta 8000, Qwen3.5-4B, codice Fase 4 attivo):
 
 **Nota MCP:** il percorso `server_v2.py::_run_chat_pipeline()` NON chiama `dispatch()` (cablato solo in `main.py` /api/chat) — per gli handler intent i client MCP usano `/api/chat`. Comportamento atteso per la Fase 4.
 
+### 10.9 Verifica finale Fasi 1-4 (02/08, revisione completa)
+
+Revisione sistematica di tutte le fasi 1-4 dopo il push su origin/main (`6a129cd..7766d25`, 6 commit atomici: `9562bd9`, `c99ccbd`, `c0424c5`, `059bf9c`, `a1f99f8`, `7766d25`). **Esito: ✅ conforme in tutte le fasi.**
+
+| Fase | Verifica | Esito |
+|---|---|---|
+| **1 — Foundation** | `IntentResult` (:275), GBNF 18 intent (:307), `INTENT_SYSTEM_PROMPT` (:321), `SLOT_EXTRACTORS` (:510), cache LRU TTL 60s/max 256 (:649-676), `_fast_path` (:683), `_fallback` (:922), `classify` (:931); `classifier.py` ridotto a `classify_confirmation`+`is_internal_query`; `prompt.py` usa `from agent import intent_router` (:28) con `classify()` (:564) e `is_greeting_result` (:617) | ✅ |
+| **2 — LLM classifier v2** | `_llm_classify` (:810): `model="chat"`, `temperature=0.0`, `num_predict=60`, `priority=1`, `stop=["\n"]`, timeout 15s, GBNF, validazione→fallback `general`; **benchmark 100.0% intent (69/69) + 100.0% slot (67/67)** | ✅ |
+| **3 — Integrazione routing** | Grep legacy: `GatekeeperResult\|to_gatekeeper_result\|extended_intent\|INTENT_ROUTER_MODE` → **0**; `classify_intent\b` → **0**; 8 call site migrati; `_record_intent_stats` rinominato; `configura_richiesta_agente` solo via `apply_reasoning_config`; residuo `intent=="greeting"` solo dentro `is_greeting_result` (:300) | ✅ |
+| **4 — Consumer & autonomia** | 10 handler + `register_handlers` (:627) in main.py:50; `INTENT_THRESHOLDS` (:1001, §4.3); `dispatch` (:1066) applica soglia poi inoltra a `DISPATCH_TABLE`; `confirmation_mgr` in entrambi i rami main.py (:926/:1266); sicurezza `_SSH_READ/WRITE_COMMANDS`, `_SECRET_RE`, `_confirm_or_pending` (CONFIRM_REQ, 300s) | ✅ |
+| **Test** | py_compile 11 file → OK; `test_fast_path.py` 31 casi → **0 FAIL**; `test_intent_handlers_phase4.py` → **31/31 PASS** | ✅ |
+| **Live MCP** | status: `gatekeeper_initialized: true`, `error_count: 0`; trace `ba92a5c48bcd` → step `intent_classify`: intent=project, confidence=1.0, source=regex, bypassed=true, 0.6ms | ✅ |
+
+**Residui NOTA (fuori scope Fase 1-4, pianificati in Fase 5):**
+- `gatekeeper_stats` residui (nomi tool MCP `get_gatekeeper_stats`, vista Analytics dashboard, classe `GatekeeperStats` telemetry.py:527 con `by_source`) → rename in **Fase 5.7** (`IntentStats` / `intent_stats` / `jarvis://intent/stats`)
+- `server_v2._run_chat_pipeline()` non chiama `dispatch()` → atteso (§10.8 nota)
+- `jarvis/scheduler/cron_jobs.json` non committato (2 job runtime del test E2E) → in `.gitignore`
+- Fase 4.6 (greeting LLM safety-net) opzionale → non implementata
+
 ---
 
-*Documento generato per la pianificazione, verificato sul codebase al 2026-07-31. v4 (release finale — retro-compatibilità eliminata) al 2026-08-01. Aggiornato 02/08: Fase 3 completata e verificata live (§10.6); Fase 4 handler completata con test standalone 31/31 (§10.7); verifica E2E live con bug slot message trovato e fixato (§10.8).*
+*Documento generato per la pianificazione, verificato sul codebase al 2026-07-31. v4 (release finale — retro-compatibilità eliminata) al 2026-08-01. Aggiornato 02/08: Fase 3 completata e verificata live (§10.6); Fase 4 handler completata con test standalone 31/31 (§10.7); verifica E2E live con bug slot message trovato e fixato (§10.8); **verifica finale Fasi 1-4 completata e conforme (§10.9), commit pushati su origin/main.***
