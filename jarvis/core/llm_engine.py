@@ -260,7 +260,7 @@ class LlamaEngine:
         self.gatekeeper_model = Llama(
             model_path=path,
             n_gpu_layers=_gk_gpu, n_ctx=_gk_ctx,
-            n_batch=512, n_ubatch=512, n_threads=_gk_threads,
+            n_batch=512, n_ubatch=128, n_threads=_gk_threads,
             flash_attn=True, use_mmap=True, chat_format="chatml", verbose=False,
         )
         logger.info(f"✅ Gatekeeper Model caricato ({_dev})")
