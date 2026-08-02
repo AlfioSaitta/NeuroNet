@@ -80,7 +80,7 @@ WATCHDOG_WATCH_MODE=per_project
 | LlamaEngine singleton | `core/llm_engine.py` | Modelli GGUF in VRAM, PriorityLock |
 | Flash Attention | `core/llm_engine.py` | Auto-detectato per famiglia modello |
 | Hardware Profile Auto-Detection | `core/model_profiles.py` | Rilevamento famiglia GGUF (7+ famiglie) via header binario. Applica n_gpu_layers/flash_attn/n_ubatch ottimali |
-| Hardware Identity Block | `core/hardware.py` | Identità hardware reale (GPU/VRAM/driver, CPU, RAM, hostname) rilevata all'avvio via comandi di sistema (solo stdlib) e iniettata nel system prompt (`[HARDWARE IDENTITY]`) in 8 rami — il modello risponde con le specifiche reali invece di inventare |
+| Hardware Identity Block | `core/hardware.py` | Identità hardware reale (GPU/VRAM/driver, CPU, RAM, hostname) rilevata all'avvio via comandi di sistema (solo stdlib) e iniettata nel system prompt (`[HARDWARE IDENTITY]`) in 7 rami — il modello risponde con le specifiche reali invece di inventare |
 | Thinking Mode | `core/llm_engine.py` | `<\|think\|>` per Gemma / DeepSeek / QwQ |
 | Compressione contesto | `agent/context_compressor.py` | Qwen3.5 0.8B CPU (0 VRAM), 4096 ctx, 6 few-shot |
 | Classificazione intenti | `core/llm_engine.py` | Con main model (0 VRAM extra), 1-5 token, ~0.3-0.8s |
@@ -124,7 +124,7 @@ WATCHDOG_WATCH_MODE=per_project
 | Context Compressor | `agent/context_compressor.py` | `compress()` con Qwen3.5 0.8B CPU, skip < COMPRESSOR_MIN_CHARS, fallback raw |
 | Budget Allocator | `agent/prompt.py` | 55% RAG / 20% web / 10% mem / 15% tree, max 15K char |
 | Super-prompt XML | `agent/prompt.py` | 7 tag contestuali |
-| Hardware Identity nel prompt | `agent/prompt.py` | `_hardware_identity_block()` inietta `[HARDWARE IDENTITY]` (GPU/CPU/RAM reali da `core/hardware.py`) in 8 rami del system prompt: is_raw, non-raw, concise, greeting, web, general×2, meta |
+| Hardware Identity nel prompt | `agent/prompt.py` | `_hardware_identity_block()` inietta `[HARDWARE IDENTITY]` (GPU/CPU/RAM reali da `core/hardware.py`) in 7 rami del system prompt: is_raw, non-raw, concise, greeting, web, general, meta |
 | 21 tag d'azione | `agent/tags.py` | MEMORY, SCHEDULE, SSH, TODO, WEB, FILE, EXEC, COMMIT... |
 
 </details>

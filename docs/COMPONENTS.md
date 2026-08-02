@@ -352,9 +352,9 @@ Messaggio utente
 │                     │    <active_project>
 │                     │    <system_instructions>
 │                     │    [HARDWARE IDENTITY] (GPU/CPU/RAM reali
-│                     │     da core/hardware.py, 8 rami: is_raw,
+│                     │     da core/hardware.py, 7 rami: is_raw,
 │                     │     non-raw, concise, greeting, web,
-│                     │     general×2, meta)
+│                     │     general, meta)
 └─────────────────────┘
 ```
 
@@ -804,6 +804,6 @@ Modulo stdlib-only che rileva l'identità hardware del server all'avvio, usata p
 
 **Integrazione:**
 - `core/lifecycle.py`: `detect_hardware()` eseguito all'avvio post-warmup (`await asyncio.to_thread`), log `🖥️ Hardware rilevato:` — non bloccante
-- `agent/prompt.py`: helper `_hardware_identity_block()` chiama `get_hardware_block()` a runtime (non nelle costanti module-level) e concatena il risultato al system prompt in **8 rami**: `_build_final_prompt` (is_raw + non-raw), concise, greeting, web (con `[WEB DATA]`), general senza web, e **meta** (fix 03/08 — prima quel ramo non iniettava system prompt e il modello inventava l'hardware)
+- `agent/prompt.py`: helper `_hardware_identity_block()` chiama `get_hardware_block()` a runtime (non nelle costanti module-level) e concatena il risultato al system prompt in **7 rami**: `_build_final_prompt` (is_raw + non-raw), concise, greeting, web (con `[WEB DATA]`), general senza web, e **meta** (fix 03/08 — prima quel ramo non iniettava system prompt e il modello inventava l'hardware)
 
 **Design note:** nessun import da `core.config`/`llama_cpp` → testabile standalone, zero rischio di import circolare.

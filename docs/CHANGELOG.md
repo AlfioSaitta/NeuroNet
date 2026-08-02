@@ -4,6 +4,16 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 
 ---
 
+### v9.13.0 (2026-08-03) — Test Suite Hardware Identity + Fix bug latente compressione
+
+- **`tests/test_hardware.py` (NUOVO, 33 test):** Suite completa per `core/hardware.py` — `_run` (strip stdout, stdout vuoto, eccezione, timeout, stderr ignorato), `_detect_gpu` (CSV nvidia-smi valido, vuoto→"non rilevata (CPU-only)", malformato→raw, flag di query), `_detect_cpu` (model+threads, model assente→"n/d", file illeggibile, 0 threads), `_detect_ram` (total+available in GiB, senza available, fallback sysconf, sysconf fallito→"n/d", total=0), `detect_hardware` (4 chiavi, cache, mai eccezioni, fallback parziale per-probe), `get_hardware_info` (lazy detection, cache senza re-detect), `get_hardware_block` (formato, vuoto quando gpu non rilevata AND hostname n/d, non-vuoto se una delle due presente, mai eccezioni su cache corrotta), integrazione ambiente reale (detect funzionante, blocco ben formato, solo stdlib via ispezione sorgente)
+- **`tests/test_prompt_hardware.py` (NUOVO, 18 test):** Iniezione blocco `[HARDWARE IDENTITY]` in TUTTI i rami di `build_omniscient_prompt()` — `_hardware_identity_block()` (cache popolata, errore interno→"", cache vuota), `_build_final_prompt` (is_raw, non-raw, tracer riceve system_prompt), concise (blocco + user content), greeting (blocco + rimozione datetime duplicato), general, web (con `[WEB DATA]`), meta (FIX `d2811fb00043`: system prompt + blocco, progetti nel user content, datetime duplicato rimosso) + **test strutturale**: conteggio call site = **7** (la doc dichiarava 8 → allineata)
+- **`tests/test_mcp_tools.py` (NUOVO, 18 test):** I 3 tool MCP riparati in `server_v2.py` — `jarvis_rag_search` (usa `search_documents`, formato markdown `{"query","results","count":1,"format":"markdown"}`, forward `is_project_query`/`project_name`, context vuoto→count 0, eccezione→payload errore), `jarvis_memory_search` (memory assente→vuoto, filtro user_id, risultato dict/list Mem0, eccezione→errore), `jarvis_web_search` (SearXNG diretto `{SEARXNG_HOST}/search` con `{"q","format":"json"}`, clamp risultati, HTTP≠200→vuoto, http_client assente→vuoto, eccezione→errore), `_json_text` (non-ASCII, default=str)
+- **Fix bug latente (`agent/prompt.py`):** Ramo concise usava `__import__('telemetry', fromlist=['LlmCallRecord'])` — modulo inesistente (il vero è `core.telemetry`), crash `ModuleNotFoundError` raggiungibile in produzione (`concise=True` da `main.py`/`openai_api/chat.py`). Ora `LlmCallRecord` importato da `core.telemetry` (riga 34) e usato direttamente
+- **Fix robustezza (`core/hardware.py`):** `get_hardware_block()` ora avvolge `get_hardware_info()` in try/except — mai eccezioni, coerenza col contratto "cache + mai eccezioni"
+- **Documentazione:** Corretto "8 rami" → **"7 rami**" (call site reali verificati dal test strutturale) in AGENTS.md, README.md, PIPELINE.md, COMPONENTS.md, CHANGELOG.md
+- **Test:** 69/69 PASS (hardware 33 + prompt 18 + MCP 18), `py_compile` OK sui file modificati
+
 ### v9.12.0 (2026-08-03) — Hardware Identity Block + Fix MCP tool imports
 
 - **`core/hardware.py` (NUOVO):** Rilevamento identità hardware del server via comandi di sistema, **solo stdlib** (testabile standalone, nessuna catena di import pesante):
@@ -19,7 +29,7 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
   - Hostname / GPU / CPU / RAM
   If the user asks about your hardware, models, or setup, answer using THESE real values above. Never invent, never deflect.
   ```
-  Iniettato in **8 rami** del system prompt: `_build_final_prompt` is_raw e non-raw, concise pipeline, greeting, web (con [WEB DATA]), general senza web, e **meta** (fix)
+  Iniettato in **7 rami** del system prompt: `_build_final_prompt` is_raw e non-raw, concise pipeline, greeting, web (con [WEB DATA]), general senza web, e **meta** (fix)
 - **Fix ramo meta (trace `d2811fb00043`):** "Che hardware hai?" veniva classificato come intent `meta` e quel ramo non iniettava alcun system prompt → il modello vedeva solo datetime + lista progetti e inventava ("Apple M2 Pro Mac"). Ora il ramo meta inietta `GENERAL_CONVERSATION_SYSTEM` + hardware block, come greeting/general/concise
 - **Fix MCP tool imports (`api/mcp/server_v2.py`):** 3 tool MCP con import rotti riparati:
   - `jarvis_rag_search` → `rag.engine.search_documents` (era `hybrid_search` inesistente)

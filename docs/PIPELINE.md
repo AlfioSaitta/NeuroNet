@@ -140,8 +140,8 @@ Di seguito il flusso completo che ogni messaggio utente attraversa, dal momento 
 │  <active_project> [project_name] </active_project>                          │
 │  <user>messaggio utente originale</user>                                     │
 │                                                                              │
-│  [HARDWARE IDENTITY] — blocco iniettato in 8 rami del system prompt          │
-│  (is_raw, non-raw, concise, greeting, web, general×2, meta)                  │
+│  [HARDWARE IDENTITY] — blocco iniettato in 7 rami del system prompt          │
+│  (is_raw, non-raw, concise, greeting, web, general, meta)                  │
 │  Dati reali da core/hardware.py (detect all'avvio via nvidia-smi,            │
 │  /proc/cpuinfo, /proc/meminfo, hostname). Il modello risponde con le         │
 │  specifiche reali invece di evadere/inventare (fix ramo meta 03/08).         │

@@ -31,7 +31,7 @@ try:
     from graph.synaptiq_engine import synaptiq_engine
 except ImportError:
     synaptiq_engine = None
-from core.telemetry import PipelineTracer, IntentStats
+from core.telemetry import PipelineTracer, IntentStats, LlmCallRecord
 from core.hardware import get_hardware_block
 import core.state as state
 
@@ -461,7 +461,7 @@ async def build_omniscient_prompt(messages, user_id=None, conversation_id="defau
         compressed = await _compress_concise(clean_msg)
         tracer.add_llm_call(
             compressed._as_llm_record("caveman_compression") if hasattr(compressed, '_as_llm_record') else
-            __import__('telemetry', fromlist=['LlmCallRecord']).LlmCallRecord(
+            LlmCallRecord(
                 model="gatekeeper", step="caveman_compression", duration_ms=0, temperature=0.0
             )
         )

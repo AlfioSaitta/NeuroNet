@@ -127,7 +127,11 @@ def get_hardware_info() -> dict[str, str]:
 
 def get_hardware_block() -> str:
     """Blocco formattato per il system prompt. '' se nessun dato utile."""
-    info = get_hardware_info()
+    try:
+        info = get_hardware_info()
+    except Exception as e:
+        logger.warning(f"get_hardware_block fallito (non critico): {e}")
+        return ""
     if not info or info.get("gpu") in (None, "non rilevata", "") and info.get("hostname") in (None, "n/d"):
         return ""
     return (
