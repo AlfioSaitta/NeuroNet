@@ -4,6 +4,20 @@ Tutte le modifiche significative a NeuroNet/Jarvis sono documentate in questo fi
 
 ---
 
+### v9.14.1 (2026-08-03) — Test workflow di sviluppo reale (flusso agentic)
+
+- **`tests/test_agentic_workflows.py` (NUOVO, 12 test):** Simulazioni realistiche del lavoro quotidiano con un client agentico (OpenCode & Co.) collegato via `/v1/chat/completions`:
+  - **Feature development multi-giro** (3 turni: read → edit → test → risposta finale): la history cumulativa che il client rimanda a ogni turno arriva INTATTA al modello (tool_calls assistant, role:"tool" con tool_call_id, name), mai `execute_tool_call` server-side
+  - **Tool failure**: l'errore del tool (es. "file not found") raggiunge il modello nel turno successivo — non scartato né interpretato
+  - **Tool calls paralleli**: risposta con più `<tool_call>` XML → tutti emessi al client (finish_reason="tool_calls"), risultati multipli tornano con i rispettivi tool_call_id
+  - **Conversazione lunga (5 turni)**: ruoli in ordine, tutti i tool_calls/tool_call_id preservati
+  - **Streaming frammentato**: arguments JSON sparsi su più chunk → ricostruiti integri per indice; round-trip tool → testo finale in streaming
+  - **Comportamento client**: `tool_choice` propagato alle options, errore motore → 500 JSON (non-stream) / chunk errore SSE (stream), tool aziendali custom nel blocco `[CLIENT_TOOLS]` (filtro `mcp__*`), content array nei risultati tool normalizzato
+  - **Isolamento**: conversazioni diverse non contaminano state né storie
+- **Robustezza isolamento:** re-import forzato di `openai_api.chat` con i mock del file + pop da `sys.modules` a fine import → i due file agentic (contract + workflows) passano in ENTRAMBI gli ordini (35/35)
+- **Test:** **104/104 PASS** in unica run pytest (`agentic_contract → agentic_workflows → hardware → prompt_hardware → mcp_tools`), py_compile OK
+- **Pushato su origin/main.**
+
 ### v9.14.0 (2026-08-03) — Fase 6: Compatibilità client agentici (OpenCode & Co.)
 
 - **`jarvis/openai_api/models.py`:** `OpenAIMessage` esteso — `content: str | List[Dict[str, Any]]` (content array), `tool_calls`, `tool_call_id`, `name` (opzionali, default `None`, nessun `extra='forbid'`). `ChatCompletionRequestOpenAI` esteso con `reasoning_effort` e `stream_options`. Nessun payload OpenAI più scartato (422) o validato troppo strettamente
